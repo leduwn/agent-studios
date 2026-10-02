@@ -4,6 +4,7 @@
 //! (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and standard
 //! OpenAI Chat Completions wire format (`POST /v1/chat/completions`).
 
+pub mod anthropic;
 pub mod error;
 pub mod request;
 pub mod stream;
@@ -41,5 +42,24 @@ impl ChatCompletionsAdapter {
     /// Decodes an SSE stream line into an optional `ChatCompletionChunk`.
     pub fn decode_sse_line(line: &str) -> Result<Option<ChatCompletionChunk>, ChatAdapterError> {
         decode_sse_line(line)
+    }
+}
+
+/// Unified adapter interface for Anthropic Messages protocol translation.
+pub struct AnthropicMessagesAdapter;
+
+impl AnthropicMessagesAdapter {
+    /// Translates a Codex `ResponsesApiRequest` into an `AnthropicMessagesRequest`.
+    pub fn translate_request(
+        request: &ResponsesApiRequest,
+        options: &anthropic::AnthropicRequestOptions,
+        continuation: Option<&anthropic::AnthropicContinuationState>,
+    ) -> Result<anthropic::AnthropicRequestTranslation, anthropic::AnthropicAdapterError> {
+        anthropic::translate_request(request, options, continuation)
+    }
+
+    /// Creates a fresh stateful stream translator for converting Anthropic SSE chunks to `ResponseEvent`s.
+    pub fn new_stream_translator() -> anthropic::AnthropicStreamTranslator {
+        anthropic::AnthropicStreamTranslator::new()
     }
 }
