@@ -75,11 +75,9 @@ fn test_multiturn_coding_agent_loop_with_thinking_and_tool_use() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions {
-        prompt_cache_policy: AnthropicPromptCachePolicy::ToolsAndSystem,
-        thinking_policy: AnthropicThinkingPolicy::BudgetTokens(2048),
-        ..Default::default()
-    };
+    let mut options = AnthropicRequestOptions::new(4096);
+    options.prompt_cache_policy = AnthropicPromptCachePolicy::ToolsAndSystem { ttl: None };
+    options.thinking_policy = AnthropicThinkingPolicy::LegacyBudgetTokens(2048);
 
     let trans1 = AnthropicMessagesAdapter::translate_request(&req1, &options, None)
         .expect("Turn 1 request translation failed");
@@ -363,7 +361,7 @@ fn test_parallel_tool_calls_roundtrip() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let trans = AnthropicMessagesAdapter::translate_request(&req, &options, None).unwrap();
 
     // 1 user msg, 1 assistant msg with 2 tool_uses, 1 user msg with 2 tool_results

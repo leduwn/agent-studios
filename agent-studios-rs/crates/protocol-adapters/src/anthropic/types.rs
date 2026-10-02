@@ -112,6 +112,8 @@ pub struct AnthropicTool {
     pub description: Option<String>,
     pub input_schema: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<AnthropicCacheControl>,
 }
 
@@ -132,6 +134,7 @@ pub enum AnthropicToolChoice {
         #[serde(skip_serializing_if = "Option::is_none")]
         disable_parallel_tool_use: Option<bool>,
     },
+    None,
 }
 
 /// Thinking configuration.
@@ -158,13 +161,22 @@ pub enum AnthropicOutputFormat {
     JsonSchema { schema: serde_json::Value },
 }
 
+/// Cache time-to-live setting for prompt caching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnthropicCacheTtl {
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
 /// Cache control configuration for prompt caching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicCacheControl {
     Ephemeral {
         #[serde(skip_serializing_if = "Option::is_none")]
-        ttl: Option<String>,
+        ttl: Option<AnthropicCacheTtl>,
     },
 }
 

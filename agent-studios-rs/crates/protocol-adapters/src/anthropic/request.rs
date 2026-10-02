@@ -1,17 +1,17 @@
 use codex_api::ResponsesApiRequest;
 use codex_protocol::models::{
-    ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, ImageReference,
-    ResponseItem, plaintext_agent_message_content,
+    ContentItem, FunctionCallOutputBody, ImageReference, ResponseItem,
+    plaintext_agent_message_content,
 };
 use codex_protocol::openai_models::ReasoningEffort;
 
 use super::continuation::{AnthropicContinuationState, NativeThinkingBlock};
 use super::error::{AnthropicAdapterError, AnthropicAdapterWarning};
 use super::types::{
-    AnthropicCacheControl, AnthropicContentBlock, AnthropicImageSource, AnthropicMessage,
-    AnthropicMessagesRequest, AnthropicOutputConfig, AnthropicOutputFormat, AnthropicSystemBlock,
-    AnthropicThinkingConfig, AnthropicTool, AnthropicToolChoice, AnthropicToolResultBlock,
-    AnthropicToolResultContent,
+    AnthropicCacheControl, AnthropicCacheTtl, AnthropicContentBlock, AnthropicImageSource,
+    AnthropicMessage, AnthropicMessagesRequest, AnthropicOutputConfig, AnthropicOutputFormat,
+    AnthropicSystemBlock, AnthropicThinkingConfig, AnthropicTool, AnthropicToolChoice,
+    AnthropicToolResultBlock, AnthropicToolResultContent,
 };
 
 /// Caching strategy for Anthropic prompt caching breakpoints.
@@ -19,18 +19,24 @@ use super::types::{
 pub enum AnthropicPromptCachePolicy {
     #[default]
     None,
-    LastUserMessage,
-    ToolsAndSystem,
-    AutomaticBreakpoint,
+    LastUserMessage {
+        ttl: Option<AnthropicCacheTtl>,
+    },
+    ToolsAndSystem {
+        ttl: Option<AnthropicCacheTtl>,
+    },
+    AutomaticBreakpoint {
+        ttl: Option<AnthropicCacheTtl>,
+    },
 }
 
 /// Thinking strategy for Anthropic native reasoning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AnthropicThinkingPolicy {
     #[default]
-    Disabled,
+    ProviderDefault,
     Adaptive,
-    BudgetTokens(u64),
+    LegacyBudgetTokens(u64),
 }
 
 /// Translation configuration options for Anthropic Messages requests.
@@ -48,12 +54,13 @@ pub struct AnthropicRequestOptions {
     pub validate_tool_names: bool,
 }
 
-impl Default for AnthropicRequestOptions {
-    fn default() -> Self {
+impl AnthropicRequestOptions {
+    /// Creates a new explicit options instance with mandatory max_tokens.
+    pub fn new(max_tokens: u64) -> Self {
         Self {
-            max_tokens: 4096,
+            max_tokens,
             prompt_cache_policy: AnthropicPromptCachePolicy::None,
-            thinking_policy: AnthropicThinkingPolicy::Disabled,
+            thinking_policy: AnthropicThinkingPolicy::ProviderDefault,
             effort_mapping: true,
             validate_tool_names: true,
         }
@@ -242,8 +249,16 @@ pub fn translate_request(
                 input,
                 ..
             } => {
-                let input_json: serde_json::Value = serde_json::from_str(input)
-                    .unwrap_or_else(|_| serde_json::Value::String(input.clone()));
+                let input_json: serde_json::Value = serde_json::from_str(input).map_err(|e| {
+                    AnthropicAdapterError::UnsupportedCustomToolInput(format!(
+                        "Custom tool call '{name}' input is not valid JSON: {e}"
+                    ))
+                })?;
+                if !input_json.is_object() {
+                    return Err(AnthropicAdapterError::UnsupportedCustomToolInput(format!(
+                        "Custom tool call '{name}' input must be a JSON object, found {input_json}"
+                    )));
+                }
                 let block = AnthropicContentBlock::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -263,81 +278,14 @@ pub fn translate_request(
                     )
                 })?;
 
-                let result_content = match &output.body {
-                    FunctionCallOutputBody::Text(text) => {
-                        AnthropicToolResultContent::Text(text.clone())
-                    }
-                    FunctionCallOutputBody::ContentItems(items) => {
-                        let mut tool_blocks = Vec::with_capacity(items.len());
-                        for item in items {
-                            match item {
-                                FunctionCallOutputContentItem::InputText { text } => {
-                                    tool_blocks.push(AnthropicToolResultBlock::Text {
-                                        text: text.clone(),
-                                    });
-                                }
-                                FunctionCallOutputContentItem::InputImage { image, .. } => {
-                                    match image {
-                                        ImageReference::Inline { image_url } => {
-                                            let (media_type, data) = parse_data_url(image_url)?;
-                                            tool_blocks.push(AnthropicToolResultBlock::Image {
-                                                source: AnthropicImageSource {
-                                                    r#type: "base64".to_string(),
-                                                    media_type,
-                                                    data,
-                                                },
-                                            });
-                                        }
-                                        ImageReference::File { file_id } => {
-                                            return Err(AnthropicAdapterError::UnsupportedContent(
-                                                format!(
-                                                    "File-based image references ({file_id}) not supported in tool output"
-                                                ),
-                                            ));
-                                        }
-                                    }
-                                }
-                                FunctionCallOutputContentItem::InputAudio { .. } => {
-                                    return Err(
-                                        AnthropicAdapterError::UnsupportedToolOutputContent(
-                                            "Audio is not supported in tool output".to_string(),
-                                        ),
-                                    );
-                                }
-                                FunctionCallOutputContentItem::EncryptedContent { .. } => {
-                                    return Err(AnthropicAdapterError::UnsupportedSecurityFeature(
-                                        "Encrypted tool output content is not supported"
-                                            .to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        AnthropicToolResultContent::Blocks(tool_blocks)
-                    }
-                };
-
-                let is_error = output.success.map(|s| !s);
-
-                let block = AnthropicContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: result_content,
-                    is_error,
-                    cache_control: None,
-                };
-
+                let block = convert_tool_output_payload(id, output)?;
                 append_or_push_message(&mut messages, "user", vec![block]);
             }
 
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
-                let block = AnthropicContentBlock::ToolResult {
-                    tool_use_id: call_id.clone(),
-                    content: AnthropicToolResultContent::Text(output.to_string()),
-                    is_error: None,
-                    cache_control: None,
-                };
-
+                let block = convert_tool_output_payload(call_id, output)?;
                 append_or_push_message(&mut messages, "user", vec![block]);
             }
 
@@ -436,7 +384,7 @@ pub fn translate_request(
                 )));
             }
 
-            let (name, description, parameters) =
+            let (name, description, parameters, strict) =
                 if let Some(function_obj) = tool_val.get("function") {
                     let name = function_obj
                         .get("name")
@@ -453,7 +401,11 @@ pub fn translate_request(
                     let parameters = function_obj.get("parameters").cloned().unwrap_or_else(
                         || serde_json::json!({ "type": "object", "properties": {} }),
                     );
-                    (name, description, parameters)
+                    let strict = function_obj
+                        .get("strict")
+                        .and_then(|v| v.as_bool())
+                        .or_else(|| tool_val.get("strict").and_then(|v| v.as_bool()));
+                    (name, description, parameters, strict)
                 } else {
                     let name = tool_val
                         .get("name")
@@ -470,7 +422,8 @@ pub fn translate_request(
                     let parameters = tool_val.get("parameters").cloned().unwrap_or_else(
                         || serde_json::json!({ "type": "object", "properties": {} }),
                     );
-                    (name, description, parameters)
+                    let strict = tool_val.get("strict").and_then(|v| v.as_bool());
+                    (name, description, parameters, strict)
                 };
 
             if name == "access_programs" {
@@ -489,6 +442,7 @@ pub fn translate_request(
                 name: name.to_string(),
                 description,
                 input_schema: parameters,
+                strict,
                 cache_control: None,
             });
         }
@@ -503,40 +457,30 @@ pub fn translate_request(
         "auto" => Some(AnthropicToolChoice::Auto {
             disable_parallel_tool_use: (!codex_req.parallel_tool_calls).then_some(true),
         }),
-        "none" => {
-            // Disabling tools in Anthropic is achieved by omitting tools
-            tools = None;
-            None
-        }
+        "none" => Some(AnthropicToolChoice::None),
         "required" => Some(AnthropicToolChoice::Any {
             disable_parallel_tool_use: (!codex_req.parallel_tool_calls).then_some(true),
         }),
-        specific_name => {
-            if let Some(_tool_list) = tools
-                .as_ref()
-                .filter(|list| !list.iter().any(|t| t.name == specific_name))
-            {
-                warnings.push(AnthropicAdapterWarning::ForcedToolChoiceUnverified(
-                    specific_name.to_string(),
-                ));
-            }
-            Some(AnthropicToolChoice::Tool {
-                name: specific_name.to_string(),
-                disable_parallel_tool_use: (!codex_req.parallel_tool_calls).then_some(true),
-            })
+        other => {
+            return Err(AnthropicAdapterError::UnsupportedToolChoice(
+                other.to_string(),
+            ));
         }
     };
 
     // 5. Thinking and Output Configuration
     let thinking = match options.thinking_policy {
-        AnthropicThinkingPolicy::Disabled => None,
+        AnthropicThinkingPolicy::ProviderDefault => None,
         AnthropicThinkingPolicy::Adaptive => Some(AnthropicThinkingConfig::Adaptive),
-        AnthropicThinkingPolicy::BudgetTokens(budget) if budget > 0 => {
+        AnthropicThinkingPolicy::LegacyBudgetTokens(budget) => {
+            if budget < 1024 {
+                return Err(AnthropicAdapterError::InvalidThinkingBudget(budget));
+            }
+            warnings.push(AnthropicAdapterWarning::LegacyThinkingBudgetUsed(budget));
             Some(AnthropicThinkingConfig::Enabled {
                 budget_tokens: budget,
             })
         }
-        AnthropicThinkingPolicy::BudgetTokens(_) => None,
     };
 
     let mut output_config = AnthropicOutputConfig::default();
@@ -607,6 +551,70 @@ pub fn translate_request(
     };
 
     Ok(AnthropicRequestTranslation { request, warnings })
+}
+
+/// Shared helper to losslessly convert a tool output payload into an Anthropic ToolResult content block.
+fn convert_tool_output_payload(
+    call_id: &str,
+    output: &codex_protocol::models::FunctionCallOutputPayload,
+) -> Result<AnthropicContentBlock, AnthropicAdapterError> {
+    let result_content = match &output.body {
+        FunctionCallOutputBody::Text(text) => AnthropicToolResultContent::Text(text.clone()),
+        FunctionCallOutputBody::ContentItems(items) => {
+            let mut tool_blocks = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    codex_protocol::models::FunctionCallOutputContentItem::InputText { text } => {
+                        tool_blocks.push(AnthropicToolResultBlock::Text { text: text.clone() });
+                    }
+                    codex_protocol::models::FunctionCallOutputContentItem::InputImage {
+                        image,
+                        ..
+                    } => match image {
+                        ImageReference::Inline { image_url } => {
+                            let (media_type, data) = parse_data_url(image_url)?;
+                            tool_blocks.push(AnthropicToolResultBlock::Image {
+                                source: AnthropicImageSource {
+                                    r#type: "base64".to_string(),
+                                    media_type,
+                                    data,
+                                },
+                            });
+                        }
+                        ImageReference::File { file_id } => {
+                            return Err(AnthropicAdapterError::UnsupportedContent(format!(
+                                "File-based image references ({file_id}) not supported in tool output"
+                            )));
+                        }
+                    },
+                    codex_protocol::models::FunctionCallOutputContentItem::InputAudio {
+                        ..
+                    } => {
+                        return Err(AnthropicAdapterError::UnsupportedToolOutputContent(
+                            "Audio is not supported in tool output".to_string(),
+                        ));
+                    }
+                    codex_protocol::models::FunctionCallOutputContentItem::EncryptedContent {
+                        ..
+                    } => {
+                        return Err(AnthropicAdapterError::UnsupportedSecurityFeature(
+                            "Encrypted tool output content is not supported".to_string(),
+                        ));
+                    }
+                }
+            }
+            AnthropicToolResultContent::Blocks(tool_blocks)
+        }
+    };
+
+    let is_error = output.success.map(|s| !s);
+
+    Ok(AnthropicContentBlock::ToolResult {
+        tool_use_id: call_id.to_string(),
+        content: result_content,
+        is_error,
+        cache_control: None,
+    })
 }
 
 /// Helper to coalesce consecutive items into messages of matching role.
@@ -686,39 +694,42 @@ fn apply_cache_policy(
 ) {
     match policy {
         AnthropicPromptCachePolicy::None => {}
-        AnthropicPromptCachePolicy::LastUserMessage => {
-            mark_last_user_message(messages);
+        AnthropicPromptCachePolicy::LastUserMessage { ttl } => {
+            mark_last_user_message(messages, ttl);
         }
-        AnthropicPromptCachePolicy::ToolsAndSystem => {
-            mark_last_system_block(system_blocks);
+        AnthropicPromptCachePolicy::ToolsAndSystem { ttl } => {
+            mark_last_system_block(system_blocks, ttl);
             if let Some(tool_list) = tools {
-                mark_last_tool(tool_list);
+                mark_last_tool(tool_list, ttl);
             }
         }
-        AnthropicPromptCachePolicy::AutomaticBreakpoint => {
-            mark_last_system_block(system_blocks);
+        AnthropicPromptCachePolicy::AutomaticBreakpoint { ttl } => {
+            mark_last_system_block(system_blocks, ttl);
             if let Some(tool_list) = tools {
-                mark_last_tool(tool_list);
+                mark_last_tool(tool_list, ttl);
             }
-            mark_last_user_message(messages);
+            mark_last_user_message(messages, ttl);
         }
     }
 }
 
-fn mark_last_system_block(system_blocks: &mut [AnthropicSystemBlock]) {
+fn mark_last_system_block(
+    system_blocks: &mut [AnthropicSystemBlock],
+    ttl: Option<AnthropicCacheTtl>,
+) {
     if let Some(last) = system_blocks.last_mut() {
         let AnthropicSystemBlock::Text { cache_control, .. } = last;
-        *cache_control = Some(AnthropicCacheControl::Ephemeral { ttl: None });
+        *cache_control = Some(AnthropicCacheControl::Ephemeral { ttl });
     }
 }
 
-fn mark_last_tool(tools: &mut [AnthropicTool]) {
+fn mark_last_tool(tools: &mut [AnthropicTool], ttl: Option<AnthropicCacheTtl>) {
     if let Some(last) = tools.last_mut() {
-        last.cache_control = Some(AnthropicCacheControl::Ephemeral { ttl: None });
+        last.cache_control = Some(AnthropicCacheControl::Ephemeral { ttl });
     }
 }
 
-fn mark_last_user_message(messages: &mut [AnthropicMessage]) {
+fn mark_last_user_message(messages: &mut [AnthropicMessage], ttl: Option<AnthropicCacheTtl>) {
     if let Some(last_user) = messages.iter_mut().rev().find(|m| m.role == "user")
         && let Some(last_block) = last_user.content.last_mut()
     {
@@ -727,7 +738,7 @@ fn mark_last_user_message(messages: &mut [AnthropicMessage]) {
             | AnthropicContentBlock::Image { cache_control, .. }
             | AnthropicContentBlock::ToolUse { cache_control, .. }
             | AnthropicContentBlock::ToolResult { cache_control, .. } => {
-                *cache_control = Some(AnthropicCacheControl::Ephemeral { ttl: None });
+                *cache_control = Some(AnthropicCacheControl::Ephemeral { ttl });
             }
             AnthropicContentBlock::Thinking { .. }
             | AnthropicContentBlock::RedactedThinking { .. } => {}

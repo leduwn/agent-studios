@@ -266,6 +266,16 @@ impl AnthropicStreamTranslator {
                     }
 
                     AnthropicStreamBlockStart::ToolUse { id, name } => {
+                        if id.is_empty() {
+                            return Err(AnthropicAdapterError::MissingStreamIdentity(
+                                "ToolUse block has empty id".to_string(),
+                            ));
+                        }
+                        if name.is_empty() {
+                            return Err(AnthropicAdapterError::MissingStreamIdentity(
+                                "ToolUse block has empty name".to_string(),
+                            ));
+                        }
                         let item_id = ResponseItemId::from_server(format!(
                             "anthropic-tool-{resp_id}-{index}"
                         ));
@@ -449,6 +459,19 @@ impl AnthropicStreamTranslator {
                         name,
                         arguments,
                     } => {
+                        // Validate that accumulated arguments string is a valid JSON object
+                        let parsed: serde_json::Value =
+                            serde_json::from_str(&arguments).map_err(|e| {
+                                AnthropicAdapterError::InvalidToolArguments(format!(
+                                    "Tool call '{name}' arguments are not valid JSON: {e}"
+                                ))
+                            })?;
+                        if !parsed.is_object() {
+                            return Err(AnthropicAdapterError::InvalidToolArguments(format!(
+                                "Tool call '{name}' arguments must be a JSON object, found {parsed}"
+                            )));
+                        }
+
                         events.push(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
                             id: Some(item_id),
                             name,
@@ -466,6 +489,11 @@ impl AnthropicStreamTranslator {
                         thinking,
                         signature,
                     } => {
+                        if signature.is_empty() {
+                            return Err(AnthropicAdapterError::MissingThinkingSignature(
+                                reasoning_id,
+                            ));
+                        }
                         self.continuation_state.insert_reasoning_block(
                             &reasoning_id,
                             NativeThinkingBlock::Thinking {
@@ -558,11 +586,27 @@ impl AnthropicStreamTranslator {
                 let resp_id = self.response_id.clone().unwrap();
                 self.continuation_state.message_id = Some(resp_id.clone());
 
-                let total = self.accumulated_input_tokens + self.accumulated_output_tokens;
+                let uncached = self.accumulated_input_tokens;
+                let cached = self.accumulated_cached_input_tokens;
+                let written = self.accumulated_cache_write_input_tokens;
+
+                let effective_input = uncached
+                    .checked_add(cached)
+                    .and_then(|t| t.checked_add(written))
+                    .ok_or_else(|| {
+                        AnthropicAdapterError::InvalidUsage("Input token overflow".to_string())
+                    })?;
+
+                let total = effective_input
+                    .checked_add(self.accumulated_output_tokens)
+                    .ok_or_else(|| {
+                        AnthropicAdapterError::InvalidUsage("Total token overflow".to_string())
+                    })?;
+
                 let token_usage = TokenUsage {
-                    input_tokens: self.accumulated_input_tokens,
-                    cached_input_tokens: self.accumulated_cached_input_tokens,
-                    cache_write_input_tokens: self.accumulated_cache_write_input_tokens,
+                    input_tokens: effective_input,
+                    cached_input_tokens: cached,
+                    cache_write_input_tokens: written,
                     output_tokens: self.accumulated_output_tokens,
                     reasoning_output_tokens: 0,
                     total_tokens: total,

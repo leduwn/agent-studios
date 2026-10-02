@@ -47,10 +47,7 @@ fn test_01_basic_request_translation() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions {
-        max_tokens: 2048,
-        ..Default::default()
-    };
+    let options = AnthropicRequestOptions::new(2048);
 
     let result = translate_request(&req, &options, None).expect("Translation failed");
     assert_eq!(result.request.model, "claude-3-5-sonnet-20241022");
@@ -68,10 +65,7 @@ fn test_01_basic_request_translation() {
 #[test]
 fn test_02_zero_max_tokens_rejected() {
     let req = make_base_request();
-    let options = AnthropicRequestOptions {
-        max_tokens: 0,
-        ..Default::default()
-    };
+    let options = AnthropicRequestOptions::new(0);
 
     let err = translate_request(&req, &options, None).unwrap_err();
     assert_eq!(err, AnthropicAdapterError::InvalidMaxTokens(0));
@@ -109,7 +103,7 @@ fn test_03_system_instructions_and_leading_system_messages() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let result = translate_request(&req, &options, None).expect("Translation failed");
 
     let system = result.request.system.expect("Expected system blocks");
@@ -159,7 +153,7 @@ fn test_04_interleaved_system_message_fails_closed() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let err = translate_request(&req, &options, None).unwrap_err();
     match err {
         AnthropicAdapterError::UnsupportedSystemHistoryPlacement(msg) => {
@@ -190,7 +184,7 @@ fn test_05_multimodal_image_translation() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let result = translate_request(&req, &options, None).expect("Translation failed");
 
     assert_eq!(result.request.messages.len(), 1);
@@ -221,7 +215,7 @@ fn test_06_unsupported_image_mime_rejected() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let err = translate_request(&req, &options, None).unwrap_err();
     assert_eq!(
         err,
@@ -255,7 +249,7 @@ fn test_07_grouped_parallel_tool_results() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let result = translate_request(&req, &options, None).expect("Translation failed");
 
     // Both consecutive tool results coalesced into 1 user message
@@ -308,7 +302,7 @@ fn test_08_function_call_invalid_json_arguments_rejected() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let err = translate_request(&req, &options, None).unwrap_err();
     match err {
         AnthropicAdapterError::InvalidToolArguments(_) => {}
@@ -326,10 +320,8 @@ fn test_09_tool_naming_validation() {
     .unwrap();
     req.tools = Some(ResponsesApiTools::from(Arc::from(raw)));
 
-    let options = AnthropicRequestOptions {
-        validate_tool_names: true,
-        ..Default::default()
-    };
+    let mut options = AnthropicRequestOptions::new(4096);
+    options.validate_tool_names = true;
 
     let err = translate_request(&req, &options, None).unwrap_err();
     match err {
@@ -350,7 +342,7 @@ fn test_10_security_rejection_of_access_programs() {
     .unwrap();
     req.tools = Some(ResponsesApiTools::from(Arc::from(raw)));
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let err = translate_request(&req, &options, None).unwrap_err();
     assert_eq!(
         err,
@@ -366,7 +358,7 @@ fn test_11_tool_choice_mappings() {
     let mut req1 = make_base_request();
     req1.tool_choice = "auto".to_string();
     req1.parallel_tool_calls = false;
-    let res1 = translate_request(&req1, &AnthropicRequestOptions::default(), None).unwrap();
+    let res1 = translate_request(&req1, &AnthropicRequestOptions::new(4096), None).unwrap();
     assert_eq!(
         res1.request.tool_choice,
         Some(AnthropicToolChoice::Auto {
@@ -383,14 +375,14 @@ fn test_11_tool_choice_mappings() {
     .unwrap();
     req2.tools = Some(ResponsesApiTools::from(Arc::from(raw)));
     req2.tool_choice = "none".to_string();
-    let res2 = translate_request(&req2, &AnthropicRequestOptions::default(), None).unwrap();
-    assert_eq!(res2.request.tools, None);
-    assert_eq!(res2.request.tool_choice, None);
+    let res2 = translate_request(&req2, &AnthropicRequestOptions::new(4096), None).unwrap();
+    assert!(res2.request.tools.is_some());
+    assert_eq!(res2.request.tool_choice, Some(AnthropicToolChoice::None));
 
     // 3. required
     let mut req3 = make_base_request();
     req3.tool_choice = "required".to_string();
-    let res3 = translate_request(&req3, &AnthropicRequestOptions::default(), None).unwrap();
+    let res3 = translate_request(&req3, &AnthropicRequestOptions::new(4096), None).unwrap();
     assert_eq!(
         res3.request.tool_choice,
         Some(AnthropicToolChoice::Any {
@@ -398,16 +390,13 @@ fn test_11_tool_choice_mappings() {
         })
     );
 
-    // 4. specific tool
+    // 4. specific tool (rejected under strict tool_choice rules)
     let mut req4 = make_base_request();
     req4.tool_choice = "custom_tool".to_string();
-    let res4 = translate_request(&req4, &AnthropicRequestOptions::default(), None).unwrap();
+    let err4 = translate_request(&req4, &AnthropicRequestOptions::new(4096), None).unwrap_err();
     assert_eq!(
-        res4.request.tool_choice,
-        Some(AnthropicToolChoice::Tool {
-            name: "custom_tool".to_string(),
-            disable_parallel_tool_use: None,
-        })
+        err4,
+        AnthropicAdapterError::UnsupportedToolChoice("custom_tool".to_string())
     );
 }
 
@@ -429,7 +418,7 @@ fn test_12_reasoning_effort_mapping() {
             context: None,
         });
 
-        let res = translate_request(&req, &AnthropicRequestOptions::default(), None).unwrap();
+        let res = translate_request(&req, &AnthropicRequestOptions::new(4096), None).unwrap();
         assert_eq!(
             res.request
                 .output_config
@@ -448,7 +437,7 @@ fn test_12_reasoning_effort_mapping() {
     });
 
     let err =
-        translate_request(&req_unsupported, &AnthropicRequestOptions::default(), None).unwrap_err();
+        translate_request(&req_unsupported, &AnthropicRequestOptions::new(4096), None).unwrap_err();
     match err {
         AnthropicAdapterError::UnsupportedReasoningEffort(_) => {}
         other => panic!("Expected UnsupportedReasoningEffort, found {other:?}"),
@@ -466,7 +455,7 @@ fn test_13_structured_outputs_format_mapping() {
     });
     req.text = create_text_param_for_request(None, &Some(schema), true);
 
-    let res = translate_request(&req, &AnthropicRequestOptions::default(), None).unwrap();
+    let res = translate_request(&req, &AnthropicRequestOptions::new(4096), None).unwrap();
     let format = res
         .request
         .output_config
@@ -498,11 +487,9 @@ fn test_14_caching_and_thinking_policies() {
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let options = AnthropicRequestOptions {
-        prompt_cache_policy: AnthropicPromptCachePolicy::AutomaticBreakpoint,
-        thinking_policy: AnthropicThinkingPolicy::BudgetTokens(2048),
-        ..Default::default()
-    };
+    let mut options = AnthropicRequestOptions::new(4096);
+    options.prompt_cache_policy = AnthropicPromptCachePolicy::AutomaticBreakpoint { ttl: None };
+    options.thinking_policy = AnthropicThinkingPolicy::LegacyBudgetTokens(2048);
 
     let res = translate_request(&req, &options, None).unwrap();
 
@@ -562,7 +549,7 @@ fn test_15_continuation_state_and_cross_provider_reasoning() {
         },
     );
 
-    let options = AnthropicRequestOptions::default();
+    let options = AnthropicRequestOptions::new(4096);
     let res = translate_request(&req, &options, Some(&cont)).unwrap();
 
     assert_eq!(res.request.messages.len(), 1);

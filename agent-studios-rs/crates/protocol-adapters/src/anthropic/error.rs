@@ -58,6 +58,18 @@ pub enum AnthropicAdapterError {
     #[error("Missing native continuation state for Anthropic-origin reasoning item: {0}")]
     MissingContinuationState(String),
 
+    #[error("Missing cryptographic signature for thinking block: {0}")]
+    MissingThinkingSignature(String),
+
+    #[error("Missing critical stream block identity (id or name is empty): {0}")]
+    MissingStreamIdentity(String),
+
+    #[error("Invalid thinking budget: {0} (minimum required: 1024)")]
+    InvalidThinkingBudget(u64),
+
+    #[error("Unsupported custom tool input: {0} (must be valid JSON object)")]
+    UnsupportedCustomToolInput(String),
+
     #[error("Invalid function call arguments JSON: {0}")]
     InvalidToolArguments(String),
 
@@ -132,4 +144,5 @@ pub enum AnthropicAdapterWarning {
     DroppedFormatMetadata(String),
     ForcedToolChoiceUnverified(String),
     CrossProviderReasoningOmitted(String),
+    LegacyThinkingBudgetUsed(u64),
 }

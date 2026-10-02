@@ -62,9 +62,9 @@ fn test_01_complete_text_stream_happy_path() {
     assert_eq!(completed.0, "msg_123");
     assert_eq!(*completed.2, Some(true));
     let usage = completed.1.as_ref().expect("Expected token usage");
-    assert_eq!(usage.input_tokens, 25);
+    assert_eq!(usage.input_tokens, 35);
     assert_eq!(usage.output_tokens, 5);
-    assert_eq!(usage.total_tokens, 30);
+    assert_eq!(usage.total_tokens, 40);
     assert_eq!(usage.cached_input_tokens, 10);
 }
 
@@ -82,7 +82,7 @@ fn test_02_stop_reason_turn_continuation_mapping() {
 
     // 2. tool_use -> end_turn: Some(false)
     let mut tr2 = AnthropicStreamTranslator::new();
-    let sse2 = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_abc\",\"name\":\"bash\",\"input\":{}}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let sse2 = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_abc\",\"name\":\"bash\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let events2 = tr2.feed_sse_chunk(sse2).unwrap();
     assert!(events2.iter().any(|e| match e {
         ResponseEvent::OutputItemAdded(ResponseItem::FunctionCall { call_id, name, .. }) => {
