@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/protocol",
     "crates/control-plane",
+    "crates/provider",
 ]
 
 [workspace.package]
@@ -18,3 +19,4 @@ serde_json = "1.0"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
+url = { version = "2.5", features = ["serde"] }
