@@ -67,9 +67,36 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Usage validation & deterministic lifecycle: rejects negative token values (`InvalidUsage`), rejects text resumption after tool call execution (`InvalidStreamState`), and enforces exactly-once item lifecycle.
 - Full regression suite: 30 new hardening tests in `correctness_hardening_tests.rs` (47 total tests in crate), zero clippy warnings, zero modifications to `codex-rs/`.
 
-### M06: Anthropic Messages Protocol Adapter
-- Implement Anthropic Messages protocol translation adapter.
-- Provide token caching markers, thinking parameter mapping, and tool call serialization.
+### M06: Anthropic Messages Protocol Adapter (Completed on `feat/anthropic-messages-adapter`)
+
+- Implement `agent-studios-protocol-adapters::anthropic` module providing pure protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and Anthropic Messages wire protocol (`POST /v1/messages` and SSE stream events).
+- Zero network transport (`reqwest`, hyper, Tokio runtime, Anthropic SDKs omitted; pure in-memory transformation).
+- Zero secret handling (no API key, header, or credential resolution).
+- Zero provider brand branching (translates against canonical Anthropic Messages wire specification).
+- Pure Codex isolation (`codex-rs/` remains unmodified; zero diff with `origin/main`).
+- Request translation (`translate_request`):
+  - Top-level `system` block extraction: leading developer/system messages converted to system text blocks; interleaved system messages after conversational turns rejected fail-closed with `UnsupportedSystemHistoryPlacement`.
+  - Non-zero `max_tokens` validation (`max_tokens == 0` fails with `InvalidMaxTokens(0)`).
+  - Multimodal inputs: inline base64 image data URLs parsed into `AnthropicContentBlock::Image` with MIME validation (`image/jpeg`, `image/png`, `image/gif`, `image/webp`); unsupported MIME types reject with `UnsupportedImageMime`.
+  - Tool calls & results: function calls mapped to `tool_use` blocks; consecutive tool execution outputs coalesced into a single user message containing multiple `tool_result` blocks with `is_error` status mapping.
+  - Tool naming validation against Anthropic regex `^[a-zA-Z0-9_-]{1,64}$`.
+  - Tool choice mapping: `"auto"`, `"none"`, `"required"` (`"any"`), and named tool choice; propagates `disable_parallel_tool_use`; emits `ForcedToolChoiceUnverified` warning if target tool is missing.
+  - Structured outputs: maps Codex `TextControls.format` (`json_schema`) into `output_config.format`.
+  - Reasoning effort mapping: exact semantic mapping for `Low`, `Medium`, `High`, `XHigh`, `Max`; fail-closed on `None`, `Minimal`, `Ultra`, `Persistent`, `Custom` with `UnsupportedReasoningEffort`.
+  - Prompt cache injection policies: `None`, `LastUserMessage`, `ToolsAndSystem`, `AutomaticBreakpoint`.
+  - Thinking policies: `Disabled`, `Adaptive`, `BudgetTokens`.
+  - Continuation state & cryptographic signatures: restores native thinking blocks and cryptographic signatures (`anthropic-reasoning-{message_id}-{block_index}`) from `AnthropicContinuationState` for multi-turn loops. Rejects missing state with `MissingContinuationState`; emits `CrossProviderReasoningOmitted` for foreign reasoning IDs.
+  - Security fail-closed: security-sensitive `access_programs` rejected with `UnsupportedSecurityFeature`.
+  - Typed warning model for dropped Responses-only parameters (`store`, `service_tier`, `include`, `client_metadata`, `stream_options`, `prompt_cache_key`).
+- Streaming translation (`AnthropicStreamTranslator`):
+  - Lifecycle state machine: `Initial` -> `Started` -> `ActiveContentBlock` -> `OutputItemDone` -> `Completed`.
+  - Event decoding: `message_start` -> `Created`, `ServerModel`; `content_block_start` -> `OutputItemAdded`; `content_block_delta` -> `OutputTextDelta`, `ToolCallInputDelta`, `ReasoningContentDelta`; `content_block_stop` -> `OutputItemDone`; `message_delta` -> token accumulation & stop reason; `message_stop` -> `Completed`.
+  - Turn continuation: `stop_reason == "tool_use"` maps to `end_turn: Some(false)` to trigger Codex agent tool execution loops; `stop_reason == "end_turn" | "stop_sequence"` maps to `end_turn: Some(true)`.
+  - Fail-closed truncation and limits: `max_tokens` (`MaxTokensExceeded`), `model_context_window_exceeded` (`ContextWindowExceeded`), `refusal` (`ModelRefusal`), `pause_turn` (`TurnPaused`).
+  - Native thinking block and signature capture into `AnthropicContinuationState`.
+  - Robust SSE line and chunk buffering supporting SSE event frames and raw JSON lines.
+  - Negative token delta validation and open block rejection on stream termination.
+- Test verification: 27 new tests across 3 test suites (`anthropic_request_tests.rs`, `anthropic_stream_tests.rs`, `anthropic_roundtrip_tests.rs`); 74 total passing tests across `agent-studios-protocol-adapters`.
 
 ### M07: Google Gemini Protocol Adapter
 - Implement Google Gemini `generateContent` adapter.
@@ -95,21 +122,30 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Implement runtime adapter wrapping Claude Code CLI.
 - Handle session resumption, approval delegation, and output streaming.
 
-### M13: Desktop Shell
-- Scaffold Windows desktop application container (Windows x64).
-- Integrate native IPC channel with the Agent Studios control plane backend.
+### M13: Code-OSS Integration Foundation
+- Maintained Code-OSS source snapshot/fork targeting Windows x64 first.
+- Independent Agent Studios branding and layout configuration.
+- Built-in extension loading mechanism and native Agent Studios runtime IPC.
+- Preserve normal IDE behavior (Explorer, search, source control, terminal, debugger, LSP).
+- Initiate custom iconography and visual identity pass (icon design deferred until M13).
 
-### M14: Agent Mode UX
-- Implement high-level conversational interface.
-- Provide task timeline, tool execution inspect panels, interactive approvals, and diff visualizer.
+### M14: Agent Studios Built-in AI Extension
+- Default Agent Studios chat interface replacing the AI surface normally occupied by Copilot.
+- Direct routing to Agent Studios / Codex runtime (no `@agentstudios` prefix required, no Copilot dependency).
+- Full operational parity: inspect/edit files, `apply_patch`, integrated terminal commands, test/build execution.
+- Interactive approvals, diffs, provider/model controls, and task queue visibility.
 
-### M15: IDE Mode UX
-- Integrate Monaco Editor and file tree project navigation.
-- Embed xterm.js terminal emulator, git diff panes, and side-by-side agent collaborator panels.
+### M15: Unified Agent / IDE Workbench
+- Dual layout system: IDE-focused layout and Agent-focused layout.
+- One shared underlying runtime session (identical session ID, working directory, tool history, worktrees, active tasks).
+- Instant switching between layouts without state loss or process interruption.
+- Equal Codex capabilities available in both views.
 
-### M16: Skills, MCP & Plugins UX
-- Build management UI for discovering, configuring, and toggling `AGENTS.md`, `SKILL.md`, and MCP servers.
-- Provide secure credential input targeting Windows Credential Manager.
+### M16: Full Codex Feature Surface
+- Comprehensive Codex capability integration: Skills (`SKILL.md`), Plugins, MCP servers, hooks, `AGENTS.md`.
+- Advanced multi-agent orchestration: Git worktrees, subagents, multi-agent primitives, budget caps.
+- Fine-grained approval and sandboxing controls.
+- Integrated diagnostics, session replay, and runtime telemetry.
 
 ### M17: Packaging, Installer & Auto-Updater
 - Configure Windows native installers (MSI / NSIS / WiX).

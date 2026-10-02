@@ -29,19 +29,40 @@ Core capabilities:
 - **Agent Activity**: Subagent status, communication traces, and resource consumption.
 - **Artifacts**: Management of created files, plans, summaries, and test logs.
 
-### 2.2. IDE Mode
+### 2.2. IDE Mode (Code-OSS Foundation)
 A comprehensive code editor workspace for full-scale software development, inspection, and direct authoring alongside AI assistance.
 
-Core capabilities:
-- **Project Explorer**: Workspace file tree with git status decorators and worktree indicators.
-- **Code Editor**: High-performance multi-file editor powered by Monaco Editor.
-- **Tabs & Split Panes**: Multi-document editing and preview workflows.
-- **Search**: Workspace-wide regex, symbol, and fuzzy file search.
-- **Integrated Terminal**: Native PTY terminal integration powered by xterm.js (or equivalent abstraction).
-- **Git Diff**: Side-by-side and inline diff visualization.
-- **Agent Panel**: Dockable AI collaboration pane for prompts, delegating tasks, and streaming answers.
-- **Task Panel**: Background task queues, running workers, and step-by-step progress.
-- **Problems / Output**: Diagnostics, linter findings, compiler errors, and engine runtime logs.
+Rather than implementing a custom, fragile Tauri + Monaco recreation of VS Code, the desktop IDE foundation is built on **Code-OSS**. This guarantees production-grade VS Code-class stability across:
+- Editor, Explorer, Search, Source Control
+- Integrated terminal, Debugging, Problems, Output
+- Keybindings, Themes, Extensions, Language services (LSP)
+- Tabs, Editor groups, Command Palette, and Workspace behavior
+
+### 2.3. Unified Runtime & Session Model
+IDE Mode and Agent Mode are two views of the **same underlying runtime session**:
+
+```text
+IDE Mode ───┐
+            ├── Agent Studios Session (Shared State)
+Agent Mode ─┘
+                     |
+                     v
+             Codex Runtime Core
+```
+
+- **Shared State**: Both modes share the same session ID, working directory, tool execution history, interactive approvals, tasks, subagents, provider/model configuration, and Git worktree states.
+- **Switching Layouts Without State Loss**: Users can switch between IDE layout and Agent-focused layout at any time without resetting context or aborting active agent tasks.
+- **Default AI Surface**: The built-in AI extension replaces the surface GitHub Copilot would normally occupy. Users do NOT need to type `@agentstudios` for normal usage; chat and composer route directly to the Agent Studios Codex runtime.
+- **Parity of Operations**: IDE Chat is not a reduced question-answer bot; it possesses full Agent Mode capabilities (inspect/edit files, `apply_patch`, execute commands in terminal, run tests/builds, handle approvals, inspect diffs, trigger MCP tools/Skills/Plugins/hooks, manage subagents/worktrees, and interrupt/resume execution).
+
+### 2.4. Visual Direction & Branding Boundaries
+- **Monochrome Palette**: Default visual styling emphasizes high-contrast monochrome (white / black / neutral grays) without gratuitous gradient-heavy "AI branding".
+- **Workbench Familiarity**: Preserves standard Code-OSS / VS Code layout, hierarchy, and icon familiarity (standard Codicons remain intact for editor/file explorer/debugger).
+- **Branding Isolation**:
+  - Only Agent Studios-specific panels and surfaces receive custom iconography.
+  - Zero proprietary Codex desktop branding or visual assets.
+  - Zero GitHub Copilot logos or Microsoft Visual Studio Code trademark assets.
+  - Icon design is intentionally deferred to Milestone M13 (no icons designed during protocol adapter milestones).
 
 ---
 
