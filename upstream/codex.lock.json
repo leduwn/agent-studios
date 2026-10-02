@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/openai/codex.git",
+  "commit": "d25c114d494ddb693290b76bf5e5f64ecbdb38fc",
+  "baseline_date": "2026-10-02",
+  "strategy": "snapshot",
+  "product": "Agent Studios"
+}
