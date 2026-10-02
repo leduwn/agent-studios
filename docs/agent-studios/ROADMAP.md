@@ -19,7 +19,8 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Hierarchical cancellation propagation and pre-execution dependency readiness checks.
 - Eliminated all mutable store/state escape hatches (`store_mut` removed).
 
-### M03: Provider Core & Model Registry (Completed on `feat/provider-core`)
+### M03: Provider Core & Model Registry (Completed on `main`)
+
 - Establish `agent-studios-provider` crate.
 - Decouple `ProviderDefinition` (vendor/gateway metadata) from `ProviderInstance` (concrete configured endpoint + credentials).
 - Establish wire protocol decoupling via `ProtocolFamily` (`OpenAiResponses`, `OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`, `Custom`).
@@ -31,11 +32,17 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Implement exportable `ProviderCatalogSnapshot` with atomic, staged import validation.
 - *(Note: Provider Core models metadata and configuration only; network requests and LLM drivers arrive in subsequent milestones.)*
 
-### M04: Codex Runtime ↔ Provider Core Bridge / OpenAI Responses Integration (Next Milestone)
-- Integrate Codex upstream Responses API client with the provider registry.
-- Bridge `ModelRef` and `ProviderInstance` into Codex runtime client options.
-- Resolve secrets via `SecretReference` at runtime without exposing credentials in configuration.
-- Support configurable custom endpoint base URLs (enabling 9Router, local proxies, and third-party gateways).
+### M04: Codex Runtime ↔ Provider Core Bridge / OpenAI Responses Compatibility (Completed on `feat/codex-provider-bridge`)
+
+- Establish `agent-studios-codex-bridge` crate connecting `ProviderCatalog` and `ModelRef` to Codex `ModelProviderInfo`.
+- Strictly decouple bridge from Codex runtime modifications (`codex-rs/` untouched, zero diff against `main`).
+- Generate ephemeral `CodexResponsesBinding` runtime product (never stored in persistent configuration).
+- Enforce protocol gating on `ProtocolFamily::OpenAiResponses` (Codex runtime natively only supports Responses API; rejects other wire APIs with typed errors).
+- Zero-plaintext credential resolution: maps environment variable references to `env_key` or `env_http_headers` without reading process environment values.
+- Guard against unsupported secret backends (`OsCredentialStore`, `External`) and query parameter authentication.
+- Model capability safety: explicit `Unsupported` for `tool_calling` or `streaming` fails; `Unknown` capabilities tracked in `CodexCompatibilityReport.unverified_capabilities`.
+- Deterministic instance keying (`agent-studios-<provider-instance-uuid>`), enabling multi-instance coexistence (e.g. 9Router Local vs 9Router VPS with identical model IDs).
+- Deterministic model catalog URL resolution and strict static header sanitization.
 
 ### M05: Chat Completions Protocol Adapter
 - Implement OpenAI Chat Completions protocol translation adapter.
