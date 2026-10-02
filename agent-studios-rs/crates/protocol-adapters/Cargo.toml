@@ -1,0 +1,17 @@
+[package]
+name = "agent-studios-protocol-adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+codex-api = { path = "../../../codex-rs/codex-api" }
+codex-protocol = { path = "../../../codex-rs/protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]

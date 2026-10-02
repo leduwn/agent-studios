@@ -32,7 +32,7 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Implement exportable `ProviderCatalogSnapshot` with atomic, staged import validation.
 - *(Note: Provider Core models metadata and configuration only; network requests and LLM drivers arrive in subsequent milestones.)*
 
-### M04: Codex Runtime ↔ Provider Core Bridge / OpenAI Responses Compatibility (Completed on `feat/codex-provider-bridge`)
+### M04: Codex Runtime ↔ Provider Core Bridge / OpenAI Responses Compatibility (Completed on `main`)
 
 - Establish `agent-studios-codex-bridge` crate connecting `ProviderCatalog` and `ModelRef` to Codex `ModelProviderInfo`.
 - Strictly decouple bridge from Codex runtime modifications (`codex-rs/` untouched, zero diff against `main`).
@@ -44,9 +44,16 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Deterministic instance keying (`agent-studios-<provider-instance-uuid>`), enabling multi-instance coexistence (e.g. 9Router Local vs 9Router VPS with identical model IDs).
 - Deterministic model catalog URL resolution and strict static header sanitization.
 
-### M05: Chat Completions Protocol Adapter
-- Implement OpenAI Chat Completions protocol translation adapter.
-- Map streaming chunks, tool call formats, and system instructions between internal abstractions and standard `/v1/chat/completions`.
+### M05: Chat Completions Protocol Adapter (Completed on `feat/chat-completions-adapter`)
+
+- Establish `agent-studios-protocol-adapters` crate (`agent-studios-protocol-adapters`).
+- Implement pure protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and standard OpenAI Chat Completions wire protocol (`POST /v1/chat/completions`).
+- Zero network transport (`reqwest` and async Tokio runtime omitted; pure synchronous data transformation).
+- Zero secrets handling (no credential resolution or API key consumption).
+- Zero provider brand branching (translates against canonical OpenAI Chat wire protocol).
+- Request translation: model ID preservation, instructions mapped to leading system message, developer role normalized to system role, message history preservation, multimodal inline data URLs, function calls mapped to `tool_calls`, tool outputs mapped to `role = "tool"` with mandatory `tool_call_id`, tool definition schema conversion (flat Responses format converted to nested function format), structured output `response_format` (`json_schema`), typed warning model for dropped Responses-only fields, and strict security rejection of `access_programs`.
+- Streaming translation (`ChatCompletionStreamTranslator`): deterministic event emission (`Created`, `OutputItemAdded`, `OutputTextDelta`, `ToolCallInputDelta`, `OutputItemDone`, `Completed`), fragmented/interleaved tool call reconstruction across parallel tool indices, finish reason validation (`stop`, `tool_calls`, rejecting `length` and `content_filter`), single choice constraint (`choice.index == 0`), token usage mapping, and SSE line decoding.
+- Full verification: 17 unit and integration tests across 3 test suites, zero clippy warnings with `-D warnings`, zero modifications to upstream `codex-rs/`.
 
 ### M06: Anthropic Messages Protocol Adapter
 - Implement Anthropic Messages protocol translation adapter.
