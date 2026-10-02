@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 
@@ -7,14 +9,14 @@ use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::error::{ControlPlaneError, ReplayError, StoreError};
 use agent_studios_control_plane::store::{EventStore, InMemoryStore};
 use agent_studios_protocol::agent::{AgentDescriptor, AgentKind};
-use agent_studios_protocol::approval::{ApprovalKind, ApprovalState};
+use agent_studios_protocol::approval::{ApprovalKind, ApprovalRequest, ApprovalState};
 use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::cancellation::CancellationScope;
 use agent_studios_protocol::error::TransitionError;
 use agent_studios_protocol::event::{
     CONTROL_PLANE_EVENT_SCHEMA_VERSION, ControlPlaneEvent, EventEnvelope,
 };
-use agent_studios_protocol::id::{AgentId, ApprovalId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{AgentId, ApprovalId, ArtifactId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{TaskRecord, TaskState};
@@ -26,23 +28,25 @@ use agent_studios_protocol::task::{TaskRecord, TaskState};
 #[derive(Clone, Debug, Default)]
 struct FailingEventStore {
     inner: InMemoryStore,
-    fail_next: bool,
+    fail_next: Arc<AtomicBool>,
 }
 
 impl FailingEventStore {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn set_fail_next(&mut self, fail: bool) {
-        self.fail_next = fail;
+    fn new() -> (Self, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                inner: InMemoryStore::new(),
+                fail_next: Arc::clone(&flag),
+            },
+            flag,
+        )
     }
 }
 
 impl EventStore for FailingEventStore {
     fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
-        if self.fail_next {
-            self.fail_next = false;
+        if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(StoreError::StorageFailure("Injected store failure".into()));
         }
         self.inner.append_batch(events)
@@ -388,7 +392,7 @@ fn test_task_dependency_mutation_pre_execution_readiness() {
 fn test_failure_injection_zero_mutation_rollback() {
     let now = Utc::now();
     let clock = FixedClock::new(now);
-    let store = FailingEventStore::new();
+    let (store, fail_trigger) = FailingEventStore::new();
     let mut cp = ControlPlane::new(clock, store);
 
     let studio = cp.create_studio("Fault Studio").unwrap();
@@ -407,7 +411,7 @@ fn test_failure_injection_zero_mutation_rollback() {
     let state_before = cp.state().clone();
     let events_before = cp.all_events().unwrap();
 
-    cp.store_mut().set_fail_next(true);
+    fail_trigger.store(true, Ordering::SeqCst);
     let err = cp
         .transition_task_state(task.id, TaskState::Running)
         .unwrap_err();
@@ -421,7 +425,7 @@ fn test_failure_injection_zero_mutation_rollback() {
     let state_before_dep = cp.state().clone();
     let events_before_dep = cp.all_events().unwrap();
 
-    cp.store_mut().set_fail_next(true);
+    fail_trigger.store(true, Ordering::SeqCst);
     let err_dep = cp.add_task_dependency(task.id, task_dep.id).unwrap_err();
     assert!(matches!(err_dep, ControlPlaneError::Store(_)));
 
@@ -432,7 +436,7 @@ fn test_failure_injection_zero_mutation_rollback() {
     let state_before_cancel = cp.state().clone();
     let events_before_cancel = cp.all_events().unwrap();
 
-    cp.store_mut().set_fail_next(true);
+    fail_trigger.store(true, Ordering::SeqCst);
     let err_cancel = cp
         .request_cancellation(
             CancellationScope::Task {
@@ -1081,4 +1085,197 @@ fn test_replay_corrupted_19_unsupported_schema_version() {
             supported: CONTROL_PLANE_EVENT_SCHEMA_VERSION
         })
     ));
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_task() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let mut dup_task = TaskRecord::new(sid, "Duplicate Task", "", None, Some(aid), vec![], now);
+    dup_task.id = tid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::TaskCreated { task: dup_task },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::DuplicateTask { task_id }) if task_id == tid));
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_run() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let rid = RunId::new();
+    let mut run1 = RunRecord::new(tid, aid, 1);
+    run1.id = rid;
+    let mut run2 = RunRecord::new(tid, aid, 2);
+    run2.id = rid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::RunCreated { run: run1 },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::RunCreated { run: run2 },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::DuplicateRun { run_id }) if run_id == rid));
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_approval() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let app_id = ApprovalId::new();
+    let mut app1 = ApprovalRequest::new(sid, tid, aid, ApprovalKind::FileWrite, "App 1", now);
+    app1.id = app_id;
+    let mut app2 =
+        ApprovalRequest::new(sid, tid, aid, ApprovalKind::CommandExecution, "App 2", now);
+    app2.id = app_id;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::ApprovalRequested { approval: app1 },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::ApprovalRequested { approval: app2 },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(
+        matches!(res, Err(ReplayError::DuplicateApproval { approval_id }) if approval_id == app_id)
+    );
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_artifact() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let art_id = ArtifactId::new();
+    let mut art1 = ArtifactRecord::new(
+        sid,
+        tid,
+        aid,
+        ArtifactKind::Log,
+        "log1.txt",
+        None,
+        "logs/1",
+        now,
+    );
+    art1.id = art_id;
+    let mut art2 = ArtifactRecord::new(
+        sid,
+        tid,
+        aid,
+        ArtifactKind::Log,
+        "log2.txt",
+        None,
+        "logs/2",
+        now,
+    );
+    art2.id = art_id;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::ArtifactRegistered { artifact: art1 },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::ArtifactRegistered { artifact: art2 },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(
+        matches!(res, Err(ReplayError::DuplicateArtifact { artifact_id }) if artifact_id == art_id)
+    );
+}
+
+#[test]
+fn test_cross_studio_remove_task_dependency_rejected() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let s1 = cp.create_studio("S1").unwrap();
+    let s2 = cp.create_studio("S2").unwrap();
+
+    let t1 = cp.create_task(s1.id, "T1", "", None, None, vec![]).unwrap();
+    let t2 = cp.create_task(s2.id, "T2", "", None, None, vec![]).unwrap();
+
+    let err = cp.remove_task_dependency(t1.id, t2.id).unwrap_err();
+    assert!(matches!(
+        err,
+        ControlPlaneError::StudioMismatch { expected, actual } if expected == s1.id && actual == s2.id
+    ));
+}
+
+#[test]
+fn test_replay_corrupted_cross_studio_dependency_removed() {
+    let now = Utc::now();
+    let s1 = StudioId::new();
+    let s2 = StudioId::new();
+
+    let mut t1 = TaskRecord::new(s1, "T1", "", None, None, vec![], now);
+    t1.id = TaskId::new();
+    let mut t2 = TaskRecord::new(s2, "T2", "", None, None, vec![], now);
+    t2.id = TaskId::new();
+
+    let events = vec![
+        EventEnvelope::new(
+            s1,
+            1,
+            now,
+            ControlPlaneEvent::StudioCreated {
+                studio: Studio::with_id(s1, "S1", now),
+            },
+        ),
+        EventEnvelope::new(
+            s2,
+            1,
+            now,
+            ControlPlaneEvent::StudioCreated {
+                studio: Studio::with_id(s2, "S2", now),
+            },
+        ),
+        EventEnvelope::new(
+            s1,
+            2,
+            now,
+            ControlPlaneEvent::TaskCreated { task: t1.clone() },
+        ),
+        EventEnvelope::new(
+            s2,
+            2,
+            now,
+            ControlPlaneEvent::TaskCreated { task: t2.clone() },
+        ),
+        EventEnvelope::new(
+            s1,
+            3,
+            now,
+            ControlPlaneEvent::TaskDependencyRemoved {
+                task_id: t1.id,
+                dependency_id: t2.id,
+            },
+        ),
+    ];
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::StudioMismatch { .. })));
 }

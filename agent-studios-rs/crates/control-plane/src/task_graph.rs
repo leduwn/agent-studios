@@ -24,6 +24,10 @@ impl TaskGraph {
     pub fn add_task(&mut self, task: TaskRecord) -> Result<(), TaskGraphError> {
         let task_id = task.id;
 
+        if self.tasks.contains_key(&task_id) {
+            return Err(TaskGraphError::DuplicateTask(task_id));
+        }
+
         // Verify that declared dependencies exist if any
         for &dep_id in &task.dependencies {
             if dep_id == task_id {
@@ -340,6 +344,19 @@ mod tests {
 
         assert_eq!(graph.dependencies_of(id2).unwrap(), vec![id1]);
         assert_eq!(graph.dependents_of(id1).unwrap(), vec![id2]);
+    }
+
+    #[test]
+    fn test_duplicate_task_rejected() {
+        let studio_id = StudioId::new();
+        let mut graph = TaskGraph::new();
+
+        let t1 = make_test_task(studio_id, "T1");
+        let id1 = t1.id;
+        graph.add_task(t1.clone()).unwrap();
+
+        let err = graph.add_task(t1).unwrap_err();
+        assert_eq!(err, TaskGraphError::DuplicateTask(id1));
     }
 
     #[test]

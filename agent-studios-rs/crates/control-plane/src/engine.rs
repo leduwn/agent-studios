@@ -175,19 +175,26 @@ impl ControlPlaneState {
                     }
                 }
 
-                self.tasks_by_studio
-                    .entry(task.studio_id)
-                    .or_default()
-                    .insert(task.id);
+                if self.task_graph.get_task(task.id).is_some() {
+                    return Err(ReplayError::DuplicateTask { task_id: task.id });
+                }
 
                 self.task_graph
                     .add_task(task.clone())
                     .map_err(|e| match e {
+                        TaskGraphError::DuplicateTask(task_id) => {
+                            ReplayError::DuplicateTask { task_id }
+                        }
                         TaskGraphError::DependencyCycle { from, to } => {
                             ReplayError::DependencyCycle { from, to }
                         }
                         other => ReplayError::DomainViolation(other.to_string()),
                     })?;
+
+                self.tasks_by_studio
+                    .entry(task.studio_id)
+                    .or_default()
+                    .insert(task.id);
             }
 
             ControlPlaneEvent::TaskStateChanged {
@@ -287,12 +294,19 @@ impl ControlPlaneState {
                     });
                 }
 
-                let _dep =
+                let dep =
                     self.task_graph
                         .get_task(*dependency_id)
                         .ok_or(ReplayError::TaskNotFound {
                             task_id: *dependency_id,
                         })?;
+
+                if dep.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: dep.studio_id,
+                    });
+                }
 
                 if !task.state.can_mutate_dependencies() {
                     return Err(ReplayError::DomainViolation(format!(
@@ -336,10 +350,7 @@ impl ControlPlaneState {
                 }
 
                 if self.runs.contains_key(&run.id) {
-                    return Err(ReplayError::DomainViolation(format!(
-                        "Duplicate run id {}",
-                        run.id
-                    )));
+                    return Err(ReplayError::DuplicateRun { run_id: run.id });
                 }
 
                 self.runs.insert(run.id, run.clone());
@@ -432,6 +443,12 @@ impl ControlPlaneState {
                     });
                 }
 
+                if self.approvals.contains_key(&approval.id) {
+                    return Err(ReplayError::DuplicateApproval {
+                        approval_id: approval.id,
+                    });
+                }
+
                 self.approvals.insert(approval.id, approval.clone());
             }
 
@@ -505,6 +522,12 @@ impl ControlPlaneState {
                     return Err(ReplayError::StudioMismatch {
                         expected: artifact.studio_id,
                         actual: agent.studio_id,
+                    });
+                }
+
+                if self.artifacts.contains_key(&artifact.id) {
+                    return Err(ReplayError::DuplicateArtifact {
+                        artifact_id: artifact.id,
                     });
                 }
 
@@ -603,12 +626,12 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         &self.clock
     }
 
+    /// Returns a read-only reference to the underlying event store for diagnostics.
+    /// Direct mutable access to the store is intentionally disallowed to preserve
+    /// the staged transaction invariant: all event persistence and state transitions
+    /// must proceed atomically through ControlPlane command methods / `commit_transaction`.
     pub fn store(&self) -> &S {
         &self.store
-    }
-
-    pub fn store_mut(&mut self) -> &mut S {
-        &mut self.store
     }
 
     pub fn state(&self) -> &ControlPlaneState {
@@ -968,11 +991,18 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
-        let _dep = self
+        let dep = self
             .state
             .task_graph
             .get_task(dependency_id)
             .ok_or(ControlPlaneError::TaskNotFound(dependency_id))?;
+
+        if task.studio_id != dep.studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: task.studio_id,
+                actual: dep.studio_id,
+            });
+        }
 
         if !task.state.can_mutate_dependencies() {
             return Err(ControlPlaneError::Transition(

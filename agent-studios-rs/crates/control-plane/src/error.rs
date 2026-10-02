@@ -53,6 +53,9 @@ pub enum ControlPlaneError {
 /// Errors raised by the TaskGraph DAG engine.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TaskGraphError {
+    #[error("Task already exists in graph: {0}")]
+    DuplicateTask(TaskId),
+
     #[error("Task {0} does not exist in graph")]
     UnknownTask(TaskId),
 
@@ -127,6 +130,18 @@ pub enum ReplayError {
 
     #[error("Agent already registered: {agent_id}")]
     DuplicateAgent { agent_id: AgentId },
+
+    #[error("Task already exists: {task_id}")]
+    DuplicateTask { task_id: TaskId },
+
+    #[error("Run already exists: {run_id}")]
+    DuplicateRun { run_id: RunId },
+
+    #[error("Approval request already exists: {approval_id}")]
+    DuplicateApproval { approval_id: ApprovalId },
+
+    #[error("Artifact already registered: {artifact_id}")]
+    DuplicateArtifact { artifact_id: ArtifactId },
 
     #[error("Studio not found: {studio_id}")]
     StudioNotFound { studio_id: StudioId },
