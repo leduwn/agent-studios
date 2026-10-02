@@ -26,6 +26,59 @@ mod tests {
     use chrono::Utc;
 
     #[test]
+    fn test_agent_state_transitions() {
+        let registered = AgentState::Registered;
+        assert!(registered.can_transition_to(AgentState::Starting));
+        assert!(registered.can_transition_to(AgentState::Stopped));
+        assert!(registered.can_transition_to(AgentState::Failed));
+        assert!(!registered.can_transition_to(AgentState::Busy));
+        assert!(!registered.can_transition_to(AgentState::Idle));
+
+        let starting = AgentState::Starting;
+        assert!(starting.can_transition_to(AgentState::Idle));
+        assert!(starting.can_transition_to(AgentState::Stopping));
+        assert!(starting.can_transition_to(AgentState::Failed));
+        assert!(!starting.can_transition_to(AgentState::Busy));
+
+        let idle = AgentState::Idle;
+        assert!(idle.can_transition_to(AgentState::Busy));
+        assert!(idle.can_transition_to(AgentState::Stopping));
+        assert!(idle.can_transition_to(AgentState::Failed));
+        assert!(!idle.can_transition_to(AgentState::Paused));
+
+        let busy = AgentState::Busy;
+        assert!(busy.can_transition_to(AgentState::Idle));
+        assert!(busy.can_transition_to(AgentState::Paused));
+        assert!(busy.can_transition_to(AgentState::Stopping));
+        assert!(busy.can_transition_to(AgentState::Failed));
+
+        let paused = AgentState::Paused;
+        assert!(paused.can_transition_to(AgentState::Busy));
+        assert!(paused.can_transition_to(AgentState::Idle));
+        assert!(paused.can_transition_to(AgentState::Stopping));
+        assert!(paused.can_transition_to(AgentState::Failed));
+
+        let stopping = AgentState::Stopping;
+        assert!(stopping.can_transition_to(AgentState::Stopped));
+        assert!(stopping.can_transition_to(AgentState::Failed));
+        assert!(!stopping.can_transition_to(AgentState::Idle));
+
+        let stopped = AgentState::Stopped;
+        assert!(stopped.is_terminal());
+        assert!(!stopped.can_transition_to(AgentState::Registered));
+        assert!(
+            stopped
+                .validate_transition_to(AgentState::Starting)
+                .is_err()
+        );
+
+        let failed = AgentState::Failed;
+        assert!(failed.is_terminal());
+        assert!(!failed.can_transition_to(AgentState::Starting));
+        assert!(failed.validate_transition_to(AgentState::Idle).is_err());
+    }
+
+    #[test]
     fn test_task_state_transitions() {
         let state = TaskState::Pending;
         assert!(state.can_transition_to(TaskState::Ready));

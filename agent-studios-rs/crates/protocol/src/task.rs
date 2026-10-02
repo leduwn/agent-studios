@@ -24,6 +24,11 @@ impl TaskState {
         matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
     }
 
+    /// Returns true if task dependencies may be mutated in this state.
+    pub const fn can_mutate_dependencies(&self) -> bool {
+        matches!(self, Self::Pending | Self::Blocked | Self::Ready)
+    }
+
     /// Evaluates if transitioning from `self` to `target` is allowed.
     pub const fn can_transition_to(&self, target: Self) -> bool {
         if self.is_terminal() {
@@ -34,7 +39,7 @@ impl TaskState {
             (self, target),
             (Self::Pending, Self::Blocked | Self::Ready | Self::Cancelled)
                 | (Self::Blocked, Self::Ready | Self::Cancelled)
-                | (Self::Ready, Self::Running | Self::Cancelled)
+                | (Self::Ready, Self::Running | Self::Blocked | Self::Cancelled)
                 | (
                     Self::Running,
                     Self::Paused | Self::Succeeded | Self::Failed | Self::Cancelled

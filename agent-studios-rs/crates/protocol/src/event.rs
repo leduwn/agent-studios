@@ -66,10 +66,13 @@ pub enum ControlPlaneEvent {
     },
 }
 
+pub const CONTROL_PLANE_EVENT_SCHEMA_VERSION: u16 = 1;
+
 /// Durable sequence-stamped envelope containing an event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub event_id: EventId,
+    pub schema_version: u16,
     pub studio_id: StudioId,
     pub sequence: u64,
     pub timestamp: DateTime<Utc>,
@@ -85,6 +88,25 @@ impl EventEnvelope {
     ) -> Self {
         Self {
             event_id: EventId::new(),
+            schema_version: CONTROL_PLANE_EVENT_SCHEMA_VERSION,
+            studio_id,
+            sequence,
+            timestamp,
+            event,
+        }
+    }
+
+    pub fn with_details(
+        event_id: EventId,
+        schema_version: u16,
+        studio_id: StudioId,
+        sequence: u64,
+        timestamp: DateTime<Utc>,
+        event: ControlPlaneEvent,
+    ) -> Self {
+        Self {
+            event_id,
+            schema_version,
             studio_id,
             sequence,
             timestamp,

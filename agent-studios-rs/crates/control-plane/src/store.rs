@@ -1,15 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use agent_studios_protocol::event::EventEnvelope;
-use agent_studios_protocol::id::StudioId;
+use agent_studios_protocol::id::{EventId, StudioId};
 
 use crate::error::StoreError;
 
 /// Storage abstraction for persisting and retrieving domain event streams.
 pub trait EventStore: Send + Sync {
-    /// Appends a new event envelope to the store.
-    /// Sequence must be strictly `latest_sequence + 1` for the target studio.
-    fn append(&mut self, envelope: EventEnvelope) -> Result<(), StoreError>;
+    /// Appends a batch of event envelopes atomically.
+    /// ALL events must be persisted or ZERO if any validation fails.
+    fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError>;
+
+    /// Appends a single event envelope to the store.
+    /// Delegates to `append_batch`.
+    fn append(&mut self, envelope: EventEnvelope) -> Result<(), StoreError> {
+        self.append_batch(&[envelope])
+    }
 
     /// Retrieves events for a specific studio starting from `from_sequence` (inclusive).
     fn events_for_studio(
@@ -30,6 +36,7 @@ pub trait EventStore: Send + Sync {
 pub struct InMemoryStore {
     events_by_studio: HashMap<StudioId, Vec<EventEnvelope>>,
     all_events: Vec<EventEnvelope>,
+    seen_event_ids: HashSet<EventId>,
 }
 
 impl InMemoryStore {
@@ -39,32 +46,59 @@ impl InMemoryStore {
 }
 
 impl EventStore for InMemoryStore {
-    fn append(&mut self, envelope: EventEnvelope) -> Result<(), StoreError> {
-        let studio_id = envelope.studio_id;
-        let latest = self.latest_sequence(studio_id)?;
-        let expected = latest + 1;
-
-        if envelope.sequence < expected {
-            return Err(StoreError::SequenceRegression {
-                studio_id,
-                latest,
-                attempted: envelope.sequence,
-            });
+    fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
+        if events.is_empty() {
+            return Ok(());
         }
 
-        if envelope.sequence > expected {
-            return Err(StoreError::SequenceGap {
-                studio_id,
-                expected,
-                actual: envelope.sequence,
-            });
+        // Phase 1: Strict validation of entire batch before modifying any state.
+        let mut batch_seen_ids = HashSet::new();
+        let mut expected_sequences: HashMap<StudioId, u64> = HashMap::new();
+
+        for envelope in events {
+            // Check for duplicate EventId in store or batch
+            if self.seen_event_ids.contains(&envelope.event_id)
+                || !batch_seen_ids.insert(envelope.event_id)
+            {
+                return Err(StoreError::DuplicateEventId {
+                    event_id: envelope.event_id,
+                });
+            }
+
+            let studio_id = envelope.studio_id;
+            let expected = match expected_sequences.get(&studio_id) {
+                Some(&seq) => seq,
+                None => self.latest_sequence(studio_id)? + 1,
+            };
+
+            if envelope.sequence < expected {
+                return Err(StoreError::SequenceRegression {
+                    studio_id,
+                    latest: expected - 1,
+                    attempted: envelope.sequence,
+                });
+            }
+
+            if envelope.sequence > expected {
+                return Err(StoreError::SequenceGap {
+                    studio_id,
+                    expected,
+                    actual: envelope.sequence,
+                });
+            }
+
+            expected_sequences.insert(studio_id, expected + 1);
         }
 
-        self.all_events.push(envelope.clone());
-        self.events_by_studio
-            .entry(studio_id)
-            .or_default()
-            .push(envelope);
+        // Phase 2: All validation passed - commit all events atomically.
+        for envelope in events {
+            self.seen_event_ids.insert(envelope.event_id);
+            self.all_events.push(envelope.clone());
+            self.events_by_studio
+                .entry(envelope.studio_id)
+                .or_default()
+                .push(envelope.clone());
+        }
 
         Ok(())
     }
@@ -152,5 +186,54 @@ mod tests {
         let env2 = EventEnvelope::new(studio_id, 2, now, event);
         assert!(store.append(env2).is_ok());
         assert_eq!(store.latest_sequence(studio_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_atomic_batch_all_or_zero() {
+        let mut store = InMemoryStore::new();
+        let studio_id = StudioId::new();
+        let now = Utc::now();
+
+        let event = ControlPlaneEvent::StudioCreated {
+            studio: Studio::with_id(studio_id, "Batch Studio", now),
+        };
+
+        let env1 = EventEnvelope::new(studio_id, 1, now, event.clone());
+        let env2 = EventEnvelope::new(studio_id, 2, now, event.clone());
+        // env3 has sequence gap (4 instead of 3)
+        let env3_gap = EventEnvelope::new(studio_id, 4, now, event.clone());
+
+        let batch = vec![env1, env2, env3_gap];
+        let result = store.append_batch(&batch);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            StoreError::SequenceGap {
+                studio_id,
+                expected: 3,
+                actual: 4
+            }
+        );
+
+        // ZERO events must be persisted
+        assert_eq!(store.latest_sequence(studio_id).unwrap(), 0);
+        assert!(store.all_events().unwrap().is_empty());
+
+        // Valid batch persists ALL events
+        let env1_valid = EventEnvelope::new(studio_id, 1, now, event.clone());
+        let env2_valid = EventEnvelope::new(studio_id, 2, now, event.clone());
+        let env3_valid = EventEnvelope::new(studio_id, 3, now, event.clone());
+        assert!(
+            store
+                .append_batch(&[env1_valid, env2_valid.clone(), env3_valid])
+                .is_ok()
+        );
+        assert_eq!(store.latest_sequence(studio_id).unwrap(), 3);
+        assert_eq!(store.all_events().unwrap().len(), 3);
+
+        // Duplicate event ID in batch or store rejected
+        let dup_batch = vec![env2_valid];
+        let dup_res = store.append_batch(&dup_batch);
+        assert!(matches!(dup_res, Err(StoreError::DuplicateEventId { .. })));
     }
 }

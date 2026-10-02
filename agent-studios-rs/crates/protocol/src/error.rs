@@ -1,6 +1,8 @@
 use thiserror::Error;
 
+use crate::agent::AgentState;
 use crate::approval::ApprovalState;
+use crate::id::TaskId;
 use crate::run::RunState;
 use crate::task::TaskState;
 
@@ -16,11 +18,22 @@ pub struct IdParseError {
 /// Errors raised when performing invalid state transitions.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TransitionError {
+    #[error("Invalid agent transition from {from:?} to {to:?}")]
+    InvalidAgentTransition { from: AgentState, to: AgentState },
+
+    #[error("Agent is already in terminal state {state:?} and cannot transition")]
+    TerminalAgentTransition { state: AgentState },
+
     #[error("Invalid task transition from {from:?} to {to:?}")]
     InvalidTaskTransition { from: TaskState, to: TaskState },
 
     #[error("Task is already in terminal state {state:?} and cannot transition")]
     TerminalTaskTransition { state: TaskState },
+
+    #[error(
+        "Task {task_id} in state {state:?} cannot mutate dependencies (must be Pending, Blocked, or Ready)"
+    )]
+    TaskDependencyMutationForbidden { task_id: TaskId, state: TaskState },
 
     #[error("Invalid run transition from {from:?} to {to:?}")]
     InvalidRunTransition { from: RunState, to: RunState },

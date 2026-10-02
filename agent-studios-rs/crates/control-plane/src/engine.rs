@@ -4,34 +4,577 @@ use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState};
 use agent_studios_protocol::approval::{ApprovalKind, ApprovalRequest, ApprovalState};
 use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
-use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
-use agent_studios_protocol::id::{AgentId, ApprovalId, ArtifactId, RunId, StudioId, TaskId};
+use agent_studios_protocol::error::TransitionError;
+use agent_studios_protocol::event::{
+    CONTROL_PLANE_EVENT_SCHEMA_VERSION, ControlPlaneEvent, EventEnvelope,
+};
+use agent_studios_protocol::id::{
+    AgentId, ApprovalId, ArtifactId, EventId, RunId, StudioId, TaskId,
+};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{TaskRecord, TaskState};
 
 use crate::clock::{Clock, SystemClock};
-use crate::error::{ControlPlaneError, ReplayError};
+use crate::error::{ControlPlaneError, ReplayError, StoreError, TaskGraphError};
 use crate::store::{EventStore, InMemoryStore};
 use crate::task_graph::TaskGraph;
 
 type CancellationTargets = (Vec<TaskId>, Vec<RunId>, Vec<ApprovalId>);
 
+/// Encapsulates the entire mutable domain state of the ControlPlane.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControlPlaneState {
+    pub studios: HashMap<StudioId, Studio>,
+    pub agents: HashMap<AgentId, AgentDescriptor>,
+    pub task_graph: TaskGraph,
+    pub runs: HashMap<RunId, RunRecord>,
+    pub approvals: HashMap<ApprovalId, ApprovalRequest>,
+    pub artifacts: HashMap<ArtifactId, ArtifactRecord>,
+
+    // Auxiliary indices for fast query resolution
+    pub runs_by_task: HashMap<TaskId, Vec<RunId>>,
+    pub tasks_by_studio: HashMap<StudioId, HashSet<TaskId>>,
+    pub agents_by_studio: HashMap<StudioId, HashSet<AgentId>>,
+}
+
+impl ControlPlaneState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Strictly applies an event envelope to in-memory domain state.
+    /// Validates all entity existence, studio ownership, and state machines.
+    pub fn apply_event(&mut self, envelope: &EventEnvelope) -> Result<(), ReplayError> {
+        let now = envelope.timestamp;
+
+        match &envelope.event {
+            ControlPlaneEvent::StudioCreated { studio } => {
+                if envelope.studio_id != studio.id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: studio.id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if self.studios.contains_key(&studio.id) {
+                    return Err(ReplayError::DuplicateStudio {
+                        studio_id: studio.id,
+                    });
+                }
+                self.studios.insert(studio.id, studio.clone());
+                self.tasks_by_studio.entry(studio.id).or_default();
+                self.agents_by_studio.entry(studio.id).or_default();
+            }
+
+            ControlPlaneEvent::AgentRegistered { agent } => {
+                if envelope.studio_id != agent.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&agent.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: agent.studio_id,
+                    });
+                }
+                if self.agents.contains_key(&agent.id) {
+                    return Err(ReplayError::DuplicateAgent { agent_id: agent.id });
+                }
+                self.agents.insert(agent.id, agent.clone());
+                self.agents_by_studio
+                    .entry(agent.studio_id)
+                    .or_default()
+                    .insert(agent.id);
+            }
+
+            ControlPlaneEvent::AgentStateChanged {
+                agent_id,
+                previous_state,
+                new_state,
+            } => {
+                let agent = self
+                    .agents
+                    .get_mut(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+
+                if envelope.studio_id != agent.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if agent.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", agent.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                agent.state = *new_state;
+            }
+
+            ControlPlaneEvent::TaskCreated { task } => {
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&task.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: task.studio_id,
+                    });
+                }
+
+                if let Some(parent_id) = task.parent_task_id {
+                    let parent = self
+                        .task_graph
+                        .get_task(parent_id)
+                        .ok_or(ReplayError::TaskNotFound { task_id: parent_id })?;
+                    if parent.studio_id != task.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: task.studio_id,
+                            actual: parent.studio_id,
+                        });
+                    }
+                }
+
+                if let Some(agent_id) = task.assigned_agent_id {
+                    let agent = self
+                        .agents
+                        .get(&agent_id)
+                        .ok_or(ReplayError::AgentNotFound { agent_id })?;
+                    if agent.studio_id != task.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: task.studio_id,
+                            actual: agent.studio_id,
+                        });
+                    }
+                }
+
+                for &dep_id in &task.dependencies {
+                    let dep = self
+                        .task_graph
+                        .get_task(dep_id)
+                        .ok_or(ReplayError::TaskNotFound { task_id: dep_id })?;
+                    if dep.studio_id != task.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: task.studio_id,
+                            actual: dep.studio_id,
+                        });
+                    }
+                }
+
+                self.tasks_by_studio
+                    .entry(task.studio_id)
+                    .or_default()
+                    .insert(task.id);
+
+                self.task_graph
+                    .add_task(task.clone())
+                    .map_err(|e| match e {
+                        TaskGraphError::DependencyCycle { from, to } => {
+                            ReplayError::DependencyCycle { from, to }
+                        }
+                        other => ReplayError::DomainViolation(other.to_string()),
+                    })?;
+            }
+
+            ControlPlaneEvent::TaskStateChanged {
+                task_id,
+                previous_state,
+                new_state,
+            } => {
+                let task = self
+                    .task_graph
+                    .get_task_mut(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if task.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", task.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                task.state = *new_state;
+                task.updated_at = now;
+            }
+
+            ControlPlaneEvent::TaskDependencyAdded {
+                task_id,
+                dependency_id,
+            } => {
+                let task = self
+                    .task_graph
+                    .get_task(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                let dep =
+                    self.task_graph
+                        .get_task(*dependency_id)
+                        .ok_or(ReplayError::TaskNotFound {
+                            task_id: *dependency_id,
+                        })?;
+
+                if dep.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: dep.studio_id,
+                    });
+                }
+
+                if !task.state.can_mutate_dependencies() {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Task {} in state {:?} cannot mutate dependencies",
+                        task_id, task.state
+                    )));
+                }
+
+                self.task_graph
+                    .add_dependency(*task_id, *dependency_id)
+                    .map_err(|e| match e {
+                        TaskGraphError::DependencyCycle { from, to } => {
+                            ReplayError::DependencyCycle { from, to }
+                        }
+                        other => ReplayError::DomainViolation(other.to_string()),
+                    })?;
+            }
+
+            ControlPlaneEvent::TaskDependencyRemoved {
+                task_id,
+                dependency_id,
+            } => {
+                let task = self
+                    .task_graph
+                    .get_task(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                let _dep =
+                    self.task_graph
+                        .get_task(*dependency_id)
+                        .ok_or(ReplayError::TaskNotFound {
+                            task_id: *dependency_id,
+                        })?;
+
+                if !task.state.can_mutate_dependencies() {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Task {} in state {:?} cannot mutate dependencies",
+                        task_id, task.state
+                    )));
+                }
+
+                self.task_graph
+                    .remove_dependency(*task_id, *dependency_id)
+                    .map_err(|e| ReplayError::DomainViolation(e.to_string()))?;
+            }
+
+            ControlPlaneEvent::RunCreated { run } => {
+                let task =
+                    self.task_graph
+                        .get_task(run.task_id)
+                        .ok_or(ReplayError::TaskNotFound {
+                            task_id: run.task_id,
+                        })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                let agent = self
+                    .agents
+                    .get(&run.agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: run.agent_id,
+                    })?;
+
+                if agent.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: agent.studio_id,
+                    });
+                }
+
+                if self.runs.contains_key(&run.id) {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Duplicate run id {}",
+                        run.id
+                    )));
+                }
+
+                self.runs.insert(run.id, run.clone());
+                self.runs_by_task
+                    .entry(run.task_id)
+                    .or_default()
+                    .push(run.id);
+            }
+
+            ControlPlaneEvent::RunStateChanged {
+                run_id,
+                previous_state,
+                new_state,
+            } => {
+                let run = self
+                    .runs
+                    .get_mut(run_id)
+                    .ok_or(ReplayError::RunNotFound { run_id: *run_id })?;
+
+                let task =
+                    self.task_graph
+                        .get_task(run.task_id)
+                        .ok_or(ReplayError::TaskNotFound {
+                            task_id: run.task_id,
+                        })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if run.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", run.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                run.state = *new_state;
+                if *new_state == RunState::Running && run.started_at.is_none() {
+                    run.started_at = Some(now);
+                } else if new_state.is_terminal() && run.finished_at.is_none() {
+                    run.finished_at = Some(now);
+                }
+            }
+
+            ControlPlaneEvent::ApprovalRequested { approval } => {
+                if envelope.studio_id != approval.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: approval.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&approval.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: approval.studio_id,
+                    });
+                }
+
+                let task = self.task_graph.get_task(approval.task_id).ok_or(
+                    ReplayError::TaskNotFound {
+                        task_id: approval.task_id,
+                    },
+                )?;
+                if task.studio_id != approval.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: approval.studio_id,
+                        actual: task.studio_id,
+                    });
+                }
+
+                let agent =
+                    self.agents
+                        .get(&approval.agent_id)
+                        .ok_or(ReplayError::AgentNotFound {
+                            agent_id: approval.agent_id,
+                        })?;
+                if agent.studio_id != approval.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: approval.studio_id,
+                        actual: agent.studio_id,
+                    });
+                }
+
+                self.approvals.insert(approval.id, approval.clone());
+            }
+
+            ControlPlaneEvent::ApprovalResolved {
+                approval_id,
+                previous_state,
+                new_state,
+            } => {
+                let approval =
+                    self.approvals
+                        .get_mut(approval_id)
+                        .ok_or(ReplayError::ApprovalNotFound {
+                            approval_id: *approval_id,
+                        })?;
+
+                if envelope.studio_id != approval.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: approval.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if approval.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", approval.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                approval.state = *new_state;
+                approval.resolved_at = Some(now);
+            }
+
+            ControlPlaneEvent::ArtifactRegistered { artifact } => {
+                if envelope.studio_id != artifact.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: artifact.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&artifact.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: artifact.studio_id,
+                    });
+                }
+
+                let task = self.task_graph.get_task(artifact.task_id).ok_or(
+                    ReplayError::TaskNotFound {
+                        task_id: artifact.task_id,
+                    },
+                )?;
+                if task.studio_id != artifact.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: artifact.studio_id,
+                        actual: task.studio_id,
+                    });
+                }
+
+                let agent = self.agents.get(&artifact.producer_agent_id).ok_or(
+                    ReplayError::AgentNotFound {
+                        agent_id: artifact.producer_agent_id,
+                    },
+                )?;
+                if agent.studio_id != artifact.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: artifact.studio_id,
+                        actual: agent.studio_id,
+                    });
+                }
+
+                self.artifacts.insert(artifact.id, artifact.clone());
+            }
+
+            ControlPlaneEvent::CancellationRequested { scope, .. } => match scope {
+                CancellationScope::Studio(sid) => {
+                    if envelope.studio_id != *sid {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: *sid,
+                            actual: envelope.studio_id,
+                        });
+                    }
+                    if !self.studios.contains_key(sid) {
+                        return Err(ReplayError::StudioNotFound { studio_id: *sid });
+                    }
+                }
+                CancellationScope::Task { task_id, .. } => {
+                    let t = self
+                        .task_graph
+                        .get_task(*task_id)
+                        .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+                    if envelope.studio_id != t.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: t.studio_id,
+                            actual: envelope.studio_id,
+                        });
+                    }
+                }
+                CancellationScope::Agent(aid) => {
+                    let a = self
+                        .agents
+                        .get(aid)
+                        .ok_or(ReplayError::AgentNotFound { agent_id: *aid })?;
+                    if envelope.studio_id != a.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: a.studio_id,
+                            actual: envelope.studio_id,
+                        });
+                    }
+                }
+                CancellationScope::Run(rid) => {
+                    let r = self
+                        .runs
+                        .get(rid)
+                        .ok_or(ReplayError::RunNotFound { run_id: *rid })?;
+                    let t = self
+                        .task_graph
+                        .get_task(r.task_id)
+                        .ok_or(ReplayError::TaskNotFound { task_id: r.task_id })?;
+                    if envelope.studio_id != t.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: t.studio_id,
+                            actual: envelope.studio_id,
+                        });
+                    }
+                }
+            },
+        }
+
+        Ok(())
+    }
+}
+
 /// Core deterministic control plane state engine.
 pub struct ControlPlane<C: Clock = SystemClock, S: EventStore = InMemoryStore> {
     clock: C,
     store: S,
-    studios: HashMap<StudioId, Studio>,
-    agents: HashMap<AgentId, AgentDescriptor>,
-    task_graph: TaskGraph,
-    runs: HashMap<RunId, RunRecord>,
-    approvals: HashMap<ApprovalId, ApprovalRequest>,
-    artifacts: HashMap<ArtifactId, ArtifactRecord>,
-
-    // Auxiliary indices for fast query resolution
-    runs_by_task: HashMap<TaskId, Vec<RunId>>,
-    tasks_by_studio: HashMap<StudioId, HashSet<TaskId>>,
-    agents_by_studio: HashMap<StudioId, HashSet<AgentId>>,
+    state: ControlPlaneState,
 }
 
 impl Default for ControlPlane<SystemClock, InMemoryStore> {
@@ -52,15 +595,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Self {
             clock,
             store,
-            studios: HashMap::new(),
-            agents: HashMap::new(),
-            task_graph: TaskGraph::new(),
-            runs: HashMap::new(),
-            approvals: HashMap::new(),
-            artifacts: HashMap::new(),
-            runs_by_task: HashMap::new(),
-            tasks_by_studio: HashMap::new(),
-            agents_by_studio: HashMap::new(),
+            state: ControlPlaneState::new(),
         }
     }
 
@@ -76,6 +611,55 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         &mut self.store
     }
 
+    pub fn state(&self) -> &ControlPlaneState {
+        &self.state
+    }
+
+    // ========================================================================
+    // Staged Transaction Pipeline
+    // ========================================================================
+
+    /// Transaction pipeline:
+    /// validate command -> construct candidate events -> assign sequences ->
+    /// clone current state -> staged_state -> strict apply all events to staged_state ->
+    /// EventStore::append_batch(events) -> commit self.state = staged_state.
+    fn commit_transaction(
+        &mut self,
+        studio_id: StudioId,
+        candidate_events: Vec<ControlPlaneEvent>,
+    ) -> Result<Vec<EventEnvelope>, ControlPlaneError> {
+        if candidate_events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let now = self.clock.now();
+        let latest = self.store.latest_sequence(studio_id)?;
+
+        // 1. Assign monotonic sequence numbers and construct envelopes
+        let mut envelopes = Vec::with_capacity(candidate_events.len());
+        let mut seq = latest;
+        for event in candidate_events {
+            seq += 1;
+            envelopes.push(EventEnvelope::new(studio_id, seq, now, event));
+        }
+
+        // 2. Clone current state into staged_state
+        let mut staged_state = self.state.clone();
+
+        // 3. Strict apply all candidate events to staged_state
+        for env in &envelopes {
+            staged_state.apply_event(env)?;
+        }
+
+        // 4. Atomic append to durable event store (ALL or ZERO)
+        self.store.append_batch(&envelopes)?;
+
+        // 5. Commit state transition only after store persistence succeeds
+        self.state = staged_state;
+
+        Ok(envelopes)
+    }
+
     // ========================================================================
     // Studio Management
     // ========================================================================
@@ -87,15 +671,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             studio: studio.clone(),
         };
 
-        let envelope = self.emit(studio.id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio.id, vec![event])?;
         Ok(studio)
     }
 
     pub fn get_studio(&self, id: StudioId) -> Option<&Studio> {
-        self.studios.get(&id)
+        self.state.studios.get(&id)
+    }
+
+    pub fn all_studios(&self) -> impl Iterator<Item = &Studio> {
+        self.state.studios.values()
     }
 
     // ========================================================================
@@ -109,7 +694,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         kind: AgentKind,
         role: Option<String>,
     ) -> Result<AgentDescriptor, ControlPlaneError> {
-        if !self.studios.contains_key(&studio_id) {
+        if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
 
@@ -118,10 +703,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             agent: agent.clone(),
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(agent)
     }
 
@@ -131,6 +713,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         new_state: AgentState,
     ) -> Result<(), ControlPlaneError> {
         let agent = self
+            .state
             .agents
             .get(&agent_id)
             .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
@@ -138,6 +721,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         if agent.state == new_state {
             return Ok(());
         }
+
+        agent.state.validate_transition_to(new_state)?;
 
         let previous_state = agent.state;
         let studio_id = agent.studio_id;
@@ -148,15 +733,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             new_state,
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(())
     }
 
     pub fn get_agent(&self, id: AgentId) -> Option<&AgentDescriptor> {
-        self.agents.get(&id)
+        self.state.agents.get(&id)
+    }
+
+    pub fn all_agents(&self) -> impl Iterator<Item = &AgentDescriptor> {
+        self.state.agents.values()
     }
 
     // ========================================================================
@@ -172,12 +758,13 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         assigned_agent_id: Option<AgentId>,
         dependencies: Vec<TaskId>,
     ) -> Result<TaskRecord, ControlPlaneError> {
-        if !self.studios.contains_key(&studio_id) {
+        if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
 
         if let Some(parent_id) = parent_task_id {
             let parent = self
+                .state
                 .task_graph
                 .get_task(parent_id)
                 .ok_or(ControlPlaneError::TaskNotFound(parent_id))?;
@@ -191,6 +778,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         if let Some(agent_id) = assigned_agent_id {
             let agent = self
+                .state
                 .agents
                 .get(&agent_id)
                 .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
@@ -204,6 +792,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         for &dep_id in &dependencies {
             let dep_task = self
+                .state
                 .task_graph
                 .get_task(dep_id)
                 .ok_or(ControlPlaneError::TaskNotFound(dep_id))?;
@@ -228,7 +817,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         // Compute correct initial state based on dependencies
         let all_deps_succeeded = task.dependencies.iter().all(|&dep_id| {
-            self.task_graph
+            self.state
+                .task_graph
                 .get_task(dep_id)
                 .map(|t| t.state == TaskState::Succeeded)
                 .unwrap_or(false)
@@ -241,10 +831,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         };
 
         let event = ControlPlaneEvent::TaskCreated { task: task.clone() };
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(task)
     }
 
@@ -254,6 +841,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         new_state: TaskState,
     ) -> Result<(), ControlPlaneError> {
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
@@ -267,21 +855,44 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let previous_state = task.state;
         let studio_id = task.studio_id;
 
-        let event = ControlPlaneEvent::TaskStateChanged {
+        let mut candidate_events = vec![ControlPlaneEvent::TaskStateChanged {
             task_id,
             previous_state,
             new_state,
-        };
+        }];
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+        // If transitioning to Succeeded, unblock dependents whose prerequisites are now all Succeeded
+        if new_state == TaskState::Succeeded
+            && let Ok(dependents) = self.state.task_graph.dependents_of(task_id)
+        {
+            for dep_id in dependents {
+                if let Some(dep_task) = self.state.task_graph.get_task(dep_id)
+                    && dep_task.state == TaskState::Blocked
+                {
+                    let all_deps_succeeded = dep_task.dependencies.iter().all(|&d_id| {
+                        if d_id == task_id {
+                            true
+                        } else {
+                            self.state
+                                .task_graph
+                                .get_task(d_id)
+                                .map(|t| t.state == TaskState::Succeeded)
+                                .unwrap_or(false)
+                        }
+                    });
 
-        // If a task succeeded, evaluate and potentially unblock dependents
-        if new_state == TaskState::Succeeded {
-            self.evaluate_dependents(task_id)?;
+                    if all_deps_succeeded {
+                        candidate_events.push(ControlPlaneEvent::TaskStateChanged {
+                            task_id: dep_id,
+                            previous_state: TaskState::Blocked,
+                            new_state: TaskState::Ready,
+                        });
+                    }
+                }
+            }
         }
 
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -290,11 +901,19 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         task_id: TaskId,
         dependency_id: TaskId,
     ) -> Result<(), ControlPlaneError> {
+        if task_id == dependency_id {
+            return Err(ControlPlaneError::TaskGraph(
+                TaskGraphError::SelfDependency(task_id),
+            ));
+        }
+
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
         let dep = self
+            .state
             .task_graph
             .get_task(dependency_id)
             .ok_or(ControlPlaneError::TaskNotFound(dependency_id))?;
@@ -306,20 +925,36 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             });
         }
 
+        if !task.state.can_mutate_dependencies() {
+            return Err(ControlPlaneError::Transition(
+                TransitionError::TaskDependencyMutationForbidden {
+                    task_id,
+                    state: task.state,
+                },
+            ));
+        }
+
+        // Idempotent no-op: already has dependency
+        if task.dependencies.contains(&dependency_id) {
+            return Ok(());
+        }
+
         let studio_id = task.studio_id;
-
-        // Perform validation in TaskGraph
-        self.task_graph.add_dependency(task_id, dependency_id)?;
-
-        let event = ControlPlaneEvent::TaskDependencyAdded {
+        let mut candidate_events = vec![ControlPlaneEvent::TaskDependencyAdded {
             task_id,
             dependency_id,
-        };
+        }];
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+        // If task is Ready and new dependency is unsatisfied, transition Ready -> Blocked in same atomic batch
+        if task.state == TaskState::Ready && dep.state != TaskState::Succeeded {
+            candidate_events.push(ControlPlaneEvent::TaskStateChanged {
+                task_id,
+                previous_state: TaskState::Ready,
+                new_state: TaskState::Blocked,
+            });
+        }
 
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -329,35 +964,77 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         dependency_id: TaskId,
     ) -> Result<(), ControlPlaneError> {
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
+        let _dep = self
+            .state
+            .task_graph
+            .get_task(dependency_id)
+            .ok_or(ControlPlaneError::TaskNotFound(dependency_id))?;
+
+        if !task.state.can_mutate_dependencies() {
+            return Err(ControlPlaneError::Transition(
+                TransitionError::TaskDependencyMutationForbidden {
+                    task_id,
+                    state: task.state,
+                },
+            ));
+        }
+
+        // Idempotent no-op: dependency not present
+        if !task.dependencies.contains(&dependency_id) {
+            return Ok(());
+        }
+
         let studio_id = task.studio_id;
-
-        self.task_graph.remove_dependency(task_id, dependency_id)?;
-
-        let event = ControlPlaneEvent::TaskDependencyRemoved {
+        let mut candidate_events = vec![ControlPlaneEvent::TaskDependencyRemoved {
             task_id,
             dependency_id,
-        };
+        }];
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+        // If task is Blocked and removing this dependency satisfies all remaining, transition Blocked -> Ready in same batch
+        if task.state == TaskState::Blocked {
+            let all_remaining_succeeded = task
+                .dependencies
+                .iter()
+                .filter(|&&id| id != dependency_id)
+                .all(|&id| {
+                    self.state
+                        .task_graph
+                        .get_task(id)
+                        .map(|t| t.state == TaskState::Succeeded)
+                        .unwrap_or(false)
+                });
 
+            if all_remaining_succeeded {
+                candidate_events.push(ControlPlaneEvent::TaskStateChanged {
+                    task_id,
+                    previous_state: TaskState::Blocked,
+                    new_state: TaskState::Ready,
+                });
+            }
+        }
+
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
     pub fn is_task_ready(&self, task_id: TaskId) -> Result<bool, ControlPlaneError> {
-        Ok(self.task_graph.is_ready(task_id)?)
+        Ok(self.state.task_graph.is_ready(task_id)?)
     }
 
     pub fn get_task(&self, id: TaskId) -> Option<&TaskRecord> {
-        self.task_graph.get_task(id)
+        self.state.task_graph.get_task(id)
+    }
+
+    pub fn all_tasks(&self) -> impl Iterator<Item = &TaskRecord> {
+        self.state.task_graph.all_tasks()
     }
 
     pub fn task_graph(&self) -> &TaskGraph {
-        &self.task_graph
+        &self.state.task_graph
     }
 
     // ========================================================================
@@ -370,10 +1047,12 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         agent_id: AgentId,
     ) -> Result<RunRecord, ControlPlaneError> {
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
         let agent = self
+            .state
             .agents
             .get(&agent_id)
             .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
@@ -387,6 +1066,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         let studio_id = task.studio_id;
         let attempt = self
+            .state
             .runs_by_task
             .get(&task_id)
             .map(|r| r.len() as u32)
@@ -396,10 +1076,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let run = RunRecord::new(task_id, agent_id, attempt);
         let event = ControlPlaneEvent::RunCreated { run: run.clone() };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(run)
     }
 
@@ -409,6 +1086,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         new_state: RunState,
     ) -> Result<(), ControlPlaneError> {
         let run = self
+            .state
             .runs
             .get(&run_id)
             .ok_or(ControlPlaneError::RunNotFound(run_id))?;
@@ -421,6 +1099,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         let previous_state = run.state;
         let task = self
+            .state
             .task_graph
             .get_task(run.task_id)
             .ok_or(ControlPlaneError::TaskNotFound(run.task_id))?;
@@ -432,15 +1111,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             new_state,
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(())
     }
 
     pub fn get_run(&self, id: RunId) -> Option<&RunRecord> {
-        self.runs.get(&id)
+        self.state.runs.get(&id)
+    }
+
+    pub fn all_runs(&self) -> impl Iterator<Item = &RunRecord> {
+        self.state.runs.values()
     }
 
     // ========================================================================
@@ -455,11 +1135,12 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         kind: ApprovalKind,
         summary: impl Into<String>,
     ) -> Result<ApprovalRequest, ControlPlaneError> {
-        if !self.studios.contains_key(&studio_id) {
+        if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
 
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
@@ -471,6 +1152,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         }
 
         let agent = self
+            .state
             .agents
             .get(&agent_id)
             .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
@@ -487,10 +1169,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             approval: approval.clone(),
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(approval)
     }
 
@@ -500,6 +1179,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         new_state: ApprovalState,
     ) -> Result<(), ControlPlaneError> {
         let approval = self
+            .state
             .approvals
             .get(&approval_id)
             .ok_or(ControlPlaneError::ApprovalNotFound(approval_id))?;
@@ -515,15 +1195,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             new_state,
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(())
     }
 
     pub fn get_approval(&self, id: ApprovalId) -> Option<&ApprovalRequest> {
-        self.approvals.get(&id)
+        self.state.approvals.get(&id)
+    }
+
+    pub fn all_approvals(&self) -> impl Iterator<Item = &ApprovalRequest> {
+        self.state.approvals.values()
     }
 
     // ========================================================================
@@ -541,11 +1222,12 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         content_hash: Option<String>,
         location: impl Into<String>,
     ) -> Result<ArtifactRecord, ControlPlaneError> {
-        if !self.studios.contains_key(&studio_id) {
+        if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
 
         let task = self
+            .state
             .task_graph
             .get_task(task_id)
             .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
@@ -557,6 +1239,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         }
 
         let agent = self
+            .state
             .agents
             .get(&producer_agent_id)
             .ok_or(ControlPlaneError::AgentNotFound(producer_agent_id))?;
@@ -583,15 +1266,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             artifact: artifact.clone(),
         };
 
-        let envelope = self.emit(studio_id, event)?;
-        self.apply_event(&envelope)
-            .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-
+        self.commit_transaction(studio_id, vec![event])?;
         Ok(artifact)
     }
 
     pub fn get_artifact(&self, id: ArtifactId) -> Option<&ArtifactRecord> {
-        self.artifacts.get(&id)
+        self.state.artifacts.get(&id)
+    }
+
+    pub fn all_artifacts(&self) -> impl Iterator<Item = &ArtifactRecord> {
+        self.state.artifacts.values()
     }
 
     // ========================================================================
@@ -604,9 +1288,15 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         reason: Option<String>,
     ) -> Result<CancellationSummary, ControlPlaneError> {
         let studio_id = match &scope {
-            CancellationScope::Studio(sid) => *sid,
+            CancellationScope::Studio(sid) => {
+                if !self.state.studios.contains_key(sid) {
+                    return Err(ControlPlaneError::StudioNotFound(*sid));
+                }
+                *sid
+            }
             CancellationScope::Task { task_id, .. } => {
                 let t = self
+                    .state
                     .task_graph
                     .get_task(*task_id)
                     .ok_or(ControlPlaneError::TaskNotFound(*task_id))?;
@@ -614,6 +1304,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             }
             CancellationScope::Agent(aid) => {
                 let a = self
+                    .state
                     .agents
                     .get(aid)
                     .ok_or(ControlPlaneError::AgentNotFound(*aid))?;
@@ -621,10 +1312,12 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             }
             CancellationScope::Run(rid) => {
                 let r = self
+                    .state
                     .runs
                     .get(rid)
                     .ok_or(ControlPlaneError::RunNotFound(*rid))?;
                 let t = self
+                    .state
                     .task_graph
                     .get_task(r.task_id)
                     .ok_or(ControlPlaneError::TaskNotFound(r.task_id))?;
@@ -636,66 +1329,54 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let (tasks_to_cancel, runs_to_cancel, approvals_to_cancel) =
             self.calculate_cancellation_targets(&scope)?;
 
-        // Emit CancellationRequested event
-        let event = ControlPlaneEvent::CancellationRequested { scope, reason };
-        self.emit(studio_id, event)?;
-
+        // Build entire batch of cancellation candidate events
+        let mut candidate_events = vec![ControlPlaneEvent::CancellationRequested { scope, reason }];
         let mut summary = CancellationSummary::default();
 
         // 1. Cancel active runs
         for run_id in runs_to_cancel {
-            if let Some(run) = self.runs.get(&run_id)
+            if let Some(run) = self.state.runs.get(&run_id)
                 && !run.state.is_terminal()
             {
-                let previous_state = run.state;
-                let event = ControlPlaneEvent::RunStateChanged {
+                candidate_events.push(ControlPlaneEvent::RunStateChanged {
                     run_id,
-                    previous_state,
+                    previous_state: run.state,
                     new_state: RunState::Cancelled,
-                };
-                let env = self.emit(studio_id, event)?;
-                self.apply_event(&env)
-                    .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+                });
                 summary.cancelled_runs.push(run_id);
             }
         }
 
         // 2. Cancel pending approvals
         for approval_id in approvals_to_cancel {
-            if let Some(approval) = self.approvals.get(&approval_id)
+            if let Some(approval) = self.state.approvals.get(&approval_id)
                 && approval.state == ApprovalState::Pending
             {
-                let previous_state = approval.state;
-                let event = ControlPlaneEvent::ApprovalResolved {
+                candidate_events.push(ControlPlaneEvent::ApprovalResolved {
                     approval_id,
-                    previous_state,
+                    previous_state: approval.state,
                     new_state: ApprovalState::Cancelled,
-                };
-                let env = self.emit(studio_id, event)?;
-                self.apply_event(&env)
-                    .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+                });
                 summary.cancelled_approvals.push(approval_id);
             }
         }
 
         // 3. Cancel non-terminal tasks
         for task_id in tasks_to_cancel {
-            if let Some(task) = self.task_graph.get_task(task_id)
+            if let Some(task) = self.state.task_graph.get_task(task_id)
                 && !task.state.is_terminal()
             {
-                let previous_state = task.state;
-                let event = ControlPlaneEvent::TaskStateChanged {
+                candidate_events.push(ControlPlaneEvent::TaskStateChanged {
                     task_id,
-                    previous_state,
+                    previous_state: task.state,
                     new_state: TaskState::Cancelled,
-                };
-                let env = self.emit(studio_id, event)?;
-                self.apply_event(&env)
-                    .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
+                });
                 summary.cancelled_tasks.push(task_id);
             }
         }
 
+        // Atomically commit entire cancellation batch
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(summary)
     }
 
@@ -709,23 +1390,23 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         match scope {
             CancellationScope::Studio(studio_id) => {
-                if let Some(task_set) = self.tasks_by_studio.get(studio_id) {
+                if let Some(task_set) = self.state.tasks_by_studio.get(studio_id) {
                     for &task_id in task_set {
-                        if let Some(task) = self.task_graph.get_task(task_id)
+                        if let Some(task) = self.state.task_graph.get_task(task_id)
                             && !task.state.is_terminal()
                         {
                             tasks.push(task_id);
                         }
                     }
                 }
-                for approval in self.approvals.values() {
+                for approval in self.state.approvals.values() {
                     if approval.studio_id == *studio_id && approval.state == ApprovalState::Pending
                     {
                         approvals.push(approval.id);
                     }
                 }
-                for run in self.runs.values() {
-                    if let Some(task) = self.task_graph.get_task(run.task_id)
+                for run in self.state.runs.values() {
+                    if let Some(task) = self.state.task_graph.get_task(run.task_id)
                         && task.studio_id == *studio_id
                         && !run.state.is_terminal()
                     {
@@ -744,21 +1425,21 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                 };
 
                 for tid in target_task_ids {
-                    if let Some(task) = self.task_graph.get_task(tid)
+                    if let Some(task) = self.state.task_graph.get_task(tid)
                         && !task.state.is_terminal()
                     {
                         tasks.push(tid);
                     }
-                    if let Some(task_runs) = self.runs_by_task.get(&tid) {
+                    if let Some(task_runs) = self.state.runs_by_task.get(&tid) {
                         for &rid in task_runs {
-                            if let Some(run) = self.runs.get(&rid)
+                            if let Some(run) = self.state.runs.get(&rid)
                                 && !run.state.is_terminal()
                             {
                                 runs.push(rid);
                             }
                         }
                     }
-                    for approval in self.approvals.values() {
+                    for approval in self.state.approvals.values() {
                         if approval.task_id == tid && approval.state == ApprovalState::Pending {
                             approvals.push(approval.id);
                         }
@@ -766,19 +1447,19 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                 }
             }
             CancellationScope::Agent(agent_id) => {
-                for run in self.runs.values() {
+                for run in self.state.runs.values() {
                     if run.agent_id == *agent_id && !run.state.is_terminal() {
                         runs.push(run.id);
                     }
                 }
-                for approval in self.approvals.values() {
+                for approval in self.state.approvals.values() {
                     if approval.agent_id == *agent_id && approval.state == ApprovalState::Pending {
                         approvals.push(approval.id);
                     }
                 }
             }
             CancellationScope::Run(run_id) => {
-                if let Some(run) = self.runs.get(run_id)
+                if let Some(run) = self.state.runs.get(run_id)
                     && !run.state.is_terminal()
                 {
                     runs.push(*run_id);
@@ -789,7 +1470,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Ok((tasks, runs, approvals))
     }
 
-    /// Iteratively finds all descendant tasks (hierarchical subtasks + graph dependents).
+    /// Iteratively finds all descendant tasks strictly following parent_task_id hierarchy.
+    /// Does NOT traverse DAG execution dependencies.
     fn find_descendant_tasks(&self, root_task_id: TaskId) -> Vec<TaskId> {
         let mut results = Vec::new();
         let mut visited = HashSet::new();
@@ -801,19 +1483,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         while let Some(current_id) = queue.pop_front() {
             results.push(current_id);
 
-            // 1. Tasks where parent_task_id == current_id
-            for task in self.task_graph.all_tasks() {
+            // ONLY tasks where parent_task_id == current_id
+            for task in self.state.task_graph.all_tasks() {
                 if task.parent_task_id == Some(current_id) && visited.insert(task.id) {
                     queue.push_back(task.id);
-                }
-            }
-
-            // 2. Direct graph dependents
-            if let Ok(dependents) = self.task_graph.dependents_of(current_id) {
-                for dep_id in dependents {
-                    if visited.insert(dep_id) {
-                        queue.push_back(dep_id);
-                    }
                 }
             }
         }
@@ -822,190 +1495,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
     }
 
     // ========================================================================
-    // Internal Readiness Evaluator
+    // Event Queries & Replay Engine
     // ========================================================================
-
-    fn evaluate_dependents(&mut self, completed_task_id: TaskId) -> Result<(), ControlPlaneError> {
-        let dependents = self
-            .task_graph
-            .dependents_of(completed_task_id)
-            .map_err(ControlPlaneError::TaskGraph)?;
-
-        for dependent_id in dependents {
-            if let Some(task) = self.task_graph.get_task(dependent_id)
-                && task.state == TaskState::Blocked
-                && self.task_graph.is_ready(dependent_id)?
-            {
-                let studio_id = task.studio_id;
-                let event = ControlPlaneEvent::TaskStateChanged {
-                    task_id: dependent_id,
-                    previous_state: TaskState::Blocked,
-                    new_state: TaskState::Ready,
-                };
-                let envelope = self.emit(studio_id, event)?;
-                self.apply_event(&envelope)
-                    .map_err(|e| ControlPlaneError::InvalidOperation(e.to_string()))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // ========================================================================
-    // Event Emission & Replay Engine
-    // ========================================================================
-
-    fn emit(
-        &mut self,
-        studio_id: StudioId,
-        event: ControlPlaneEvent,
-    ) -> Result<EventEnvelope, ControlPlaneError> {
-        let latest = self.store.latest_sequence(studio_id)?;
-        let next_sequence = latest + 1;
-        let now = self.clock.now();
-
-        let envelope = EventEnvelope::new(studio_id, next_sequence, now, event);
-        self.store.append(envelope.clone())?;
-        Ok(envelope)
-    }
-
-    /// Applies an event to in-memory domain state. Used both for live mutations and replay.
-    fn apply_event(&mut self, envelope: &EventEnvelope) -> Result<(), ReplayError> {
-        let now = envelope.timestamp;
-
-        match &envelope.event {
-            ControlPlaneEvent::StudioCreated { studio } => {
-                self.studios.insert(studio.id, studio.clone());
-                self.tasks_by_studio.entry(studio.id).or_default();
-                self.agents_by_studio.entry(studio.id).or_default();
-            }
-
-            ControlPlaneEvent::AgentRegistered { agent } => {
-                self.agents.insert(agent.id, agent.clone());
-                self.agents_by_studio
-                    .entry(agent.studio_id)
-                    .or_default()
-                    .insert(agent.id);
-            }
-
-            ControlPlaneEvent::AgentStateChanged {
-                agent_id,
-                new_state,
-                ..
-            } => {
-                if let Some(agent) = self.agents.get_mut(agent_id) {
-                    agent.state = *new_state;
-                }
-            }
-
-            ControlPlaneEvent::TaskCreated { task } => {
-                self.tasks_by_studio
-                    .entry(task.studio_id)
-                    .or_default()
-                    .insert(task.id);
-                self.task_graph
-                    .add_task(task.clone())
-                    .map_err(|e| ReplayError::DomainViolation(e.to_string()))?;
-            }
-
-            ControlPlaneEvent::TaskStateChanged {
-                task_id, new_state, ..
-            } => {
-                if let Some(task) = self.task_graph.get_task_mut(*task_id) {
-                    task.state = *new_state;
-                    task.updated_at = now;
-                }
-            }
-
-            ControlPlaneEvent::TaskDependencyAdded {
-                task_id,
-                dependency_id,
-            } => {
-                self.task_graph
-                    .add_dependency(*task_id, *dependency_id)
-                    .map_err(|e| ReplayError::DomainViolation(e.to_string()))?;
-            }
-
-            ControlPlaneEvent::TaskDependencyRemoved {
-                task_id,
-                dependency_id,
-            } => {
-                self.task_graph
-                    .remove_dependency(*task_id, *dependency_id)
-                    .map_err(|e| ReplayError::DomainViolation(e.to_string()))?;
-            }
-
-            ControlPlaneEvent::RunCreated { run } => {
-                self.runs.insert(run.id, run.clone());
-                self.runs_by_task
-                    .entry(run.task_id)
-                    .or_default()
-                    .push(run.id);
-            }
-
-            ControlPlaneEvent::RunStateChanged {
-                run_id, new_state, ..
-            } => {
-                if let Some(run) = self.runs.get_mut(run_id) {
-                    run.state = *new_state;
-                    if *new_state == RunState::Running && run.started_at.is_none() {
-                        run.started_at = Some(now);
-                    } else if new_state.is_terminal() && run.finished_at.is_none() {
-                        run.finished_at = Some(now);
-                    }
-                }
-            }
-
-            ControlPlaneEvent::ApprovalRequested { approval } => {
-                self.approvals.insert(approval.id, approval.clone());
-            }
-
-            ControlPlaneEvent::ApprovalResolved {
-                approval_id,
-                new_state,
-                ..
-            } => {
-                if let Some(approval) = self.approvals.get_mut(approval_id) {
-                    approval.state = *new_state;
-                    approval.resolved_at = Some(now);
-                }
-            }
-
-            ControlPlaneEvent::ArtifactRegistered { artifact } => {
-                self.artifacts.insert(artifact.id, artifact.clone());
-            }
-
-            ControlPlaneEvent::CancellationRequested { .. } => {
-                // Informational envelope marker; state changes handled by subsequent entity state events.
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn all_studios(&self) -> impl Iterator<Item = &Studio> {
-        self.studios.values()
-    }
-
-    pub fn all_agents(&self) -> impl Iterator<Item = &AgentDescriptor> {
-        self.agents.values()
-    }
-
-    pub fn all_tasks(&self) -> impl Iterator<Item = &TaskRecord> {
-        self.task_graph.all_tasks()
-    }
-
-    pub fn all_runs(&self) -> impl Iterator<Item = &RunRecord> {
-        self.runs.values()
-    }
-
-    pub fn all_approvals(&self) -> impl Iterator<Item = &ApprovalRequest> {
-        self.approvals.values()
-    }
-
-    pub fn all_artifacts(&self) -> impl Iterator<Item = &ArtifactRecord> {
-        self.artifacts.values()
-    }
 
     pub fn events_for_studio(
         &self,
@@ -1021,33 +1512,47 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         self.store.all_events().map_err(ControlPlaneError::Store)
     }
 
-    /// Reconstructs a brand-new ControlPlane instance strictly by replaying an event sequence.
-    /// Does NOT emit duplicate events to the store.
+    /// Reconstructs a ControlPlane instance strictly by replaying an event sequence.
+    /// Validates schema version, sequence numbers, event ID uniqueness, entity references,
+    /// studio boundaries, and state transitions.
     pub fn replay_events(
         events: &[EventEnvelope],
         clock: C,
-        store: S,
+        mut store: S,
     ) -> Result<Self, ReplayError> {
         let mut expected_sequences: HashMap<StudioId, u64> = HashMap::new();
-        let mut engine = Self {
-            clock,
-            store,
-            studios: HashMap::new(),
-            agents: HashMap::new(),
-            task_graph: TaskGraph::new(),
-            runs: HashMap::new(),
-            approvals: HashMap::new(),
-            artifacts: HashMap::new(),
-            runs_by_task: HashMap::new(),
-            tasks_by_studio: HashMap::new(),
-            agents_by_studio: HashMap::new(),
-        };
+        let mut seen_event_ids: HashSet<EventId> = HashSet::new();
+        let mut state = ControlPlaneState::new();
 
         for envelope in events {
+            // 1. Verify schema version
+            if envelope.schema_version != CONTROL_PLANE_EVENT_SCHEMA_VERSION {
+                return Err(ReplayError::UnsupportedSchemaVersion {
+                    version: envelope.schema_version,
+                    supported: CONTROL_PLANE_EVENT_SCHEMA_VERSION,
+                });
+            }
+
+            // 2. Reject duplicate event ID
+            if !seen_event_ids.insert(envelope.event_id) {
+                return Err(ReplayError::DuplicateEventId {
+                    event_id: envelope.event_id,
+                });
+            }
+
+            // 3. Verify monotonic sequence without gaps or regressions per Studio
             let studio_id = envelope.studio_id;
             let expected = expected_sequences.get(&studio_id).copied().unwrap_or(1);
 
-            if envelope.sequence != expected {
+            if envelope.sequence < expected {
+                return Err(ReplayError::Store(StoreError::SequenceRegression {
+                    studio_id,
+                    latest: expected - 1,
+                    attempted: envelope.sequence,
+                }));
+            }
+
+            if envelope.sequence > expected {
                 return Err(ReplayError::InvalidSequence {
                     expected,
                     actual: envelope.sequence,
@@ -1056,16 +1561,20 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
             expected_sequences.insert(studio_id, expected + 1);
 
-            // Populate store with original envelopes
-            engine
-                .store
-                .append(envelope.clone())
-                .map_err(|e| ReplayError::DomainViolation(e.to_string()))?;
-
-            // Mutate in-memory state
-            engine.apply_event(envelope)?;
+            // 4. Strict apply to state
+            state.apply_event(envelope)?;
         }
 
-        Ok(engine)
+        // 5. Populate store atomically
+        store.append_batch(events).map_err(|e| match e {
+            StoreError::DuplicateEventId { event_id } => ReplayError::DuplicateEventId { event_id },
+            other => ReplayError::Store(other),
+        })?;
+
+        Ok(Self {
+            clock,
+            store,
+            state,
+        })
     }
 }

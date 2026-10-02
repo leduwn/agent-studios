@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::TransitionError;
 use crate::id::{AgentId, StudioId};
 
 /// Distinguishes between native Codex-derived agents and externally adapted agent runtimes.
@@ -34,6 +35,45 @@ impl AgentState {
 
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Stopped | Self::Failed)
+    }
+
+    pub const fn can_transition_to(&self, target: Self) -> bool {
+        if self.is_terminal() {
+            return false;
+        }
+
+        matches!(
+            (self, target),
+            (
+                Self::Registered,
+                Self::Starting | Self::Stopped | Self::Failed
+            ) | (Self::Starting, Self::Idle | Self::Stopping | Self::Failed)
+                | (Self::Idle, Self::Busy | Self::Stopping | Self::Failed)
+                | (
+                    Self::Busy,
+                    Self::Idle | Self::Paused | Self::Stopping | Self::Failed
+                )
+                | (
+                    Self::Paused,
+                    Self::Busy | Self::Idle | Self::Stopping | Self::Failed
+                )
+                | (Self::Stopping, Self::Stopped | Self::Failed)
+        )
+    }
+
+    pub fn validate_transition_to(&self, target: Self) -> Result<(), TransitionError> {
+        if self.is_terminal() {
+            return Err(TransitionError::TerminalAgentTransition { state: *self });
+        }
+
+        if self.can_transition_to(target) {
+            Ok(())
+        } else {
+            Err(TransitionError::InvalidAgentTransition {
+                from: *self,
+                to: target,
+            })
+        }
     }
 }
 

@@ -1,5 +1,7 @@
 use agent_studios_protocol::error::TransitionError;
-use agent_studios_protocol::id::{AgentId, ApprovalId, ArtifactId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{
+    AgentId, ApprovalId, ArtifactId, EventId, RunId, StudioId, TaskId,
+};
 use thiserror::Error;
 
 /// Root error type for Agent Studios control-plane domain operations.
@@ -95,18 +97,63 @@ pub enum StoreError {
         attempted: u64,
     },
 
+    #[error("Duplicate event ID: {event_id}")]
+    DuplicateEventId { event_id: EventId },
+
     #[error("Storage failure: {0}")]
     StorageFailure(String),
 }
 
 /// Errors raised during event replay.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ReplayError {
+    #[error("Unsupported event schema version: {version} (supported: {supported})")]
+    UnsupportedSchemaVersion { version: u16, supported: u16 },
+
     #[error("Invalid event sequence during replay: expected {expected}, got {actual}")]
     InvalidSequence { expected: u64, actual: u64 },
 
-    #[error("Corrupted or incompatible event at sequence {sequence}: {reason}")]
-    CorruptedEvent { sequence: u64, reason: String },
+    #[error("Duplicate event ID during replay: {event_id}")]
+    DuplicateEventId { event_id: EventId },
+
+    #[error("Studio mismatch in envelope: expected {expected}, actual {actual}")]
+    StudioMismatch {
+        expected: StudioId,
+        actual: StudioId,
+    },
+
+    #[error("Studio already exists: {studio_id}")]
+    DuplicateStudio { studio_id: StudioId },
+
+    #[error("Agent already registered: {agent_id}")]
+    DuplicateAgent { agent_id: AgentId },
+
+    #[error("Studio not found: {studio_id}")]
+    StudioNotFound { studio_id: StudioId },
+
+    #[error("Agent not found: {agent_id}")]
+    AgentNotFound { agent_id: AgentId },
+
+    #[error("Task not found: {task_id}")]
+    TaskNotFound { task_id: TaskId },
+
+    #[error("Run not found: {run_id}")]
+    RunNotFound { run_id: RunId },
+
+    #[error("Approval request not found: {approval_id}")]
+    ApprovalNotFound { approval_id: ApprovalId },
+
+    #[error("State mismatch: current state is {actual}, event expected {expected}")]
+    StateMismatch { actual: String, expected: String },
+
+    #[error("Invalid state transition: {reason}")]
+    InvalidTransition { reason: String },
+
+    #[error("Dependency cycle: from {from} to {to}")]
+    DependencyCycle { from: TaskId, to: TaskId },
+
+    #[error(transparent)]
+    Store(#[from] StoreError),
 
     #[error("Domain violation during replay: {0}")]
     DomainViolation(String),
