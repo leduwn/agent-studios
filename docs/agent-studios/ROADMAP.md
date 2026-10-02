@@ -98,9 +98,37 @@ This roadmap defines the strategic progression for building Agent Studios upon t
   - Negative token delta validation and open block rejection on stream termination.
 - Test verification: 27 new tests across 3 test suites (`anthropic_request_tests.rs`, `anthropic_stream_tests.rs`, `anthropic_roundtrip_tests.rs`); 74 total passing tests across `agent-studios-protocol-adapters`.
 
-### M07: Google Gemini Protocol Adapter
-- Implement Google Gemini `generateContent` adapter.
-- Support multimodal payloads and Gemini-specific function calling conventions.
+### M07: Google Gemini generateContent Protocol Adapter (Completed on `feat/gemini-generate-content-adapter`)
+
+- Implement `agent-studios-protocol-adapters::gemini` module providing pure in-memory protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and Google Gemini `generateContent` / `streamGenerateContent` wire protocol (`models/{model}:generateContent` and `streamGenerateContent`).
+- Pure in-memory protocol translation: zero network transport (`reqwest`, `hyper`, asynchronous Tokio runtime, or Google SDKs omitted).
+- Zero secret handling: no API keys, Google Cloud IAM tokens, or OAuth credentials consumed or resolved.
+- Preserved path-based model parameterization: model ID returned verbatim in `GeminiRequestTranslation.model` without `models/` prefix.
+- Upstream Codex isolation: `codex-rs/` remains completely unmodified (`git diff origin/main -- codex-rs` is empty).
+- Request translation (`translate_request`):
+  - System instructions: top-level `instructions` and leading `system`/`developer` turns mapped into `request.system_instruction`; interleaved system turns fail closed with `UnsupportedSystemHistoryPlacement`.
+  - Conversational roles: `user` -> `user`, `assistant` -> `model`; unsupported roles fail closed with `UnsupportedRole`.
+  - Multimodal inputs: inline data URLs for supported images (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) and audio (`audio/wav`, `audio/mp3`, `audio/mpeg`, `audio/aac`, `audio/ogg`, `audio/flac`) mapped to `GeminiPart::inline_data`. External file references and audio URLs fail closed with `UnsupportedContent`.
+  - Tool mapping: regex validation against Gemini tool naming contract `^[a-zA-Z0-9_.-]{1,128}$`; parameters schema preserved.
+  - Strict tool semantics: `strict: true` tools promote tool choice mode to `VALIDATED`; mixed strict/non-strict tools promote entire set with `StrictToolScopePromoted` warning.
+  - Tool choice mapping: `""` -> omitted / `VALIDATED`, `"auto"` -> `Auto` / `VALIDATED`, `"none"` -> `None` (retaining tool definitions), `"required"` -> `Any`.
+  - Sequential tool calling rejection: `parallel_tool_calls: false` when tools are active fails closed with `SequentialToolCallingNotEnforceable`.
+  - Structured outputs: maps `TextControls.format` (`json_schema`) into `response_mime_type = "application/json"` and `response_schema`.
+  - Thinking policies: `ExactReasoningEffort` (`Minimal`, `Low`, `Medium`, `High`), `LegacyBudget(u64)`. Non-standard tiers fail closed with `UnsupportedReasoningEffort`.
+  - Turn coalescing: adjacent function outputs coalesced into single `user` Content turn; adjacent tool calls coalesced into single `model` Content turn.
+  - Opaque thought signature replay: restores native thinking parts and cryptographic signatures from `GeminiContinuationState`.
+  - Fail-closed security features: `access_programs` rejected immediately with `UnsupportedSecurityFeature`.
+- Streaming event translation (`GeminiStreamTranslator`):
+  - Stream identity & model continuity: validates non-empty `responseId` on first chunk, enforces response ID and model version continuity across chunks.
+  - Single candidate enforcement: rejects multiple candidates fail-closed with `MultipleCandidatesUnsupported`.
+  - Safety & prompt feedback: blocks on prompt feedback `blockReason` or candidate safety ratings (`SafetyBlocked`).
+  - Delta streaming: emits `OutputTextDelta` for text parts, `ReasoningContentDelta` for reasoning parts with thought signature buffering.
+  - Atomic function call streaming: emits complete `OutputItemAdded(FunctionCall)`, `ToolCallInputDelta`, and `OutputItemDone(FunctionCall)`.
+  - Deterministic call ID generation: when provider omits call ID, generates `gemini-call-{response_id}-{candidate_index}-{part_index}`, records mapping in `GeminiContinuationState`, and omits `id` on wire `functionResponse`.
+  - Turn continuation: finish reason `"STOP"` maps to `end_turn: false` if tool calls were emitted, or `end_turn: true` otherwise.
+  - Fail-closed terminal reasons: `MAX_TOKENS` (`MaxTokensExceeded`), `SAFETY` (`SafetyBlocked`), `RECITATION` (`RecitationBlocked`), `LANGUAGE` (`UnsupportedLanguage`), `BLOCKLIST` / `PROHIBITED_CONTENT` / `SPII` (`ContentBlocked`), `MALFORMED_FUNCTION_CALL` (`MalformedFunctionCall`).
+  - Effective input token accounting: `input_tokens = promptTokenCount` (includes cached tokens), `cached_input_tokens = cachedContentTokenCount`, `total_tokens = totalTokenCount`. Rejects negative token counts.
+- Full verification: 57 tests across 4 test suites (`gemini_request_tests.rs`, `gemini_stream_tests.rs`, `gemini_roundtrip_tests.rs`, `gemini_hardening_tests.rs`); 150 total passing tests in `agent-studios-protocol-adapters`.
 
 ### M08: Internal Multi-Agent Extension
 - Enhance internal agent runner to instantiate multiple isolated agent configurations.

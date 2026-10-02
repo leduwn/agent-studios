@@ -6,6 +6,7 @@
 
 pub mod anthropic;
 pub mod error;
+pub mod gemini;
 pub mod request;
 pub mod stream;
 pub mod types;
