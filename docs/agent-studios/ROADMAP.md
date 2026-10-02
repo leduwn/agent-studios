@@ -95,21 +95,30 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Implement runtime adapter wrapping Claude Code CLI.
 - Handle session resumption, approval delegation, and output streaming.
 
-### M13: Desktop Shell
-- Scaffold Windows desktop application container (Windows x64).
-- Integrate native IPC channel with the Agent Studios control plane backend.
+### M13: Code-OSS Integration Foundation
+- Maintained Code-OSS source snapshot/fork targeting Windows x64 first.
+- Independent Agent Studios branding and layout configuration.
+- Built-in extension loading mechanism and native Agent Studios runtime IPC.
+- Preserve normal IDE behavior (Explorer, search, source control, terminal, debugger, LSP).
+- Initiate custom iconography and visual identity pass (icon design deferred until M13).
 
-### M14: Agent Mode UX
-- Implement high-level conversational interface.
-- Provide task timeline, tool execution inspect panels, interactive approvals, and diff visualizer.
+### M14: Agent Studios Built-in AI Extension
+- Default Agent Studios chat interface replacing the AI surface normally occupied by Copilot.
+- Direct routing to Agent Studios / Codex runtime (no `@agentstudios` prefix required, no Copilot dependency).
+- Full operational parity: inspect/edit files, `apply_patch`, integrated terminal commands, test/build execution.
+- Interactive approvals, diffs, provider/model controls, and task queue visibility.
 
-### M15: IDE Mode UX
-- Integrate Monaco Editor and file tree project navigation.
-- Embed xterm.js terminal emulator, git diff panes, and side-by-side agent collaborator panels.
+### M15: Unified Agent / IDE Workbench
+- Dual layout system: IDE-focused layout and Agent-focused layout.
+- One shared underlying runtime session (identical session ID, working directory, tool history, worktrees, active tasks).
+- Instant switching between layouts without state loss or process interruption.
+- Equal Codex capabilities available in both views.
 
-### M16: Skills, MCP & Plugins UX
-- Build management UI for discovering, configuring, and toggling `AGENTS.md`, `SKILL.md`, and MCP servers.
-- Provide secure credential input targeting Windows Credential Manager.
+### M16: Full Codex Feature Surface
+- Comprehensive Codex capability integration: Skills (`SKILL.md`), Plugins, MCP servers, hooks, `AGENTS.md`.
+- Advanced multi-agent orchestration: Git worktrees, subagents, multi-agent primitives, budget caps.
+- Fine-grained approval and sandboxing controls.
+- Integrated diagnostics, session replay, and runtime telemetry.
 
 ### M17: Packaging, Installer & Auto-Updater
 - Configure Windows native installers (MSI / NSIS / WiX).
