@@ -380,14 +380,18 @@ fn test_tool_choice_mapping() {
     let t = ChatCompletionsAdapter::translate_request(&req).unwrap();
     assert_eq!(t.request.tool_choice, Some(ChatToolChoice::None));
 
+    req.tool_choice = "auto".to_string();
+    let t = ChatCompletionsAdapter::translate_request(&req).unwrap();
+    assert_eq!(t.request.tool_choice, Some(ChatToolChoice::Auto));
+
     req.tool_choice = "required".to_string();
     let t = ChatCompletionsAdapter::translate_request(&req).unwrap();
     assert_eq!(t.request.tool_choice, Some(ChatToolChoice::Required));
 
     req.tool_choice = "custom_fn".to_string();
-    let t = ChatCompletionsAdapter::translate_request(&req).unwrap();
+    let err = ChatCompletionsAdapter::translate_request(&req).unwrap_err();
     assert_eq!(
-        t.request.tool_choice,
-        Some(ChatToolChoice::Function("custom_fn".to_string()))
+        err,
+        ChatAdapterError::UnsupportedToolChoice("custom_fn".to_string())
     );
 }

@@ -55,6 +55,18 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Streaming translation (`ChatCompletionStreamTranslator`): deterministic event emission (`Created`, `OutputItemAdded`, `OutputTextDelta`, `ToolCallInputDelta`, `OutputItemDone`, `Completed`), fragmented/interleaved tool call reconstruction across parallel tool indices, finish reason validation (`stop`, `tool_calls`, rejecting `length` and `content_filter`), single choice constraint (`choice.index == 0`), token usage mapping, and SSE line decoding.
 - Full verification: 17 unit and integration tests across 3 test suites, zero clippy warnings with `-D warnings`, zero modifications to upstream `codex-rs/`.
 
+### M05.1: Chat Completions Correctness Hardening (Completed on `feat/chat-completions-adapter`)
+
+- Strict Codex turn continuation: `finish_reason == "tool_calls" | "function_call"` sets `ResponseEvent::Completed.end_turn = Some(false)` to trigger upstream tool execution; `finish_reason == "stop"` sets `end_turn = Some(true)`.
+- Response ID and model continuity: enforces non-empty response ID on first chunk (`MissingResponseId`), rejects ID mismatch across chunks (`ResponseIdMismatch`), and guarantees model continuity across stream (`ResponseModelMismatch`).
+- Strict terminal state machine: fails closed with `AlreadyCompleted` on any call to `feed_chunk`, `finish`, or `feed_done` after completion; fails with `MissingFinishReason` on stream EOF without terminal finish reason.
+- Elimination of synthetic tool identity: buffers argument fragments (`pending_argument_fragments`) until both `id` and `name` are received, then emits `OutputItemAdded(FunctionCall)` followed by queued `ToolCallInputDelta` fragments in original sequence; incomplete tool calls at finish fail with `IncompleteToolCall`.
+- Tool identity immutability and type validation: rejects conflicting ID or function name updates (`ToolCallIdentityMismatch`), and rejects non-function stream tool calls (`UnsupportedToolCallType`).
+- Lossless tool output translation: validates `FunctionCallOutputBody::ContentItems` and fails closed on non-text payloads (`UnsupportedToolOutputContent`).
+- Fail-closed request parsing: rejects encrypted `AgentMessage` (`UnsupportedEncryptedAgentMessage`), unsupported `ResponseItem` variants (`UnsupportedResponseItem`), invalid roles (`InvalidRole`), and non-standard `tool_choice` strings (`UnsupportedToolChoice`). Emits `NormalizedImageDetail` warning when normalizing `ImageDetail::Original` to `"high"`.
+- Usage validation & deterministic lifecycle: rejects negative token values (`InvalidUsage`), rejects text resumption after tool call execution (`InvalidStreamState`), and enforces exactly-once item lifecycle.
+- Full regression suite: 30 new hardening tests in `correctness_hardening_tests.rs` (47 total tests in crate), zero clippy warnings, zero modifications to `codex-rs/`.
+
 ### M06: Anthropic Messages Protocol Adapter
 - Implement Anthropic Messages protocol translation adapter.
 - Provide token caching markers, thinking parameter mapping, and tool call serialization.

@@ -164,7 +164,7 @@ fn test_roundtrip_semantic_workflow() {
             ..
         } => {
             assert_eq!(response_id, "chatcmpl-roundtrip");
-            assert_eq!(end_turn, &Some(true));
+            assert_eq!(end_turn, &Some(false));
             let usage = token_usage.as_ref().expect("usage present");
             assert_eq!(usage.input_tokens, 50);
             assert_eq!(usage.output_tokens, 25);

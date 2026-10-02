@@ -75,8 +75,14 @@ The `translate_request` function converts a Codex `ResponsesApiRequest` into a `
   - Non-function tools (such as Responses-specific `web_search`) are rejected with `ChatAdapterError::UnsupportedToolType`.
 - **Tool Choice Mapping**: Maps `"none"`, `"auto"`, `"required"`, or custom function names to `ChatToolChoice`.
 - **Structured Output**: Maps Codex `TextControls.format` (`json_schema`) to `ChatResponseFormat::json_schema` with strict validation.
-- **Security-Sensitive Feature Rejection**: If `access_programs` is present, translation fails immediately with `ChatAdapterError::UnsupportedSecurityFeature`.
-- **Warning Model for Dropped Responses-Only Fields**:
+- **Fail-Closed Security & Role Validation**:
+  - If `access_programs` is present, translation fails immediately with `ChatAdapterError::UnsupportedSecurityFeature`.
+  - Encrypted `AgentMessage` items are rejected with `ChatAdapterError::UnsupportedEncryptedAgentMessage`.
+  - Unrecognized `ResponseItem` variants fail closed with `ChatAdapterError::UnsupportedResponseItem`.
+  - Roles must be one of `user`, `assistant`, `system`, or `developer` (normalized to `system`); unknown roles return `ChatAdapterError::InvalidRole`.
+  - `tool_choice` must be empty, `"auto"`, `"none"`, or `"required"`; other strings return `ChatAdapterError::UnsupportedToolChoice`.
+  - Lossless tool output verification: `FunctionCallOutputBody::ContentItems` containing non-text items (`InputImage`, `InputAudio`, `EncryptedContent`) return `ChatAdapterError::UnsupportedToolOutputContent`.
+- **Warning Model for Dropped or Normalized Fields**:
   - Emits typed `ChatAdapterWarning` variants for:
     - `reasoning` (e.g. reasoning effort controls)
     - `prompt_cache_key`
@@ -85,6 +91,7 @@ The `translate_request` function converts a Codex `ResponsesApiRequest` into a `
     - `store`
     - `service_tier`
     - `verbosity`
+    - `NormalizedImageDetail` (when `ImageDetail::Original` is normalized to `"high"`)
 
 ---
 
@@ -118,6 +125,25 @@ The `ChatCompletionStreamTranslator` reconstructs streaming `ResponseEvent` sequ
   - `length`: Fails with `ChatAdapterError::StreamIncomplete`.
   - `content_filter`: Fails with `ChatAdapterError::ContentFilterTriggered`.
   - Unexpected reasons: Fails with `ChatAdapterError::UnexpectedFinishReason`.
+- **Codex Continuation & Turn Lifecycle**:
+  - `finish_reason == "tool_calls" | "function_call"` sets `ResponseEvent::Completed.end_turn = Some(false)` so Codex triggers follow-up tool execution.
+  - `finish_reason == "stop"` sets `end_turn = Some(true)`.
+  - Reaching completion without an explicit successful finish reason fails with `ChatAdapterError::MissingFinishReason`.
+- **Response & Model Continuity**:
+  - Initial chunk must provide a valid non-empty response ID (`ChatAdapterError::MissingResponseId`).
+  - Subsequent chunks must match the established response ID (`ChatAdapterError::ResponseIdMismatch`).
+  - Model continuity is enforced across chunks (`ChatAdapterError::ResponseModelMismatch`).
+- **Strict Terminal State**:
+  - Calling `feed_chunk`, `finish`, or `feed_done` after completion returns `ChatAdapterError::AlreadyCompleted`.
+- **No Synthetic Tool Identity & Fragment Buffering**:
+  - Does not synthesize fallback IDs or empty function names.
+  - Arguments arriving before `id` and `name` are buffered and flushed in original order once identity arrives.
+  - Incomplete tool calls at stream finish return `ChatAdapterError::IncompleteToolCall`.
+  - Tool identity is immutable (`ChatAdapterError::ToolCallIdentityMismatch`).
+  - Tool types other than `"function"` fail with `ChatAdapterError::UnsupportedToolCallType`.
+- **Usage & Stream Validation**:
+  - Negative token counts fail with `ChatAdapterError::InvalidUsage`.
+  - Resuming text streaming after tool execution has begun fails with `ChatAdapterError::InvalidStreamState`.
 - **Deterministic Synthetic IDs**:
   - Synthesizes item IDs deterministically:
     - Messages: `chat-msg-<response_id>`
@@ -130,7 +156,7 @@ The `ChatCompletionStreamTranslator` reconstructs streaming `ResponseEvent` sequ
 
 ## Verification & Test Suites
 
-The crate contains 17 automated tests covering request translation, streaming reconstruction, error enforcement, and roundtrip workflows:
+The crate contains 47 automated tests covering request translation, streaming reconstruction, error enforcement, roundtrip workflows, and M05.1 correctness hardening:
 
 1. `tests/request_translation_tests.rs` (11 tests):
    - Instructions and developer role normalization.
@@ -149,4 +175,6 @@ The crate contains 17 automated tests covering request translation, streaming re
    - Multiple choices constraint enforcement.
    - SSE line decoding and comment handling.
 3. `tests/roundtrip_semantic_tests.rs` (1 test):
-   - End-to-end integration test translating a full request and streaming back simulated SSE chunks with fragmented tool call execution and token usage.
+   - End-to-end integration test translating a full request and streaming back simulated SSE chunks with fragmented tool call execution, continuation semantics (`end_turn: Some(false)`), and token usage.
+4. `tests/correctness_hardening_tests.rs` (30 tests):
+   - Comprehensive regression coverage for all M05.1 correctness requirements (finish before chunk, response ID continuity, model continuity, terminal state guards, tool identity buffering/immutability/validation, lossless tool output, fail-closed message roles, exactly-once item lifecycle).

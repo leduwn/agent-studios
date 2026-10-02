@@ -11,7 +11,7 @@ pub mod types;
 
 pub use error::{ChatAdapterError, ChatAdapterWarning};
 pub use request::{ChatRequestTranslation, translate_request};
-pub use stream::{ChatCompletionStreamTranslator, decode_sse_line, is_done_line};
+pub use stream::{ChatCompletionStreamTranslator, ChatFinishKind, decode_sse_line, is_done_line};
 pub use types::{
     ChatChunkChoice, ChatChunkDelta, ChatChunkFunctionCall, ChatChunkToolCall, ChatCompletionChunk,
     ChatCompletionRequest, ChatCompletionTokensDetails, ChatContentPart, ChatFunctionCall,

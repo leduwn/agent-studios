@@ -3,6 +3,54 @@ use thiserror::Error;
 /// Errors produced during protocol translation between Codex Responses and Chat Completions.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ChatAdapterError {
+    #[error("Missing response ID in stream chunk")]
+    MissingResponseId,
+
+    #[error("Response ID mismatch: expected '{expected}', got '{actual}'")]
+    ResponseIdMismatch { expected: String, actual: String },
+
+    #[error("Response model mismatch: expected '{expected}', got '{actual}'")]
+    ResponseModelMismatch { expected: String, actual: String },
+
+    #[error("Stream is already completed")]
+    AlreadyCompleted,
+
+    #[error("Stream finished without observing a valid terminal finish reason")]
+    MissingFinishReason,
+
+    #[error(
+        "Tool call at index {index} is incomplete (missing_id: {missing_id}, missing_name: {missing_name})"
+    )]
+    IncompleteToolCall {
+        index: usize,
+        missing_id: bool,
+        missing_name: bool,
+    },
+
+    #[error("Tool call identity mismatch: {0}")]
+    ToolCallIdentityMismatch(String),
+
+    #[error("Unsupported tool call type in stream: {0}")]
+    UnsupportedToolCallType(String),
+
+    #[error("Unsupported content in tool output: {0}")]
+    UnsupportedToolOutputContent(String),
+
+    #[error("Encrypted AgentMessage is not supported in Chat Completions wire format")]
+    UnsupportedEncryptedAgentMessage,
+
+    #[error("Invalid message role: '{0}'")]
+    InvalidRole(String),
+
+    #[error("Unsupported tool choice: '{0}'")]
+    UnsupportedToolChoice(String),
+
+    #[error("Invalid token usage: {0}")]
+    InvalidUsage(String),
+
+    #[error("Invalid stream state: {0}")]
+    InvalidStreamState(String),
+
     #[error("Security-sensitive feature rejected: {0}")]
     UnsupportedSecurityFeature(String),
 
@@ -47,6 +95,7 @@ pub enum ChatAdapterError {
 /// representation in OpenAI Chat wire format.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatAdapterWarning {
+    NormalizedImageDetail { from: String, to: String },
     DroppedReasoning(String),
     DroppedPromptCacheKey(String),
     DroppedInclude(Vec<String>),

@@ -1,7 +1,7 @@
 use codex_api::ResponsesApiRequest;
 use codex_protocol::models::{
-    ContentItem, FunctionCallOutputBody, ImageDetail, ImageReference, ResponseItem,
-    plaintext_agent_message_content,
+    ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, ImageDetail,
+    ImageReference, ResponseItem, plaintext_agent_message_content,
 };
 
 use crate::error::{ChatAdapterError, ChatAdapterWarning};
@@ -18,12 +18,53 @@ pub struct ChatRequestTranslation {
     pub warnings: Vec<ChatAdapterWarning>,
 }
 
-fn image_detail_to_str(detail: ImageDetail) -> String {
-    match detail {
+fn map_image_detail(
+    detail: Option<ImageDetail>,
+    warnings: &mut Vec<ChatAdapterWarning>,
+) -> Option<String> {
+    detail.map(|d| match d {
         ImageDetail::Auto => "auto".to_string(),
         ImageDetail::Low => "low".to_string(),
         ImageDetail::High => "high".to_string(),
-        ImageDetail::Original => "high".to_string(),
+        ImageDetail::Original => {
+            warnings.push(ChatAdapterWarning::NormalizedImageDetail {
+                from: "original".to_string(),
+                to: "high".to_string(),
+            });
+            "high".to_string()
+        }
+    })
+}
+
+fn convert_tool_output_body(body: &FunctionCallOutputBody) -> Result<String, ChatAdapterError> {
+    match body {
+        FunctionCallOutputBody::Text(text) => Ok(text.clone()),
+        FunctionCallOutputBody::ContentItems(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    FunctionCallOutputContentItem::InputText { text } => {
+                        parts.push(text.as_str());
+                    }
+                    FunctionCallOutputContentItem::InputImage { .. } => {
+                        return Err(ChatAdapterError::UnsupportedToolOutputContent(
+                            "Tool output contains image content which cannot be translated to Chat Completions without data loss".to_string(),
+                        ));
+                    }
+                    FunctionCallOutputContentItem::InputAudio { .. } => {
+                        return Err(ChatAdapterError::UnsupportedToolOutputContent(
+                            "Tool output contains audio content which cannot be translated to Chat Completions without data loss".to_string(),
+                        ));
+                    }
+                    FunctionCallOutputContentItem::EncryptedContent { .. } => {
+                        return Err(ChatAdapterError::UnsupportedToolOutputContent(
+                            "Tool output contains encrypted content which cannot be translated to Chat Completions without data loss".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(parts.join("\n"))
+        }
     }
 }
 
@@ -82,11 +123,11 @@ pub fn translate_request(
     for item in &request.input {
         match item {
             ResponseItem::Message { role, content, .. } => {
-                // Developer role normalized to system role for broad proxy compatibility
-                let normalized_role = if role == "developer" {
-                    "system".to_string()
-                } else {
-                    role.clone()
+                // Strict role validation: only user, assistant, system, developer accepted
+                let normalized_role = match role.as_str() {
+                    "user" | "assistant" | "system" => role.clone(),
+                    "developer" => "system".to_string(),
+                    _ => return Err(ChatAdapterError::InvalidRole(role.clone())),
                 };
 
                 let message_content = if content.is_empty() {
@@ -101,7 +142,7 @@ pub fn translate_request(
                                 Some(ChatMessageContent::Parts(vec![ChatContentPart::ImageUrl {
                                     image_url: ChatImageUrl {
                                         url: image_url.clone(),
-                                        detail: detail.map(image_detail_to_str),
+                                        detail: map_image_detail(*detail, &mut warnings),
                                     },
                                 }]))
                             }
@@ -130,7 +171,7 @@ pub fn translate_request(
                                     parts.push(ChatContentPart::ImageUrl {
                                         image_url: ChatImageUrl {
                                             url: image_url.clone(),
-                                            detail: detail.map(image_detail_to_str),
+                                            detail: map_image_detail(*detail, &mut warnings),
                                         },
                                     });
                                 }
@@ -192,13 +233,7 @@ pub fn translate_request(
                     )
                 })?;
 
-                let content_str = match &output.body {
-                    FunctionCallOutputBody::Text(text) => text.clone(),
-                    FunctionCallOutputBody::ContentItems(items) => output
-                        .body
-                        .to_text()
-                        .unwrap_or_else(|| serde_json::to_string(items).unwrap_or_default()),
-                };
+                let content_str = convert_tool_output_body(&output.body)?;
 
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
@@ -234,13 +269,7 @@ pub fn translate_request(
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
-                let content_str = match &output.body {
-                    FunctionCallOutputBody::Text(text) => text.clone(),
-                    FunctionCallOutputBody::ContentItems(items) => output
-                        .body
-                        .to_text()
-                        .unwrap_or_else(|| serde_json::to_string(items).unwrap_or_default()),
-                };
+                let content_str = convert_tool_output_body(&output.body)?;
 
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
@@ -263,9 +292,7 @@ pub fn translate_request(
                         tool_call_id: None,
                     });
                 } else {
-                    warnings.push(ChatAdapterWarning::Other(
-                        "AgentMessage with encrypted content dropped".to_string(),
-                    ));
+                    return Err(ChatAdapterError::UnsupportedEncryptedAgentMessage);
                 }
             }
 
@@ -285,15 +312,42 @@ pub fn translate_request(
                     "ToolSearchCall is not supported in Chat Completions wire format".to_string(),
                 ));
             }
+            ResponseItem::ToolSearchOutput { .. } => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(
+                    "ToolSearchOutput is not supported in Chat Completions wire format".to_string(),
+                ));
+            }
+            ResponseItem::WebSearchCall { .. } => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(
+                    "WebSearchCall is not supported in Chat Completions wire format".to_string(),
+                ));
+            }
+            ResponseItem::ImageGenerationCall { .. } => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(
+                    "ImageGenerationCall is not supported in Chat Completions wire format"
+                        .to_string(),
+                ));
+            }
+            ResponseItem::Compaction { .. } => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(
+                    "Compaction is not supported in Chat Completions wire format".to_string(),
+                ));
+            }
+            ResponseItem::ConfigurationUpdate { .. } => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(
+                    "ConfigurationUpdate is not supported in Chat Completions wire format"
+                        .to_string(),
+                ));
+            }
             ResponseItem::AdditionalTools { .. } => {
                 return Err(ChatAdapterError::UnsupportedResponseItem(
                     "AdditionalTools is not supported in Chat Completions wire format".to_string(),
                 ));
             }
-            _ => {
-                warnings.push(ChatAdapterWarning::Other(
-                    "Unrecognized ResponseItem ignored in message history".to_string(),
-                ));
+            item => {
+                return Err(ChatAdapterError::UnsupportedResponseItem(format!(
+                    "Unsupported ResponseItem variant in conversation history: {item:?}"
+                )));
             }
         }
     }
@@ -378,13 +432,13 @@ pub fn translate_request(
         None
     };
 
-    // Tool choice mapping
+    // Tool choice mapping: strictly allow only "", "auto", "none", "required"
     let tool_choice = match request.tool_choice.as_str() {
+        "" => None,
         "auto" => Some(ChatToolChoice::Auto),
         "none" => Some(ChatToolChoice::None),
         "required" => Some(ChatToolChoice::Required),
-        "" => None,
-        custom => Some(ChatToolChoice::Function(custom.to_string())),
+        other => return Err(ChatAdapterError::UnsupportedToolChoice(other.to_string())),
     };
 
     // Structured output / response_format mapping
