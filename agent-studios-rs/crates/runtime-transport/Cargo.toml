@@ -1,0 +1,31 @@
+[package]
+name = "agent-studios-runtime-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent-studios-provider = { path = "../provider" }
+agent-studios-protocol-adapters = { path = "../protocol-adapters" }
+codex-api = { path = "../../../codex-rs/codex-api" }
+codex-model-provider = { path = "../../../codex-rs/model-provider" }
+codex-protocol = { path = "../../../codex-rs/protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1.6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+url = { workspace = true }
+async-trait = "0.1"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1.40", features = ["sync", "time", "rt-multi-thread", "macros"] }
+uuid = { workspace = true }

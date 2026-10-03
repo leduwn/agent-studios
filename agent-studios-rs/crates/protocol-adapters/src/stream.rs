@@ -66,6 +66,11 @@ impl ChatCompletionStreamTranslator {
         }
     }
 
+    /// Returns true if the stream reached terminal completion.
+    pub fn is_completed(&self) -> bool {
+        self.completed
+    }
+
     /// Feeds a decoded `ChatCompletionChunk` into the translator, returning newly emitted `ResponseEvent`s.
     pub fn feed_chunk(
         &mut self,
