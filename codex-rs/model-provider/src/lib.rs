@@ -2,6 +2,7 @@ mod amazon_bedrock;
 mod auth;
 mod bearer_auth_provider;
 mod combined_auth;
+mod inference_backend;
 mod models_endpoint;
 mod models_identity;
 mod provider;
@@ -28,6 +29,9 @@ pub use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 pub use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 pub use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 pub use codex_protocol::account::ProviderAccount;
+pub use inference_backend::ModelInferenceBackend;
+pub use inference_backend::ModelInferenceContext;
+pub use inference_backend::SharedModelInferenceBackend;
 pub use provider::ModelProvider;
 pub use provider::ModelProviderFuture;
 pub use provider::ProviderAccountError;
@@ -39,6 +43,11 @@ pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::create_model_provider_with_inference_backend;
+
+#[cfg(test)]
+#[path = "inference_backend_tests.rs"]
+mod inference_backend_tests;
 
 #[cfg(test)]
 #[path = "workspace_routing_tests.rs"]

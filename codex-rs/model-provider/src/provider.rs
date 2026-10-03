@@ -31,6 +31,7 @@ use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
 use crate::combined_auth::compose_auth;
+use crate::inference_backend::ModelInferenceBackend;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 use crate::workspace_routing::WorkspaceRoutingContext;
 
@@ -182,6 +183,13 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     /// Returns whether requests made through this provider should include attestation.
     fn supports_attestation(&self) -> bool {
         false
+    }
+
+    /// Returns the custom inference backend implementation when one is configured.
+    ///
+    /// Defaults to `None`, preserving native Codex Responses routing for standard providers.
+    fn inference_backend(&self) -> Option<Arc<dyn ModelInferenceBackend>> {
+        None
     }
 
     /// Returns the provider-scoped auth manager, when this provider uses one.
@@ -370,6 +378,15 @@ pub fn create_model_provider(
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
 ) -> SharedModelProvider {
+    create_model_provider_with_inference_backend(provider_info, auth_manager, None)
+}
+
+/// Creates a runtime model provider with an optional custom inference backend.
+pub fn create_model_provider_with_inference_backend(
+    provider_info: ModelProviderInfo,
+    auth_manager: Option<Arc<AuthManager>>,
+    inference_backend: Option<Arc<dyn ModelInferenceBackend>>,
+) -> SharedModelProvider {
     if provider_info.is_amazon_bedrock() {
         return Arc::new(AmazonBedrockModelProvider::new(provider_info, auth_manager));
     }
@@ -387,6 +404,7 @@ pub fn create_model_provider(
         provider_info,
         auth_manager,
         gateway_auth_manager,
+        inference_backend,
     ))
 }
 
@@ -397,6 +415,7 @@ struct ConfiguredModelProvider {
     auth_manager: Option<Arc<AuthManager>>,
     // Construct eagerly; report setup failures when auth is requested because the factory is infallible.
     gateway_auth_manager: Option<Result<Arc<GatewayAuthManager>, String>>,
+    inference_backend: Option<Arc<dyn ModelInferenceBackend>>,
 }
 
 enum ModelsCacheConfig {
@@ -410,11 +429,13 @@ impl ConfiguredModelProvider {
         info: ModelProviderInfo,
         auth_manager: Option<Arc<AuthManager>>,
         gateway_auth_manager: Option<Result<Arc<GatewayAuthManager>, String>>,
+        inference_backend: Option<Arc<dyn ModelInferenceBackend>>,
     ) -> Self {
         Self {
             info,
             auth_manager,
             gateway_auth_manager,
+            inference_backend,
         }
     }
 
@@ -615,6 +636,10 @@ impl ModelProvider for ConfiguredModelProvider {
         cache: Arc<dyn ModelsCache>,
     ) -> SharedModelsManager {
         self.create_models_manager(config_model_catalog, ModelsCacheConfig::Custom(cache))
+    }
+
+    fn inference_backend(&self) -> Option<Arc<dyn ModelInferenceBackend>> {
+        self.inference_backend.clone()
     }
 }
 

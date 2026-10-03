@@ -59,11 +59,13 @@ git fetch upstream
 
 ---
 
-## Architectural Separation
+## Architectural Separation & Intentional Patches
 
-Agent Studios-specific functionality is implemented preferentially as additive crates/modules rather than unnecessary modifications to upstream Codex crates.
+Agent Studios-specific functionality is implemented preferentially as additive crates/modules outside `codex-rs/` (in `agent-studios-rs/crates/`).
 
-When upstream modifications are strictly necessary, keep patches focused, minimal, and documented to ensure upstream diffs remain straightforward to port.
+Starting in Milestone M07.5, `codex-rs/` is no longer byte-identical to the upstream snapshot. To allow Agent Studios to supply custom model inference backends (such as Chat Completions, Anthropic Messages, and Gemini generateContent) while fully preserving Codex's native agent loop, tool router, and execution engine, a minimal, provider-neutral, default-off inference backend seam is maintained in `codex-rs/model-provider` and `codex-rs/core`.
+
+All intentional modifications to `codex-rs/` are strictly registered and audited in `docs/agent-studios/CODEX_PATCHES.md`. During upstream synchronization, these minimal patches must be re-applied and verified against target upstream commits. Agent Studios protocol, catalog, and provider code remains strictly isolated outside `codex-rs/`. Agent Studios does not claim authorship of upstream OpenAI Codex code.
 
 ---
 
