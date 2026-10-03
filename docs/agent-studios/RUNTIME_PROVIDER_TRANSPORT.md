@@ -4,7 +4,7 @@
 
 The `agent-studios-runtime-transport` crate bridges Codex's agentic execution core (`codex-rs`) with multi-provider execution endpoints across heterogeneous wire protocols.
 
-Prior milestones established pure in-memory protocol adapters (`agent-studios-protocol-adapters`) capable of translating between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and external wire formats (OpenAI Chat Completions, Anthropic Messages, and Google Gemini `generateContent`). Milestone M07.5 implements the live network transport layer that resolves credentials securely, executes HTTP requests, decodes Server-Sent Events (SSE), manages multi-turn continuation state transactionally, and implements Codex's pluggable `ModelInferenceBackend` seam.
+Prior milestones established pure in-memory protocol adapters (`agent-studios-protocol-adapters`) capable of translating between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and external wire formats (OpenAI Chat Completions, Anthropic Messages, and Google Gemini `generateContent`). Milestones M07.5 and M07.5.1 implement and harden the live network transport layer that resolves credentials securely, executes HTTP requests, decodes Server-Sent Events (SSE) safely across byte boundaries, manages multi-turn continuation state transactionally, and implements Codex's pluggable `ModelInferenceBackend` seam.
 
 ---
 
@@ -25,93 +25,99 @@ All modifications to `codex-rs` are documented with patch rationales and upstrea
 
 ---
 
-## 3. Runtime Transport Crate Architecture
+## 3. Runtime Transport Architecture & Hardening (M07.5.1)
 
-The `agent-studios-runtime-transport` crate is organized into modular components:
+The `agent-studios-runtime-transport` crate is organized into modular, security-hardened components:
 
 ```
 agent-studios-runtime-transport/
 ├── src/
-│   ├── auth.rs           # Authentication resolution & header/query parameter generation
+│   ├── auth.rs           # Authentication resolution, sensitive headers, collision checks
+│   ├── diagnostic.rs     # RuntimeDiagnosticSink for capability and runtime telemetry
 │   ├── drivers/          # Wire protocol network execution drivers
 │   │   ├── anthropic.rs  # Anthropic Messages driver (POST /v1/messages)
 │   │   ├── chat_completions.rs # OpenAI Chat Completions driver (POST /chat/completions)
 │   │   ├── gemini.rs     # Gemini generateContent driver (POST /models/{model}:streamGenerateContent)
 │   │   └── mod.rs
-│   ├── error.rs          # Strongly-typed transport error taxonomy
+│   ├── error.rs          # Strongly-typed transport error taxonomy & URL sanitization
 │   ├── lib.rs            # Public API exports
-│   ├── router.rs         # RuntimeRouter implementing ModelInferenceBackend
+│   ├── options.rs        # RuntimeTransportOptions, URL validation & bounded error bodies
+│   ├── router.rs         # RuntimeRouter implementing ModelInferenceBackend & capability gating
 │   ├── secret.rs         # Zeroized SecretString & asynchronous SecretResolver
-│   ├── sse.rs            # Incremental SSE parser and byte-stream adapter
-│   └── state.rs          # Transactional continuation state machine
+│   ├── sse.rs            # Incremental byte-buffering SSE parser and stream adapter
+│   └── state.rs          # ContinuationKey, RAII lease & transactional state machine
 └── tests/
-    └── transport_mock_tests.rs # End-to-end Wiremock test suite
+    └── transport_mock_tests.rs # 21 comprehensive WireMock integration tests
 ```
 
-### 3.1. Zero-Plaintext Secret Management (`secret.rs`)
+### 3.1. Zero-Plaintext Secret Management & Auth Security (`secret.rs`, `auth.rs`)
 - `SecretString`: Secure container wrapping heap-allocated credential strings.
   - Implements `zeroize::ZeroizeOnDrop` to securely erase memory when dropped.
   - Custom `fmt::Debug`, `fmt::Display`, and `serde::Serialize` implementations that strictly output `"[REDACTED]"`.
   - Secret exposure is restricted to explicit calls to `.expose_secret()`.
 - `SecretResolver`: Asynchronous trait resolving `SecretReference` into `SecretString`.
+  - Rejects empty secrets with `TransportError::EmptySecret`.
+  - Rejects unsupported backends with `TransportError::UnsupportedSecretBackend`.
   - `InMemorySecretResolver`: Thread-safe in-memory map for scoped tests and dynamic ephemeral credentials.
   - `EnvSecretResolver`: Process environment resolver mapping `SecretBackend::EnvironmentVariable`.
+- `ResolvedAuth`:
+  - Custom `Debug` implementation redacting all credentials.
+  - Marks outbound credential headers sensitive (`HeaderValue::set_sensitive(true)`).
+  - Performs pre-flight case-insensitive collision detection against static headers and query parameters (`check_collisions`).
+  - Safe error sanitization (`sanitize_error_message`) redacting sensitive query parameters (e.g. `key=...`) from reqwest errors.
 
-### 3.2. Authentication Resolution (`auth.rs`)
-- `ResolvedAuth`: Bridges `AuthenticationScheme` and resolved credentials to outbound HTTP requests:
-  - `BearerToken`: Emits `Authorization: Bearer <secret>`.
-  - `ApiKeyHeader`: Emits `<header_name>: <secret>`.
-  - `QueryParameter`: Appends `?<param_name>=<secret>` to the request URL.
-  - `AwsSigV4`: Fails closed until AWS request signing is implemented.
+### 3.2. Provider-Instance-Scoped Continuation & Concurrency Guards (`state.rs`)
+- `ContinuationKey`: Composite struct `ContinuationKey { provider_instance_id: ProviderInstanceId, thread_id: String }` ensuring multi-turn session continuation state is fully isolated per provider instance, preventing cross-provider state leakage.
+- `ContinuationLease`: RAII guard acquired during `begin_transaction`. If another inference request arrives for the same active `ContinuationKey`, it is deterministically rejected with `TransportError::ConcurrentThreadInference`. Releasing the lease occurs automatically on drop across all exit paths (commit, rollback, cancellation, receiver drop, or panic).
+- `ContinuationTransaction`:
+  - **Completed-Only Commit Invariant**: Turn changes (e.g., Anthropic message ID/thinking blocks, Gemini candidate parts/signatures) are staged in private memory. Durable commitment occurs strictly when `ResponseEvent::Completed` is received.
+  - **Rollback on Early EOF**: If a stream terminates (EOF) without emitting a completion event, staged changes are discarded and a typed stream error (`ApiError::Stream`) is emitted.
+  - **Commit Error Propagation**: Errors from `tx.commit()` are never swallowed (`let _ = tx.commit()`); commit errors immediately emit a stream error and abort the stream.
 
-### 3.3. Incremental SSE Parser (`sse.rs`)
-- `SseParser`: Reassembles arbitrary TCP byte chunks into discrete `SseEvent` items:
-  - Strips leading `:` comments (keepalive pings).
-  - Handles multi-line `data:` blocks coalesced with newlines.
-  - Emits events on blank lines (`\n\n`).
-  - Correctly flushes trailing unclosed frames upon stream termination (`finish()`).
-- `SseStream`: Wraps `reqwest::Response::bytes_stream()` into a `Stream<Item = Result<SseEvent, TransportError>>`.
+### 3.3. Capability Gating & Diagnostic Sink (`router.rs`, `diagnostic.rs`)
+- Route resolution extracts both the `ProviderInstance` and its associated `ModelDescriptor`.
+- Request capabilities (streaming, tool calling, parallel tool calling) are validated against `ModelDescriptor.capabilities`. Unsupported features fail closed with `TransportError::UnsupportedCapability`.
+- Unknown features emit non-blocking diagnostic notifications via `RuntimeDiagnosticSink`.
+- Anthropic requests require `ModelDescriptor.limits.max_output_tokens` and fail closed with `TransportError::MissingRequiredModelLimit` if unspecified.
 
-### 3.4. Transactional Multi-Turn Continuation State Machine (`state.rs`)
-Multi-turn conversational loops with Anthropic and Gemini require tracking provider-native state across turns (e.g. `message_id`, thinking blocks, cryptographic signatures, candidate parts, and synthetic call IDs):
-- `ContinuationManager`: Thread-safe registry mapping `thread_id` to `ThreadContinuationState`.
-- `ContinuationTransaction`: Two-phase transactional unit:
-  - Changes made during a streaming turn are staged in private memory.
-  - When the stream successfully emits `ResponseEvent::Completed`, the driver calls `tx.commit()`, promoting staged state into the durable registry.
-  - If a stream encounters a network error, HTTP error, malformed chunk, or cancellation, the transaction drops without committing, automatically rolling back and leaving thread state pristine.
+### 3.4. Bounded Resource Safety & Network Policy (`options.rs`)
+- `RuntimeTransportOptions`:
+  - Configurable timeouts (`connect_timeout`, `request_timeout`, `stream_idle_timeout`).
+  - Limits on buffer sizes (`max_error_body_bytes`, `max_sse_event_bytes`).
+  - `validate_url`: Rejects insecure remote HTTP endpoints (`InsecureRemoteHttpRejected`) unless loopback/localhost or explicitly opted into via `allow_insecure_remote_http: true`.
+- `read_bounded_error_body`: Reads upstream HTTP error responses up to `max_error_body_bytes` to prevent unbounded memory consumption on faulty or malicious upstreams.
+- Gemini model slugs are safely percent-encoded in request URLs.
 
-### 3.5. Protocol Drivers (`drivers/`)
-- `ChatCompletionsDriver`:
-  - Translates `ResponsesApiRequest` via `ChatCompletionsAdapter`.
-  - Sends `POST` to `/chat/completions`.
-  - Iterates over SSE events, parsing chunks through `ChatCompletionStreamTranslator`.
-  - Emits `ResponseEvent` sequence into channel.
-- `AnthropicDriver`:
-  - Translates `ResponsesApiRequest` via `AnthropicMessagesAdapter`.
-  - Sends `POST` to `/messages`, ensuring `anthropic-version: 2023-06-01` header presence.
-  - Streams Anthropic SSE events (`message_start`, `content_block_*`, `message_delta`, `message_stop`).
-  - Replays thinking blocks and cryptographic signatures from staged continuation state.
-- `GeminiDriver`:
-  - Translates `ResponsesApiRequest` via `GeminiAdapter`.
-  - Sends `POST` to `models/{model}:streamGenerateContent`.
-  - Emits text deltas, reasoning deltas with thought signatures, and atomic function calls.
-  - Replays candidate parts and thought signatures from staged continuation state.
-
-### 3.6. Runtime Router (`router.rs`)
-`RuntimeRouter` implements `codex_model_provider::ModelInferenceBackend`:
-- Maintains active and registered `ProviderInstance` configurations.
-- Resolves authentication schemes dynamically per request using the registered `SecretResolver`.
-- Dispatches requests to the appropriate driver based on `ProtocolFamily`.
-- Exposes clean cancellation propagation through `interrupt` channels.
+### 3.5. Byte-Safe Incremental SSE Parser (`sse.rs`)
+- `SseParser`:
+  - Buffers raw bytes (`Vec<u8>`) rather than decoding byte chunks into UTF-8 strings before framing.
+  - Splits frames on newline markers (`\n`), ensuring multibyte UTF-8 sequences (e.g. emojis, non-ASCII characters) split across TCP chunks are preserved intact.
+  - Enforces `max_event_bytes` on accumulated frame size, rejecting oversized frames with `TransportError::SseFrameTooLarge`.
+  - Handles comments, multi-line data blocks, and flushes trailing unclosed frames upon completion.
 
 ---
 
 ## 4. Verification & Mock Testing
 
-The test suite in `tests/transport_mock_tests.rs` validates all core behaviors against a `wiremock` HTTP server:
-1. `test_chat_completions_wiremock`: Full streaming cycle from mock OpenAI `/chat/completions` endpoint emitting text deltas and completing.
-2. `test_anthropic_wiremock`: Full streaming cycle from mock Anthropic `/messages` endpoint with thinking deltas and durable message ID persistence in `ContinuationManager`.
-3. `test_gemini_wiremock`: Full streaming cycle from mock Gemini `:streamGenerateContent` endpoint with reasoning deltas and completion.
-4. `test_transactional_rollback_on_error`: Verifies that an HTTP 500 failure leaves thread continuation state completely empty (guaranteed rollback).
-5. `test_cancellation_propagation`: Verifies that triggering the `interrupt` channel immediately terminates the stream loop and cleans up resources.
-6. `test_concurrent_thread_isolation`: Verifies that parallel requests on separate threads (`thread-iso-A`, `thread-iso-B`) maintain strict state isolation without cross-contamination.
+The test suite in `tests/transport_mock_tests.rs` validates all 14 correctness and security behaviors against a `wiremock` HTTP server:
+1. `test_chat_completions_wiremock`: Full streaming cycle from mock OpenAI `/chat/completions` endpoint.
+2. `test_anthropic_wiremock`: Full streaming cycle from mock Anthropic `/messages` endpoint.
+3. `test_gemini_wiremock`: Full streaming cycle from mock Gemini `:streamGenerateContent` endpoint.
+4. `test_transactional_rollback_on_error`: HTTP 500 error triggers automatic rollback leaving thread continuation state clean.
+5. `test_cancellation_propagation`: Triggering `interrupt` terminates stream loop cleanly.
+6. `test_concurrent_thread_isolation`: Distinct threads maintain isolated state.
+7. `test_cross_instance_continuation_key_isolation`: Same thread ID on different provider instances maintains independent continuation state.
+8. `test_same_thread_concurrency_rejection`: Concurrent inference targeting the same `ContinuationKey` is rejected with `ConcurrentThreadInference`.
+9. `test_completed_only_commit_invariant`: Premature stream termination rolls back staged continuation state.
+10. `test_anthropic_max_tokens_fail_closed`: Missing max output tokens fails closed.
+11. `test_routing_with_model_descriptor`: Explicit model descriptor routing.
+12. `test_capability_gating_unsupported_rejected_and_unknown_warning`: Unsupported capabilities rejected; unknown features warn via sink.
+13. `test_sensitive_header_marking`: Outbound auth headers marked sensitive.
+14. `test_auth_collision_rejection`: Collisions between auth headers and static headers rejected.
+15. `test_empty_secret_rejection`: Empty secrets rejected fail-closed.
+16. `test_safe_error_mapping_redacts_keys`: Credentials redacted from error messages.
+17. `test_sse_split_multibyte_utf8`: Multibyte UTF-8 split across SSE frames decoded without corruption.
+18. `test_sse_frame_size_limit`: Oversized SSE frames rejected with `SseFrameTooLarge`.
+19. `test_bounded_error_body_truncation`: Upstream error bodies truncated to limit.
+20. `test_remote_http_rejection_and_loopback_allowed`: Insecure remote HTTP rejected; localhost HTTP accepted.
+21. `test_gemini_url_encoding`: Model slugs with special characters correctly percent-encoded.

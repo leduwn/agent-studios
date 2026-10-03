@@ -9,10 +9,12 @@ use agent_studios_protocol_adapters::anthropic::{
     AnthropicRequestOptions, AnthropicStreamEvent, AnthropicThinkingPolicy,
 };
 use agent_studios_provider::instance::ProviderInstance;
+use agent_studios_provider::model::ModelDescriptor;
 
 use crate::auth::ResolvedAuth;
 use crate::drivers::ProtocolDriver;
 use crate::error::TransportError;
+use crate::options::{RuntimeTransportOptions, read_bounded_error_body};
 use crate::sse::SseStream;
 use crate::state::ContinuationTransaction;
 
@@ -28,16 +30,31 @@ impl AnthropicDriver {
 
 #[async_trait]
 impl ProtocolDriver for AnthropicDriver {
+    #[allow(clippy::too_many_arguments)]
     async fn stream(
         &self,
         client: &reqwest::Client,
         instance: &ProviderInstance,
+        descriptor: &ModelDescriptor,
         auth: &ResolvedAuth,
         request: ResponsesApiRequest,
         _context: ModelInferenceContext,
         continuation_tx: ContinuationTransaction,
+        options: &RuntimeTransportOptions,
     ) -> Result<ResponseStream, TransportError> {
-        let mut options = AnthropicRequestOptions::new(4096);
+        auth.check_collisions(
+            instance.endpoint.static_headers.keys(),
+            instance.endpoint.query_params.keys(),
+        )?;
+
+        let max_tokens = descriptor.limits.max_output_tokens.ok_or_else(|| {
+            TransportError::MissingRequiredModelLimit {
+                model: request.model.clone(),
+                limit: "max_output_tokens",
+            }
+        })?;
+
+        let mut anthropic_options = AnthropicRequestOptions::new(max_tokens);
 
         if request
             .reasoning
@@ -45,23 +62,24 @@ impl ProtocolDriver for AnthropicDriver {
             .and_then(|r| r.effort.as_ref())
             .is_some()
         {
-            options.thinking_policy = AnthropicThinkingPolicy::Adaptive;
+            anthropic_options.thinking_policy = AnthropicThinkingPolicy::Adaptive;
         }
 
         let translation = AnthropicMessagesAdapter::translate_request(
             &request,
-            &options,
+            &anthropic_options,
             Some(&continuation_tx.staged().anthropic),
         )?;
 
         let base = instance.endpoint.base_url.trim_end_matches('/');
-        let url = if base.ends_with("/messages") {
+        let url_str = if base.ends_with("/messages") {
             base.to_string()
         } else {
             format!("{base}/messages")
         };
+        let validated_url = options.validate_url(&url_str)?;
 
-        let mut req = client.post(&url);
+        let mut req = client.post(validated_url.as_str());
         req = auth.apply(req);
         for (k, v) in &instance.endpoint.static_headers {
             req = req.header(k, v);
@@ -70,11 +88,14 @@ impl ProtocolDriver for AnthropicDriver {
             req = req.query(&[(k, v)]);
         }
         req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
-        if !instance
+
+        let has_version_header = instance
             .endpoint
             .static_headers
-            .contains_key("anthropic-version")
-        {
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("anthropic-version"));
+
+        if !has_version_header {
             req = req.header("anthropic-version", "2023-06-01");
         }
         req = req.json(&translation.request);
@@ -82,7 +103,7 @@ impl ProtocolDriver for AnthropicDriver {
         let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+            let body = read_bounded_error_body(resp, options.max_error_body_bytes).await?;
             return Err(TransportError::Http(format!(
                 "Anthropic messages request failed with status {status}: {body}"
             )));
@@ -99,11 +120,13 @@ impl ProtocolDriver for AnthropicDriver {
         let (interrupt_tx, mut interrupt_rx) = oneshot::channel();
 
         let bytes_stream = resp.bytes_stream();
-        let mut sse_stream = SseStream::new(bytes_stream);
+        let mut sse_stream = SseStream::with_max_bytes(bytes_stream, options.max_sse_event_bytes);
         let mut translator = AnthropicMessagesAdapter::new_stream_translator();
 
         tokio::spawn(async move {
             let mut tx_opt = Some(continuation_tx);
+            let mut completed = false;
+
             loop {
                 tokio::select! {
                     _ = &mut interrupt_rx => {
@@ -132,10 +155,16 @@ impl ProtocolDriver for AnthropicDriver {
                                     Ok(events) => {
                                         for ev in events {
                                             if matches!(ev, ResponseEvent::Completed { .. }) {
-                                                let _ = tx_opt.take().map(|mut tx| {
+                                                completed = true;
+                                                if let Some(mut tx) = tx_opt.take() {
                                                     *tx.anthropic_mut() = translator.continuation_state().clone();
-                                                    tx.commit()
-                                                });
+                                                    if let Err(e) = tx.commit() {
+                                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                            "Failed to commit continuation state: {e}"
+                                                        )))).await;
+                                                        return;
+                                                    }
+                                                }
                                             }
                                             if tx_event.send(Ok(ev)).await.is_err() {
                                                 return;
@@ -151,7 +180,12 @@ impl ProtocolDriver for AnthropicDriver {
                                 if translator.is_completed() {
                                     if let Some(mut tx) = tx_opt.take() {
                                         *tx.anthropic_mut() = translator.continuation_state().clone();
-                                        let _ = tx.commit();
+                                        if let Err(e) = tx.commit() {
+                                            let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                "Failed to commit continuation state: {e}"
+                                            )))).await;
+                                            return;
+                                        }
                                     }
                                     break;
                                 }
@@ -161,9 +195,10 @@ impl ProtocolDriver for AnthropicDriver {
                                 return;
                             }
                             None => {
-                                if let Some(mut tx) = tx_opt.take() {
-                                    *tx.anthropic_mut() = translator.continuation_state().clone();
-                                    let _ = tx.commit();
+                                if !completed && !translator.is_completed() {
+                                    let _ = tx_event.send(Err(ApiError::Stream(
+                                        "Anthropic stream terminated before receiving completion event".to_string()
+                                    ))).await;
                                 }
                                 break;
                             }

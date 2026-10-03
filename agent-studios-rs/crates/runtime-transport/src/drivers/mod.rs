@@ -1,4 +1,5 @@
 use agent_studios_provider::instance::ProviderInstance;
+use agent_studios_provider::model::ModelDescriptor;
 use async_trait::async_trait;
 use codex_api::{ResponseStream, ResponsesApiRequest};
 use codex_model_provider::ModelInferenceContext;
@@ -6,6 +7,7 @@ use std::fmt;
 
 use crate::auth::ResolvedAuth;
 use crate::error::TransportError;
+use crate::options::RuntimeTransportOptions;
 use crate::state::ContinuationTransaction;
 
 pub mod anthropic;
@@ -20,13 +22,16 @@ pub use gemini::GeminiDriver;
 #[async_trait]
 pub trait ProtocolDriver: Send + Sync + fmt::Debug {
     /// Translates the request, initiates the HTTP stream, and produces a `ResponseStream`.
+    #[allow(clippy::too_many_arguments)]
     async fn stream(
         &self,
         client: &reqwest::Client,
         instance: &ProviderInstance,
+        descriptor: &ModelDescriptor,
         auth: &ResolvedAuth,
         request: ResponsesApiRequest,
         context: ModelInferenceContext,
         continuation_tx: ContinuationTransaction,
+        options: &RuntimeTransportOptions,
     ) -> Result<ResponseStream, TransportError>;
 }

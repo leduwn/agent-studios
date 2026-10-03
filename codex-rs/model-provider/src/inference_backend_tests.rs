@@ -13,7 +13,7 @@ use crate::create_model_provider_with_inference_backend;
 
 #[derive(Debug)]
 struct MockInferenceBackend {
-    _name: &'static str,
+    name: &'static str,
 }
 
 impl ModelInferenceBackend for MockInferenceBackend {

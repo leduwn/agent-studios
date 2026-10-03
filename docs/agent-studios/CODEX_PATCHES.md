@@ -35,6 +35,7 @@ This document catalogs all intentional, minimal patches maintained inside the `c
 
 ### Patch 001: Pluggable Model Inference Backend Seam (Milestone M07.5)
 
+- **Clean Replacement Seam Commit**: `f9e30b19f79e0b7a54ea9c6480d74bf4d1e2d39b` (branch: `feat/runtime-provider-transport-hardening`)
 - **Purpose**: Allows external runtimes (such as Agent Studios) to supply an alternate inference transport for providers using protocols Codex does not speak natively (Chat Completions, Anthropic Messages, Gemini generateContent) while retaining the native Codex agent engine, tool routing, and response pipeline.
 - **Files Modified**:
   - `codex-rs/model-provider/src/inference_backend.rs` (new file): Defines `ModelInferenceBackend` trait and `ModelInferenceContext` struct.

@@ -68,17 +68,24 @@ pub struct EnvSecretResolver;
 #[async_trait]
 impl SecretResolver for EnvSecretResolver {
     async fn resolve(&self, reference: &SecretReference) -> Result<SecretString, TransportError> {
-        match reference.backend {
+        match &reference.backend {
             SecretBackend::EnvironmentVariable => match std::env::var(&reference.locator) {
-                Ok(val) => Ok(SecretString::new(val)),
+                Ok(val) => {
+                    if val.trim().is_empty() {
+                        Err(TransportError::EmptySecret {
+                            locator: reference.locator.clone(),
+                        })
+                    } else {
+                        Ok(SecretString::new(val))
+                    }
+                }
                 Err(_) => Err(TransportError::SecretNotFound {
                     backend: reference.backend.to_string(),
                     locator: reference.locator.clone(),
                 }),
             },
-            _ => Err(TransportError::SecretNotFound {
-                backend: reference.backend.to_string(),
-                locator: reference.locator.clone(),
+            other => Err(TransportError::UnsupportedSecretBackend {
+                backend: other.to_string(),
             }),
         }
     }
@@ -117,7 +124,13 @@ impl SecretResolver for InMemorySecretResolver {
     async fn resolve(&self, reference: &SecretReference) -> Result<SecretString, TransportError> {
         let map = self.secrets.read().unwrap();
         if let Some(secret) = map.get(reference) {
-            Ok(secret.clone())
+            if secret.expose_secret().trim().is_empty() {
+                Err(TransportError::EmptySecret {
+                    locator: reference.locator.clone(),
+                })
+            } else {
+                Ok(secret.clone())
+            }
         } else {
             Err(TransportError::SecretNotFound {
                 backend: reference.backend.to_string(),
@@ -176,6 +189,36 @@ mod tests {
         assert_eq!(res.expose_secret(), "env-resolved-secret");
         unsafe {
             std::env::remove_var("TRANSPORT_TEST_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_secret_rejection() {
+        let resolver = InMemorySecretResolver::new().with_env_secret("EMPTY_KEY", "   ");
+        let ref_empty = SecretReference {
+            backend: SecretBackend::EnvironmentVariable,
+            locator: "EMPTY_KEY".to_string(),
+        };
+        let err = resolver.resolve(&ref_empty).await.unwrap_err();
+        match err {
+            TransportError::EmptySecret { locator } => assert_eq!(locator, "EMPTY_KEY"),
+            other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_secret_backend() {
+        let resolver = EnvSecretResolver;
+        let ref_vault = SecretReference {
+            backend: SecretBackend::OsCredentialStore,
+            locator: "path/to/key".to_string(),
+        };
+        let err = resolver.resolve(&ref_vault).await.unwrap_err();
+        match err {
+            TransportError::UnsupportedSecretBackend { backend } => {
+                assert_eq!(backend, "os_credential_store");
+            }
+            other => panic!("Unexpected error: {other:?}"),
         }
     }
 }
