@@ -27,6 +27,8 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider::ModelInferenceBackend;
+use codex_model_provider::ModelInferenceContext;
 use codex_model_provider::ModelProvider;
 use codex_model_provider::ModelProviderFuture;
 use codex_model_provider::ProviderAccountResult;
@@ -34,6 +36,7 @@ use codex_model_provider::ProviderAuthRecoveryMessages;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::create_model_provider_with_inference_backend;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -2125,5 +2128,219 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
     let recorded: serde_json::Value =
         serde_json::from_slice(&std::fs::read(temp.path().join(&payload.path))?)?;
     assert_eq!(recorded["output_items"], serde_json::to_value(&delivered)?);
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct RecordedCustomBackendCall {
+    request: Option<codex_api::ResponsesApiRequest>,
+    context: Option<ModelInferenceContext>,
+}
+
+#[derive(Debug)]
+struct MockTestInferenceBackend {
+    calls: Arc<std::sync::Mutex<Vec<RecordedCustomBackendCall>>>,
+    error_to_return: Option<String>,
+}
+
+impl ModelInferenceBackend for MockTestInferenceBackend {
+    fn stream<'a>(
+        &'a self,
+        request: codex_api::ResponsesApiRequest,
+        context: ModelInferenceContext,
+    ) -> ModelProviderFuture<'a, Result<codex_api::ResponseStream, ApiError>> {
+        let calls = Arc::clone(&self.calls);
+        let error_to_return = self.error_to_return.clone();
+
+        Box::pin(async move {
+            calls.lock().unwrap().push(RecordedCustomBackendCall {
+                request: Some(request),
+                context: Some(context),
+            });
+
+            if let Some(err_msg) = error_to_return {
+                return Err(ApiError::Stream(err_msg));
+            }
+
+            let (tx, rx_event) = tokio::sync::mpsc::channel(16);
+            let _ = tx
+                .send(Ok(ResponseEvent::OutputItemDone(output_message(
+                    "custom-item-1",
+                    "custom backend response",
+                ))))
+                .await;
+            let _ = tx
+                .send(Ok(ResponseEvent::Completed {
+                    response_id: "resp-custom-123".into(),
+                    token_usage: None,
+                    usage_metadata: None,
+                    end_turn: None,
+                }))
+                .await;
+
+            Ok(codex_api::ResponseStream {
+                rx_event,
+                upstream_request_id: None,
+                interrupt: None,
+            })
+        })
+    }
+}
+
+fn test_model_client_with_custom_backend(
+    thread_id: ThreadId,
+    backend: Arc<dyn ModelInferenceBackend>,
+) -> ModelClient {
+    let mut provider_info =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    provider_info.supports_websockets = true;
+    let provider = create_model_provider_with_inference_backend(provider_info, None, Some(backend));
+    ModelClient::new_with_provider(
+        provider,
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
+        /*reasoning_effort_override_enabled*/ false,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        Vec::new(),
+    )
+}
+
+#[tokio::test]
+async fn test_custom_inference_backend_disables_websockets_and_prewarms_auth() {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let backend = Arc::new(MockTestInferenceBackend {
+        calls,
+        error_to_return: None,
+    });
+    let client = test_model_client_with_custom_backend(ThreadId::new(), backend);
+
+    // WebSocket transport must be disabled when custom inference backend is present
+    assert!(!client.responses_websocket_enabled());
+
+    // Prewarming auth must be a no-op success
+    let prewarm_res = client.prewarm_auth().await;
+    assert!(prewarm_res.is_ok());
+}
+
+#[tokio::test]
+async fn test_custom_inference_backend_routes_stream_and_delivers_events() -> anyhow::Result<()> {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let backend = Arc::new(MockTestInferenceBackend {
+        calls: Arc::clone(&calls),
+        error_to_return: None,
+    });
+    let thread_id = ThreadId::new();
+    let client = test_model_client_with_custom_backend(thread_id, backend);
+
+    let prompt = Prompt {
+        input: vec![output_message("req-1", "user input text")],
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("turn-custom-42"),
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut session = client.new_session();
+    let mut stream = session
+        .stream(
+            &prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+
+    let mut delivered_events = Vec::new();
+    while let Some(event) = stream.next().await {
+        delivered_events.push(event?);
+    }
+
+    assert_eq!(delivered_events.len(), 2);
+    match &delivered_events[0] {
+        ResponseEvent::OutputItemDone(item) => {
+            assert_eq!(
+                *item,
+                output_message("custom-item-1", "custom backend response")
+            );
+        }
+        other => panic!("expected OutputItemDone, got {other:?}"),
+    }
+    match &delivered_events[1] {
+        ResponseEvent::Completed { response_id, .. } => {
+            assert_eq!(response_id, "resp-custom-123");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+
+    // Verify context and request were properly forwarded to backend
+    let recorded = calls.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let call = &recorded[0];
+    let ctx = call.context.as_ref().expect("context must be forwarded");
+    assert_eq!(ctx.thread_id, thread_id.to_string());
+    assert_eq!(ctx.turn_id.as_deref(), Some("turn-custom-42"));
+    let req = call.request.as_ref().expect("request must be forwarded");
+    assert_eq!(req.model, test_model_info().slug);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_custom_inference_backend_propagates_stream_error() -> anyhow::Result<()> {
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let backend = Arc::new(MockTestInferenceBackend {
+        calls: Arc::clone(&calls),
+        error_to_return: Some("simulated custom backend network timeout".into()),
+    });
+    let client = test_model_client_with_custom_backend(ThreadId::new(), backend);
+
+    let prompt = Prompt::default();
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut session = client.new_session();
+    let stream_res = session
+        .stream(
+            &prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await;
+
+    let err = match stream_res {
+        Err(err) => err,
+        Ok(_) => panic!("expected stream to fail"),
+    };
+    let err_str = format!("{err:?}");
+    assert!(err_str.contains("simulated custom backend network timeout"));
+
     Ok(())
 }

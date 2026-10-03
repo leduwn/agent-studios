@@ -140,6 +140,8 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::AuthEnvTelemetry;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::AgentIdentitySessionFallback;
+use codex_model_provider::ModelInferenceBackend;
+use codex_model_provider::ModelInferenceContext;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::ResponsesConnectionKey;
@@ -497,6 +499,44 @@ impl ModelClient {
         request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
     ) -> Self {
         let model_provider = create_model_provider(provider_info, auth_manager);
+        Self::new_with_provider(
+            model_provider,
+            agent_identity_policy,
+            thread_id,
+            session_source,
+            originator,
+            model_verbosity,
+            content_item_kinds_enabled,
+            reasoning_effort_override_enabled,
+            enable_request_compression,
+            include_timing_metrics,
+            beta_features_header,
+            concurrent_reasoning_summaries_enabled,
+            attestation_provider,
+            http_client_factory,
+            workspace_routing,
+            request_contributors,
+        )
+    }
+
+    pub fn new_with_provider(
+        model_provider: SharedModelProvider,
+        agent_identity_policy: AgentIdentityAuthPolicy,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        originator: String,
+        model_verbosity: Option<VerbosityConfig>,
+        content_item_kinds_enabled: bool,
+        reasoning_effort_override_enabled: bool,
+        enable_request_compression: bool,
+        include_timing_metrics: bool,
+        beta_features_header: Option<String>,
+        concurrent_reasoning_summaries_enabled: bool,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        http_client_factory: HttpClientFactory,
+        workspace_routing: WorkspaceRoutingContext,
+        request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
+    ) -> Self {
         let codex_api_key_env_enabled = model_provider
             .auth_manager()
             .as_ref()
@@ -1028,6 +1068,9 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
+        if self.state.provider.inference_backend().is_some() {
+            return false;
+        }
         if !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
@@ -1204,6 +1247,9 @@ impl ModelClient {
     }
 
     pub(crate) async fn prewarm_auth(&self) -> Result<()> {
+        if self.state.provider.inference_backend().is_some() {
+            return Ok(());
+        }
         self.current_client_setup(ClientRouting::Workspace)
             .await
             .map(|_| ())
@@ -2237,6 +2283,22 @@ impl ModelClientSession {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
+                if let Some(backend) = self.client.state.provider.inference_backend() {
+                    return self
+                        .stream_custom_inference(
+                            backend,
+                            prompt,
+                            model_info,
+                            session_telemetry,
+                            effort,
+                            summary,
+                            service_tier,
+                            responses_metadata,
+                            inference_trace,
+                        )
+                        .await;
+                }
+
                 if self.client.responses_websocket_enabled() {
                     let request_trace = current_span_w3c_trace_context();
                     match self
@@ -2272,6 +2334,75 @@ impl ModelClientSession {
                     inference_trace,
                 )
                 .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_custom_inference(
+        &self,
+        backend: Arc<dyn ModelInferenceBackend>,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<ResponseStream> {
+        let mut request = self.client.build_responses_request(
+            prompt,
+            model_info,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            /*include_internal*/ false,
+        )?;
+        self.client
+            .prepare_response_items_for_request(&mut request.input);
+        if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
+            if let Some(recorder) = &self.client.executed_tool_calls {
+                recorder.invalidate_wire_inventory_loss(&request.input, &input);
+            }
+            request.input = input;
+        }
+        let interceptors = crate::model_request::prepare(
+            &self.client.request_contributors,
+            &self.client.state.thread_id.to_string(),
+            &model_info.slug,
+            codex_extension_api::ModelRequestKind::Generation,
+            &mut request.client_metadata,
+        );
+        let inference_trace_attempt = inference_trace.start_attempt();
+        inference_trace_attempt.record_started(&request);
+        let request_session_telemetry = session_telemetry_for_request(session_telemetry, &request);
+        let context = ModelInferenceContext {
+            thread_id: self.client.state.thread_id.to_string(),
+            turn_id: responses_metadata.turn_id.clone(),
+        };
+        let stream_result = backend.stream(request, context).await;
+        match stream_result {
+            Ok(stream) => {
+                let (stream, _) = map_response_stream(
+                    stream,
+                    request_session_telemetry,
+                    inference_trace_attempt,
+                    Arc::clone(&self.client.state.provider),
+                    interceptors,
+                );
+                Ok(stream)
+            }
+            Err(err) => {
+                let response_debug_context = extract_response_debug_context_from_api_error(&err);
+                let err = self.client.state.provider.map_api_error(err);
+                inference_trace_attempt.record_failed(
+                    &err,
+                    response_debug_context.request_id.as_deref(),
+                    /*output_items*/ &[],
+                );
+                Err(err.into())
             }
         }
     }
