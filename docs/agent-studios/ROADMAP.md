@@ -130,6 +130,25 @@ This roadmap defines the strategic progression for building Agent Studios upon t
   - Effective input token accounting: `input_tokens = promptTokenCount` (includes cached tokens), `cached_input_tokens = cachedContentTokenCount`, `total_tokens = totalTokenCount`. Rejects negative token counts.
 - Full verification: 57 tests across 4 test suites (`gemini_request_tests.rs`, `gemini_stream_tests.rs`, `gemini_roundtrip_tests.rs`, `gemini_hardening_tests.rs`); 150 total passing tests in `agent-studios-protocol-adapters`.
 
+### M07.5: Runtime Provider Transport Foundation (Completed on `feat/runtime-provider-transport`)
+
+- Pluggable model inference backend seam in `codex-rs`:
+  - `ModelInferenceBackend` trait and `ModelInferenceContext` in `codex-model-provider`.
+  - Optional `inference_backend: Option<Arc<dyn ModelInferenceBackend>>` in `ModelProvider` (defaults to `None`).
+  - Native dispatch branch in `codex-core::ModelClient::stream_custom_inference`, routing custom backend streams while preserving 100% of Codex agent loop semantics, tool approval gates, compaction, and telemetry.
+  - Documented in `docs/agent-studios/CODEX_PATCHES.md`.
+- `agent-studios-runtime-transport` crate:
+  - Zero-plaintext secret management: `SecretString` implementing `zeroize::ZeroizeOnDrop` with redacted Debug, Display, and Serialize.
+  - Dynamic secret resolution: `SecretResolver` trait with `InMemorySecretResolver` and `EnvSecretResolver`.
+  - Authentication resolution: `ResolvedAuth` supporting `BearerToken`, `ApiKeyHeader`, and `QueryParameter` schemes.
+  - Incremental SSE decoding: `SseParser` and `SseStream` handling multi-line data, comment stripping, and byte chunk buffering.
+  - Transactional continuation state machine: `ContinuationManager` and `ContinuationTransaction` with commit-on-completion and guaranteed rollback-on-error semantics.
+  - Protocol drivers: `ChatCompletionsDriver`, `AnthropicDriver`, and `GeminiDriver` connecting protocol adapters to live HTTP SSE endpoints.
+  - `RuntimeRouter`: implements `codex_model_provider::ModelInferenceBackend` for provider-neutral dispatch.
+- Verification & Integration testing:
+  - 11 unit tests covering secrets, auth, SSE parsing, and continuation transactions.
+  - 6 end-to-end `wiremock` integration tests covering Chat Completions streaming, Anthropic Messages streaming with continuation state persistence, Gemini streamGenerateContent streaming, transactional rollback on HTTP error, cancellation propagation via interrupt channel, and concurrent thread state isolation.
+
 ### M08: Internal Multi-Agent Extension
 - Enhance internal agent runner to instantiate multiple isolated agent configurations.
 - Allow per-agent role specifications, provider assignments, reasoning depths, and tool budgets.

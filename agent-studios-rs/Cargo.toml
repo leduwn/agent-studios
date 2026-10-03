@@ -6,6 +6,7 @@ members = [
     "crates/provider",
     "crates/codex-bridge",
     "crates/protocol-adapters",
+    "crates/runtime-transport",
 ]
 
 [workspace.package]
