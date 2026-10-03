@@ -136,10 +136,12 @@ fn test_02_tool_call_and_result_multi_turn_roundtrip() {
                     id: Some("wire-fc-id-42".to_string()),
                     name: "lookup_user".to_string(),
                     args: serde_json::json!({ "user_id": 100 }),
+                    ..Default::default()
                 }),
                 function_response: None,
                 thought: None,
                 thought_signature: Some("opaque-crypto-sig-call-42".to_string()),
+                ..Default::default()
             }])),
             finish_reason: Some("STOP".to_string()),
             safety_ratings: None,
@@ -240,10 +242,12 @@ fn test_03_deterministic_call_id_omitted_on_wire_roundtrip() {
                     id: None, // No ID from Gemini
                     name: "list_files".to_string(),
                     args: serde_json::json!({}),
+                    ..Default::default()
                 }),
                 function_response: None,
                 thought: None,
                 thought_signature: None,
+                ..Default::default()
             }])),
             finish_reason: Some("STOP".to_string()),
             safety_ratings: None,

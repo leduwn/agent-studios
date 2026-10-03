@@ -11,8 +11,8 @@ use super::error::{GeminiAdapterError, GeminiAdapterWarning};
 use super::types::{
     GeminiAdapterOptions, GeminiContent, GeminiFunctionCallingConfig, GeminiFunctionCallingMode,
     GeminiFunctionDeclaration, GeminiGenerateContentRequest, GeminiGenerationConfig, GeminiPart,
-    GeminiRequestTranslation, GeminiResponseFormat, GeminiThinkingConfig, GeminiThinkingLevel,
-    GeminiThinkingPolicy, GeminiTool, GeminiToolConfig,
+    GeminiRequestTranslation, GeminiResponseFormat, GeminiTextFormatConfig, GeminiThinkingConfig,
+    GeminiThinkingLevel, GeminiThinkingPolicy, GeminiTool, GeminiToolConfig,
 };
 
 /// Translates a Codex `ResponsesApiRequest` into a Gemini `generateContent` wire request.
@@ -118,6 +118,7 @@ pub fn translate_request(
 
     // 6. Conversational turns translation
     let mut contents: Vec<GeminiContent> = Vec::new();
+    let mut replayed_responses = std::collections::HashSet::new();
     let mut i = 0;
 
     while i < input_items.len() {
@@ -169,8 +170,33 @@ pub fn translate_request(
                 name,
                 arguments,
                 call_id,
+                id,
                 ..
             } => {
+                // Check if this function call originated from a native Gemini turn in continuation
+                let origin = continuation.and_then(|c| {
+                    c.get_call_origin(call_id).or_else(|| {
+                        id.as_ref()
+                            .and_then(|item_id| c.get_item_origin(item_id.as_ref()))
+                    })
+                });
+
+                if let Some(origin) = origin {
+                    let resp_id = &origin.response_id;
+                    if replayed_responses.insert(resp_id.clone()) {
+                        let turn = continuation
+                            .and_then(|c| c.get_model_turn(resp_id))
+                            .ok_or_else(|| {
+                                GeminiAdapterError::MissingContinuationState(format!(
+                                    "Missing native model turn for response '{resp_id}'"
+                                ))
+                            })?;
+                        contents.push(turn.clone());
+                    }
+                    i += 1;
+                    continue;
+                }
+
                 let parsed_args: serde_json::Value =
                     serde_json::from_str(arguments).map_err(|e| {
                         GeminiAdapterError::InvalidToolArguments(format!(
@@ -207,8 +233,32 @@ pub fn translate_request(
                 name,
                 input,
                 call_id,
+                id,
                 ..
             } => {
+                let origin = continuation.and_then(|c| {
+                    c.get_call_origin(call_id).or_else(|| {
+                        id.as_ref()
+                            .and_then(|item_id| c.get_item_origin(item_id.as_ref()))
+                    })
+                });
+
+                if let Some(origin) = origin {
+                    let resp_id = &origin.response_id;
+                    if replayed_responses.insert(resp_id.clone()) {
+                        let turn = continuation
+                            .and_then(|c| c.get_model_turn(resp_id))
+                            .ok_or_else(|| {
+                                GeminiAdapterError::MissingContinuationState(format!(
+                                    "Missing native model turn for response '{resp_id}'"
+                                ))
+                            })?;
+                        contents.push(turn.clone());
+                    }
+                    i += 1;
+                    continue;
+                }
+
                 let parsed_input: serde_json::Value = serde_json::from_str(input).map_err(|e| {
                     GeminiAdapterError::UnsupportedCustomToolInput(format!(
                         "Custom tool call '{name}' input is not valid JSON: {e}"
@@ -239,49 +289,26 @@ pub fn translate_request(
                 append_or_merge_content(&mut contents, "model", vec![part]);
                 i += 1;
             }
-            ResponseItem::Reasoning {
-                id,
-                summary,
-                content,
-                ..
-            } => {
+            ResponseItem::Reasoning { id, .. } => {
                 let id_str = id.as_ref().map(|rid| rid.to_string()).unwrap_or_default();
-                // Check if reasoning originated from Gemini
-                if let Some(cont) = continuation
-                    && let Some(sig) = cont.get_signature(&id_str)
-                {
-                    let text =
-                        summary
-                            .first()
-                            .map(|s| {
-                                match s {
-                            codex_protocol::models::ReasoningItemReasoningSummary::SummaryText {
-                                text,
-                            } => text.clone(),
-                        }
-                            })
-                            .or_else(|| {
-                                content.as_ref().and_then(|c| c.first()).map(|item| {
-                                    match item {
-                                    codex_protocol::models::ReasoningItemContent::Text {
-                                        text,
-                                    } => text.clone(),
-                                    codex_protocol::models::ReasoningItemContent::ReasoningText {
-                                        text,
-                                    } => text.clone(),
-                                }
-                                })
-                            })
-                            .unwrap_or_default();
-                    let mut part = GeminiPart::text(text);
-                    part.thought = Some(true);
-                    part.thought_signature = Some(sig.to_string());
-                    append_or_merge_content(&mut contents, "model", vec![part]);
+                let origin = continuation.and_then(|c| c.get_item_origin(&id_str));
+
+                if let Some(origin) = origin {
+                    let resp_id = &origin.response_id;
+                    if replayed_responses.insert(resp_id.clone()) {
+                        let turn = continuation
+                            .and_then(|c| c.get_model_turn(resp_id))
+                            .ok_or_else(|| {
+                                GeminiAdapterError::MissingContinuationState(format!(
+                                    "Missing native model turn for response '{resp_id}'"
+                                ))
+                            })?;
+                        contents.push(turn.clone());
+                    }
                     i += 1;
                     continue;
                 }
 
-                // If non-Gemini reasoning or missing continuation
                 if id_str.starts_with("gemini-") {
                     return Err(GeminiAdapterError::MissingContinuationState(format!(
                         "Reasoning item '{id_str}' missing required Gemini continuation state"
@@ -299,6 +326,37 @@ pub fn translate_request(
                     "assistant" => "model",
                     other => return Err(GeminiAdapterError::UnsupportedRole(other.to_string())),
                 };
+
+                if gemini_role == "model" {
+                    let origin = continuation.and_then(|c| {
+                        id.as_ref()
+                            .and_then(|item_id| c.get_item_origin(item_id.as_ref()))
+                    });
+
+                    if let Some(origin) = origin {
+                        let resp_id = &origin.response_id;
+                        if replayed_responses.insert(resp_id.clone()) {
+                            let turn = continuation
+                                .and_then(|c| c.get_model_turn(resp_id))
+                                .ok_or_else(|| {
+                                    GeminiAdapterError::MissingContinuationState(format!(
+                                        "Missing native model turn for response '{resp_id}'"
+                                    ))
+                                })?;
+                            contents.push(turn.clone());
+                        }
+                        i += 1;
+                        continue;
+                    }
+
+                    if let Some(item_id) = id
+                        && item_id.as_ref().starts_with("gemini-")
+                    {
+                        return Err(GeminiAdapterError::MissingContinuationState(format!(
+                            "Assistant message '{item_id}' missing required Gemini continuation state"
+                        )));
+                    }
+                }
 
                 let mut parts = Vec::new();
                 for c in content {
@@ -507,10 +565,11 @@ pub fn translate_request(
             warnings.push(GeminiAdapterWarning::StructuredOutputSchemaConstrained);
         }
         gen_config.response_mime_type = Some("application/json".to_string());
-        gen_config.response_schema = Some(format.schema.clone());
         gen_config.response_format = Some(GeminiResponseFormat {
-            mime_type: Some("application/json".to_string()),
-            schema: Some(format.schema.clone()),
+            text: Some(GeminiTextFormatConfig {
+                mime_type: "application/json".to_string(),
+                schema: Some(format.schema.clone()),
+            }),
         });
     }
 
@@ -611,13 +670,13 @@ pub fn translate_request(
     })
 }
 
-/// Validates tool name against Gemini naming rules: 1-128 chars, [a-zA-Z0-9_.-]
+/// Validates tool name against Gemini naming rules: 1-128 chars, [a-zA-Z0-9_-]
 pub fn is_valid_gemini_tool_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 128 {
         return false;
     }
     name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Converts a tool execution output into a Gemini `functionResponse` part.

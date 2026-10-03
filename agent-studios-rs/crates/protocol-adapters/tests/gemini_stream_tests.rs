@@ -165,10 +165,12 @@ fn test_03_tool_call_streaming_and_continuation_recording() {
                     id: Some("provider-call-99".to_string()),
                     name: "get_weather".to_string(),
                     args: serde_json::json!({ "location": "Tokyo" }),
+                    ..Default::default()
                 }),
                 function_response: None,
                 thought: None,
                 thought_signature: Some("sig-weather-call".to_string()),
+                ..Default::default()
             }])),
             finish_reason: Some("STOP".to_string()),
             safety_ratings: None,
@@ -235,10 +237,12 @@ fn test_04_deterministic_internal_call_id_when_provider_omits_id() {
                     id: None, // Provider omitted ID
                     name: "execute_cmd".to_string(),
                     args: serde_json::json!({ "cmd": "ls" }),
+                    ..Default::default()
                 }),
                 function_response: None,
                 thought: None,
                 thought_signature: None,
+                ..Default::default()
             }])),
             finish_reason: Some("STOP".to_string()),
             safety_ratings: None,
@@ -279,6 +283,7 @@ fn test_05_thought_reasoning_stream_with_signature() {
                 function_response: None,
                 thought: Some(true),
                 thought_signature: Some("opaque-crypto-sig-456".to_string()),
+                ..Default::default()
             }])),
             finish_reason: None,
             safety_ratings: None,
@@ -521,10 +526,12 @@ fn test_12_malformed_function_call_args_fails_closed() {
                     id: Some("call-1".to_string()),
                     name: "exec".to_string(),
                     args: serde_json::json!("not-an-object"),
+                    ..Default::default()
                 }),
                 function_response: None,
                 thought: None,
                 thought_signature: None,
+                ..Default::default()
             }])),
             finish_reason: None,
             safety_ratings: None,

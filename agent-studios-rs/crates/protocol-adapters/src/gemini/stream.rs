@@ -1,9 +1,9 @@
 use codex_api::ResponseEvent;
-use codex_protocol::ResponseItemId;
 use codex_protocol::models::{ContentItem, ReasoningItemContent, ResponseItem};
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::{ResponseItemId, ResponseUsageMetadata};
 
-use super::continuation::GeminiContinuationState;
+use super::continuation::{GeminiContinuationState, GeminiOriginRef};
 use super::error::GeminiAdapterError;
 use super::types::{GeminiContent, GeminiGenerateContentResponse, GeminiPart, GeminiUsageMetadata};
 
@@ -244,9 +244,10 @@ impl GeminiStreamTranslator {
 
             if let Some(cand) = candidates.first() {
                 // Ensure candidate index is 0
-                if cand.index.unwrap_or(0) != 0 {
+                let candidate_index = cand.index.unwrap_or(0) as u32;
+                if candidate_index != 0 {
                     return Err(GeminiAdapterError::MultipleCandidatesUnsupported(
-                        (cand.index.unwrap_or(0) + 1) as usize,
+                        (candidate_index + 1) as usize,
                     ));
                 }
 
@@ -264,11 +265,17 @@ impl GeminiStreamTranslator {
                 if let Some(ref content) = cand.content {
                     for part in &content.parts {
                         self.model_parts.push(part.clone());
+                        let part_index = (self.model_parts.len() - 1) as u32;
+                        let resp_id = self.response_id.as_deref().unwrap_or("gemini-stream");
 
                         // Thought / Reasoning Part
                         if part.thought == Some(true) {
                             // Close active text if any
                             if let Some(active) = self.active_text.take() {
+                                if let Some(sig) = &active.thought_signature {
+                                    self.continuation_state
+                                        .record_signature(active.item_id.to_string(), sig);
+                                }
                                 events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
                                     id: Some(active.item_id),
                                     role: "assistant".to_string(),
@@ -282,11 +289,20 @@ impl GeminiStreamTranslator {
 
                             let thought_text = part.text.as_deref().unwrap_or("");
                             if self.active_reasoning.is_none() {
-                                let resp_id =
-                                    self.response_id.as_deref().unwrap_or("gemini-stream");
                                 let reasoning_id =
                                     format!("gemini-reasoning-{resp_id}-{}", self.output_index);
                                 let item_id = ResponseItemId::from_server(reasoning_id.clone());
+
+                                let origin = GeminiOriginRef {
+                                    response_id: resp_id.to_string(),
+                                    candidate_index,
+                                    part_index,
+                                };
+                                self.continuation_state
+                                    .record_item_origin(item_id.to_string(), origin.clone());
+                                self.continuation_state
+                                    .record_item_origin(reasoning_id.clone(), origin);
+
                                 events.push(ResponseEvent::OutputItemAdded(
                                     ResponseItem::Reasoning {
                                         id: Some(item_id.clone()),
@@ -328,6 +344,8 @@ impl GeminiStreamTranslator {
                                 if let Some(sig) = &active.thought_signature {
                                     self.continuation_state
                                         .record_signature(&active.reasoning_id, sig);
+                                    self.continuation_state
+                                        .record_signature(active.item_id.to_string(), sig);
                                 }
                                 events.push(ResponseEvent::OutputItemDone(
                                     ResponseItem::Reasoning {
@@ -344,6 +362,10 @@ impl GeminiStreamTranslator {
 
                             // Close active text if open
                             if let Some(active) = self.active_text.take() {
+                                if let Some(sig) = &active.thought_signature {
+                                    self.continuation_state
+                                        .record_signature(active.item_id.to_string(), sig);
+                                }
                                 events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
                                     id: Some(active.item_id),
                                     role: "assistant".to_string(),
@@ -368,12 +390,11 @@ impl GeminiStreamTranslator {
                                 )));
                             }
 
-                            let resp_id = self.response_id.as_deref().unwrap_or("gemini-stream");
                             let call_id = fc.id.clone().unwrap_or_else(|| {
                                 GeminiContinuationState::generate_internal_call_id(
                                     resp_id,
-                                    0,
-                                    self.tool_calls_emitted,
+                                    candidate_index,
+                                    part_index,
                                 )
                             });
 
@@ -381,9 +402,28 @@ impl GeminiStreamTranslator {
                                 &call_id,
                                 &fc.name,
                                 fc.id.clone(),
+                                resp_id,
+                                candidate_index,
+                                part_index,
                             );
+
+                            let item_id = ResponseItemId::from_server(format!(
+                                "gemini-call-item-{resp_id}-{}",
+                                self.output_index
+                            ));
+
+                            let origin = GeminiOriginRef {
+                                response_id: resp_id.to_string(),
+                                candidate_index,
+                                part_index,
+                            };
+                            self.continuation_state
+                                .record_item_origin(item_id.to_string(), origin);
+
                             if let Some(sig) = &part.thought_signature {
                                 self.continuation_state.record_signature(&call_id, sig);
+                                self.continuation_state
+                                    .record_signature(item_id.to_string(), sig);
                             }
 
                             let args_str = serde_json::to_string(&fc.args).map_err(|e| {
@@ -391,11 +431,6 @@ impl GeminiStreamTranslator {
                                     "Failed to serialize function arguments: {e}"
                                 ))
                             })?;
-
-                            let item_id = ResponseItemId::from_server(format!(
-                                "gemini-call-item-{resp_id}-{}",
-                                self.output_index
-                            ));
 
                             events.push(ResponseEvent::OutputItemAdded(
                                 ResponseItem::FunctionCall {
@@ -435,6 +470,8 @@ impl GeminiStreamTranslator {
                                 if let Some(sig) = &active.thought_signature {
                                     self.continuation_state
                                         .record_signature(&active.reasoning_id, sig);
+                                    self.continuation_state
+                                        .record_signature(active.item_id.to_string(), sig);
                                 }
                                 events.push(ResponseEvent::OutputItemDone(
                                     ResponseItem::Reasoning {
@@ -450,12 +487,18 @@ impl GeminiStreamTranslator {
                             }
 
                             if self.active_text.is_none() {
-                                let resp_id =
-                                    self.response_id.as_deref().unwrap_or("gemini-stream");
                                 let item_id = ResponseItemId::from_server(format!(
                                     "gemini-msg-{resp_id}-{}",
                                     self.output_index
                                 ));
+                                let origin = GeminiOriginRef {
+                                    response_id: resp_id.to_string(),
+                                    candidate_index,
+                                    part_index,
+                                };
+                                self.continuation_state
+                                    .record_item_origin(item_id.to_string(), origin);
+
                                 events.push(ResponseEvent::OutputItemAdded(
                                     ResponseItem::Message {
                                         id: Some(item_id.clone()),
@@ -514,6 +557,27 @@ impl GeminiStreamTranslator {
                         "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" => {
                             return Err(GeminiAdapterError::ContentBlocked(fr.clone()));
                         }
+                        "FINISH_REASON_UNSPECIFIED" => {
+                            return Err(GeminiAdapterError::FinishReasonUnspecified);
+                        }
+                        "MALFORMED_FUNCTION_CALL" => {
+                            return Err(GeminiAdapterError::MalformedFunctionCall(fr.clone()));
+                        }
+                        "IMAGE_SAFETY" | "IMAGE_GENERATION_BLOCKED" => {
+                            return Err(GeminiAdapterError::ImageGenerationBlocked(fr.clone()));
+                        }
+                        "UNEXPECTED_TOOL_CALL" => {
+                            return Err(GeminiAdapterError::UnexpectedToolCall(fr.clone()));
+                        }
+                        "TOO_MANY_TOOL_CALLS" => {
+                            return Err(GeminiAdapterError::TooManyToolCalls(fr.clone()));
+                        }
+                        "MALFORMED_RESPONSE" => {
+                            return Err(GeminiAdapterError::MalformedResponse(fr.clone()));
+                        }
+                        "MISSING_THOUGHT_SIGNATURE" => {
+                            return Err(GeminiAdapterError::MissingThoughtSignature(fr.clone()));
+                        }
                         other => {
                             return Err(GeminiAdapterError::UnknownFinishReason(other.to_string()));
                         }
@@ -546,6 +610,8 @@ impl GeminiStreamTranslator {
             if let Some(sig) = &active.thought_signature {
                 self.continuation_state
                     .record_signature(&active.reasoning_id, sig);
+                self.continuation_state
+                    .record_signature(active.item_id.to_string(), sig);
             }
             events.push(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
                 id: Some(active.item_id),
@@ -560,6 +626,10 @@ impl GeminiStreamTranslator {
 
         // 2. Close active text if open
         if let Some(active) = self.active_text.take() {
+            if let Some(sig) = &active.thought_signature {
+                self.continuation_state
+                    .record_signature(active.item_id.to_string(), sig);
+            }
             events.push(ResponseEvent::OutputItemDone(ResponseItem::Message {
                 id: Some(active.item_id),
                 role: "assistant".to_string(),
@@ -572,38 +642,61 @@ impl GeminiStreamTranslator {
         }
 
         // 3. Compute TokenUsage
-        let (prompt_tokens, cached_tokens, output_tokens, total_tokens) = if let Some(ref u) =
-            self.usage_metadata
-        {
-            let prompt = u.prompt_token_count.unwrap_or(0);
-            let cached = u.cached_content_token_count.unwrap_or(0);
-            let candidates = u.candidates_token_count.unwrap_or(0);
-            let total = u.total_token_count.unwrap_or(prompt + candidates);
+        let (prompt_tokens, cached_tokens, candidates_tokens, thoughts_tokens, total_tokens) =
+            if let Some(ref u) = self.usage_metadata {
+                let prompt = u.prompt_token_count.unwrap_or(0);
+                let cached = u.cached_content_token_count.unwrap_or(0);
+                let candidates = u.candidates_token_count.unwrap_or(0);
+                let thoughts = u.thoughts_token_count.unwrap_or(0);
 
-            if prompt < 0 || cached < 0 || candidates < 0 || total < 0 {
-                return Err(GeminiAdapterError::InvalidUsage(format!(
-                    "Negative token count in usage metadata: prompt={prompt}, cached={cached}, candidates={candidates}, total={total}"
-                )));
-            }
-            if cached > prompt {
-                return Err(GeminiAdapterError::InvalidUsage(format!(
-                    "cached_content_token_count ({cached}) cannot exceed prompt_token_count ({prompt})"
-                )));
-            }
-            (prompt, cached, candidates, total)
-        } else {
-            (0, 0, 0, 0)
-        };
+                if prompt < 0 || cached < 0 || candidates < 0 || thoughts < 0 {
+                    return Err(GeminiAdapterError::InvalidUsage(format!(
+                        "Negative token count in usage metadata: prompt={prompt}, cached={cached}, candidates={candidates}, thoughts={thoughts}"
+                    )));
+                }
+                if cached > prompt {
+                    return Err(GeminiAdapterError::InvalidUsage(format!(
+                        "cached_content_token_count ({cached}) cannot exceed prompt_token_count ({prompt})"
+                    )));
+                }
+
+                let total = if let Some(tot) = u.total_token_count {
+                    if tot < 0 {
+                        return Err(GeminiAdapterError::InvalidUsage(format!(
+                            "Negative total token count: {tot}"
+                        )));
+                    }
+                    tot
+                } else {
+                    prompt
+                        .checked_add(candidates)
+                        .and_then(|sum| sum.checked_add(thoughts))
+                        .ok_or_else(|| {
+                            GeminiAdapterError::InvalidUsage(
+                                "Total token calculation overflowed i64".to_string(),
+                            )
+                        })?
+                };
+
+                (prompt, cached, candidates, thoughts, total)
+            } else {
+                (0, 0, 0, 0, 0)
+            };
 
         let token_usage = TokenUsage {
             input_tokens: prompt_tokens,
             cached_input_tokens: cached_tokens,
             cache_write_input_tokens: 0,
-            output_tokens,
-            reasoning_output_tokens: 0,
+            output_tokens: candidates_tokens,
+            reasoning_output_tokens: thoughts_tokens,
             total_tokens,
             codex_rollout_budget_units: None,
         };
+
+        let usage_metadata = self.usage_metadata.as_ref().map(|u| ResponseUsageMetadata {
+            amount: None,
+            metadata: serde_json::to_value(u).ok(),
+        });
 
         // 4. Determine end_turn: STOP with tools -> end_turn: false; STOP without tools -> end_turn: true
         let end_turn = match finish_reason {
@@ -626,7 +719,7 @@ impl GeminiStreamTranslator {
         events.push(ResponseEvent::Completed {
             response_id: resp_id,
             token_usage: Some(token_usage),
-            usage_metadata: None,
+            usage_metadata,
             end_turn,
         });
 

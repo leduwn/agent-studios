@@ -10,7 +10,7 @@ pub mod request;
 pub mod stream;
 pub mod types;
 
-pub use continuation::{GeminiContinuationState, GeminiToolCallMetadata};
+pub use continuation::{GeminiContinuationState, GeminiOriginRef, GeminiToolCallMetadata};
 pub use error::{GeminiAdapterError, GeminiAdapterWarning};
 pub use request::{is_valid_gemini_tool_name, translate_request};
 pub use stream::GeminiStreamTranslator;
@@ -19,8 +19,9 @@ pub use types::{
     GeminiFunctionCallingConfig, GeminiFunctionCallingMode, GeminiFunctionDeclaration,
     GeminiFunctionResponse, GeminiGenerateContentRequest, GeminiGenerateContentResponse,
     GeminiGenerationConfig, GeminiPart, GeminiPromptFeedback, GeminiRequestTranslation,
-    GeminiResponseFormat, GeminiSafetyRating, GeminiSafetySetting, GeminiThinkingConfig,
-    GeminiThinkingLevel, GeminiThinkingPolicy, GeminiTool, GeminiToolConfig, GeminiUsageMetadata,
+    GeminiResponseFormat, GeminiSafetyRating, GeminiSafetySetting, GeminiTextFormatConfig,
+    GeminiThinkingConfig, GeminiThinkingLevel, GeminiThinkingPolicy, GeminiTool, GeminiToolConfig,
+    GeminiUsageMetadata,
 };
 
 use codex_api::ResponsesApiRequest;

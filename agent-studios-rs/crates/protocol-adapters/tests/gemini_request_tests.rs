@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use agent_studios_protocol_adapters::gemini::{
     GeminiAdapterError, GeminiAdapterOptions, GeminiAdapterWarning, GeminiFunctionCallingMode,
-    GeminiThinkingLevel, GeminiThinkingPolicy, translate_request,
+    GeminiResponseFormat, GeminiTextFormatConfig, GeminiThinkingLevel, GeminiThinkingPolicy,
+    translate_request,
 };
 use codex_api::{
     AccessPrograms, Reasoning, ResponsesApiRequest, ResponsesApiTools,
@@ -585,7 +586,15 @@ fn test_19_structured_outputs_mapping() {
         generation_cfg.response_mime_type.as_deref(),
         Some("application/json")
     );
-    assert_eq!(generation_cfg.response_schema, Some(schema));
+    assert_eq!(
+        generation_cfg.response_format,
+        Some(GeminiResponseFormat {
+            text: Some(GeminiTextFormatConfig {
+                mime_type: "application/json".to_string(),
+                schema: Some(schema),
+            }),
+        })
+    );
 
     assert!(
         result

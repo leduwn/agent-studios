@@ -88,6 +88,24 @@ pub enum GeminiAdapterError {
     #[error("Model emitted a malformed function call: {0}")]
     MalformedFunctionCall(String),
 
+    #[error("Model response is missing required thought signature: {0}")]
+    MissingThoughtSignature(String),
+
+    #[error("Model made an unexpected tool call: {0}")]
+    UnexpectedToolCall(String),
+
+    #[error("Model exceeded tool call count limit: {0}")]
+    TooManyToolCalls(String),
+
+    #[error("Model emitted a malformed response: {0}")]
+    MalformedResponse(String),
+
+    #[error("Image generation was blocked: {0}")]
+    ImageGenerationBlocked(String),
+
+    #[error("Finish reason was unspecified")]
+    FinishReasonUnspecified,
+
     #[error("Encountered unknown or unhandled finish reason: '{0}'")]
     UnknownFinishReason(String),
 

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::error::GeminiAdapterWarning;
@@ -49,7 +51,7 @@ impl GeminiContent {
 }
 
 /// A structured content part in a Gemini Content turn.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +68,9 @@ pub struct GeminiPart {
     /// Can be present on text, functionCall, or thought parts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+    /// Preserves unknown/future provider-native wire fields losslessly.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl GeminiPart {
@@ -77,6 +82,19 @@ impl GeminiPart {
             function_response: None,
             thought: None,
             thought_signature: None,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    pub fn thought(t: impl Into<String>, signature: Option<String>) -> Self {
+        Self {
+            text: Some(t.into()),
+            inline_data: None,
+            function_call: None,
+            function_response: None,
+            thought: Some(true),
+            thought_signature: signature,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -91,6 +109,7 @@ impl GeminiPart {
             function_response: None,
             thought: None,
             thought_signature: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -102,14 +121,11 @@ impl GeminiPart {
         Self {
             text: None,
             inline_data: None,
-            function_call: Some(GeminiFunctionCall {
-                id,
-                name: name.into(),
-                args,
-            }),
+            function_call: Some(GeminiFunctionCall::new(id, name, args)),
             function_response: None,
             thought: None,
             thought_signature: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -131,6 +147,7 @@ impl GeminiPart {
             }),
             thought: None,
             thought_signature: None,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -209,19 +226,24 @@ pub struct GeminiGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_schema: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub response_format: Option<GeminiResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<GeminiThinkingConfig>,
 }
 
-/// Structured response format definition.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Structured response format definition following modern Gemini wire format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiResponseFormat {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mime_type: Option<String>,
+    pub text: Option<GeminiTextFormatConfig>,
+}
+
+/// Text format configuration holding MIME type and schema.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiTextFormatConfig {
+    pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema: Option<serde_json::Value>,
 }
@@ -249,13 +271,27 @@ pub enum GeminiThinkingLevel {
 }
 
 /// Function call emitted by model.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiFunctionCall {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     pub name: String,
     pub args: serde_json::Value,
+    /// Preserves unknown/future provider-native wire fields losslessly.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl GeminiFunctionCall {
+    pub fn new(id: Option<String>, name: impl Into<String>, args: serde_json::Value) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            args,
+            extra: BTreeMap::new(),
+        }
+    }
 }
 
 /// Function execution response provided by user.
