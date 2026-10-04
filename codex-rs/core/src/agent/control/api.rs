@@ -66,6 +66,7 @@ impl AgentControl for LocalAgentControl {
                 input,
                 source,
                 options,
+                model_runtime_override,
             } = request;
             let input = match input {
                 AgentInput::UserInput(input) => SpawnInitialInput::UserInput(input),
@@ -93,7 +94,14 @@ impl AgentControl for LocalAgentControl {
                     )
                 }
             };
-            Box::pin(self.spawn_agent_internal(config, input, Some(source), options)).await
+            Box::pin(self.spawn_agent_internal(
+                config,
+                input,
+                Some(source),
+                options,
+                model_runtime_override,
+            ))
+            .await
         })
     }
 

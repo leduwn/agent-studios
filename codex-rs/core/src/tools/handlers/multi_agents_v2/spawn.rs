@@ -203,6 +203,7 @@ async fn handle_spawn_agent(
                 multi_agent_v2_usage_hints,
                 cyber_access_program: turn.cyber_access_program,
             },
+            model_runtime_override: None,
         })
         .await
         .map_err(|err| {

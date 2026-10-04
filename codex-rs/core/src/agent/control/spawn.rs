@@ -286,6 +286,7 @@ impl LocalAgentControl {
             SpawnInitialInput::UserInput(initial_input),
             session_source,
             SpawnAgentOptions::default(),
+            /*model_runtime_override*/ None,
         ))
         .await?;
         Ok(spawned_agent.thread_id)
@@ -639,6 +640,7 @@ impl LocalAgentControl {
         initial_input: SpawnInitialInput,
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
+        model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
         let membership = self.runtime.admit_start()?;
         let spawn_started_at = Instant::now();
@@ -736,6 +738,7 @@ impl LocalAgentControl {
                     &options,
                     inheritance,
                     multi_agent_version,
+                    model_runtime_override,
                 ))
                 .await?
             }
@@ -778,6 +781,7 @@ impl LocalAgentControl {
                     inheritance.environments,
                     inheritance.exec_policy,
                     environments,
+                    model_runtime_override,
                 ))
                 .await?;
                 SpawnedThreadResult {
@@ -945,6 +949,7 @@ impl LocalAgentControl {
         options: &SpawnAgentOptions,
         inheritance: SpawnAgentThreadInheritance,
         multi_agent_version: MultiAgentVersion,
+        model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
     ) -> CodexResult<SpawnedThreadResult> {
         let SpawnAgentThreadInheritance {
             environments: inherited_environments,
@@ -1263,6 +1268,7 @@ impl LocalAgentControl {
                 inherited_exec_policy,
                 /*environments*/ None,
                 thread_extension_init,
+                model_runtime_override,
             )
             .await?;
         let child_create = child_create_started_at.elapsed();

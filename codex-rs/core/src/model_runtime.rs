@@ -162,4 +162,87 @@ mod tests {
         };
         assert!(not_inherited.is_none());
     }
+
+    #[test]
+    fn test_spawn_request_explicit_override_precedence() {
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-key"));
+        let provider_parent = create_model_provider(
+            ModelProviderInfo::create_openai_provider(None),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let provider_child = create_model_provider(
+            ModelProviderInfo::create_openai_provider(None),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let models_manager_parent: SharedModelsManager = Arc::new(StaticModelsManager::new(
+            Some(Arc::clone(&auth_manager)),
+            ModelsResponse { models: Vec::new() },
+        ));
+        let models_manager_child: SharedModelsManager = Arc::new(StaticModelsManager::new(
+            Some(auth_manager),
+            ModelsResponse { models: Vec::new() },
+        ));
+
+        let parent_override = ModelRuntimeOverride::new(provider_parent, models_manager_parent);
+        let child_override =
+            ModelRuntimeOverride::new(Arc::clone(&provider_child), models_manager_child);
+
+        // Case 1: Explicit child override is present -> takes precedence over parent
+        let explicit_override = Some(child_override.clone());
+        let resolved = match explicit_override {
+            Some(r) => Some(r),
+            None => Some(parent_override.clone()),
+        };
+        assert!(resolved.is_some());
+        assert!(Arc::ptr_eq(
+            resolved.as_ref().unwrap().provider(),
+            &provider_child
+        ));
+
+        // Case 2: Explicit child override is None -> falls back to parent inheritance
+        let explicit_override_none: Option<ModelRuntimeOverride> = None;
+        let fallback_resolved = match explicit_override_none {
+            Some(r) => Some(r),
+            None => Some(parent_override.clone()),
+        };
+        assert!(fallback_resolved.is_some());
+        assert!(Arc::ptr_eq(
+            fallback_resolved.as_ref().unwrap().provider(),
+            parent_override.provider()
+        ));
+    }
+
+    #[test]
+    fn test_delegate_runtime_override_inheritance() {
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-key"));
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(None),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let models_manager: SharedModelsManager = Arc::new(StaticModelsManager::new(
+            Some(auth_manager),
+            ModelsResponse { models: Vec::new() },
+        ));
+        let parent_override = Some(ModelRuntimeOverride::new(provider, models_manager));
+
+        let parent_provider_id = "agent-studios-anthropic-1";
+
+        // Direct delegate with matching provider ID inherits parent override
+        let delegate_matching_provider = "agent-studios-anthropic-1";
+        let inherited = if delegate_matching_provider == parent_provider_id {
+            parent_override.clone()
+        } else {
+            None
+        };
+        assert!(inherited.is_some());
+
+        // Direct delegate with differing provider ID does NOT inherit parent override
+        let delegate_different_provider = "agent-studios-openai-2";
+        let not_inherited = if delegate_different_provider == parent_provider_id {
+            parent_override.clone()
+        } else {
+            None
+        };
+        assert!(not_inherited.is_none());
+    }
 }

@@ -123,6 +123,7 @@ impl LocalAgentControl {
             input: AgentInput::UserInput(initial_input),
             source,
             options,
+            model_runtime_override: None,
         })
         .await
         .map(|(agent, _)| agent)

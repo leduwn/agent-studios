@@ -13,6 +13,7 @@ use crate::agent::types::SpawnAgentOptions;
 use crate::codex_thread::GuardianRootSnapshot;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
+use crate::model_runtime::ModelRuntimeOverride;
 use crate::rollout_budget::RolloutBudgetReminder;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
@@ -211,6 +212,7 @@ pub struct SpawnRequest {
     pub input: AgentInput,
     pub source: SessionSource,
     pub options: SpawnAgentOptions,
+    pub model_runtime_override: Option<ModelRuntimeOverride>,
 }
 
 pub struct SendRequest {

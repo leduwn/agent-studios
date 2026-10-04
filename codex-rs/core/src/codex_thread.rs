@@ -947,6 +947,10 @@ impl CodexThread {
         self.session.model_runtime_override()
     }
 
+    pub fn agent_control(&self) -> Arc<dyn crate::agent::api::AgentControl> {
+        Arc::clone(&self.session.services.agent_control)
+    }
+
     pub async fn model_provider_id(&self) -> String {
         self.session.model_provider_id().await
     }

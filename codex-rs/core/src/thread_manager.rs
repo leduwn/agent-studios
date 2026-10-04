@@ -1929,6 +1929,7 @@ impl ThreadManagerState {
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            /*model_runtime_override*/ None,
         ))
         .await
     }
@@ -1948,11 +1949,16 @@ impl ThreadManagerState {
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
+        model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
-        let model_runtime_override = self
-            .model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
-            .await;
+        let model_runtime_override = match model_runtime_override {
+            Some(r) => Some(r),
+            None => {
+                self.model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
+                    .await
+            }
+        };
         let options = StartThreadOptions {
             history_mode,
             session_source: Some(session_source),
@@ -2026,11 +2032,16 @@ impl ThreadManagerState {
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
         thread_extension_init: ExtensionDataInit,
+        model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
-        let model_runtime_override = self
-            .model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
-            .await;
+        let model_runtime_override = match model_runtime_override {
+            Some(r) => Some(r),
+            None => {
+                self.model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
+                    .await
+            }
+        };
         let options = StartThreadOptions {
             initial_history,
             history_mode,
