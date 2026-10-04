@@ -149,6 +149,27 @@ This roadmap defines the strategic progression for building Agent Studios upon t
   - 11 unit tests covering secrets, auth, SSE parsing, and continuation transactions.
   - 6 end-to-end `wiremock` integration tests covering Chat Completions streaming, Anthropic Messages streaming with continuation state persistence, Gemini streamGenerateContent streaming, transactional rollback on HTTP error, cancellation propagation via interrupt channel, and concurrent thread state isolation.
 
+### M07.6: Provider Runtime Assembly & Codex Thread Injection (Completed on `feat/provider-runtime-session-factory`)
+
+- Generic Codex seam (`codex-rs`):
+  - `ModelRuntimeOverride` handle encapsulating `(SharedModelProvider, SharedModelsManager)` tuple in `codex-core`, re-exported via `codex-core-api`.
+  - Injected via `StartThreadOptions` and `ThreadSpawnRequest` into `SessionSpawnArgs` and `Session::spawn_internal`.
+  - Early `models_manager` resolution before `ModelClientSession` construction preventing split-brain session states.
+  - Strict provider/models manager pairing ensuring metadata and inference target match.
+  - Conditional runtime inheritance across child sessions, subagents, delegate tasks, and forks.
+  - Custom backend safety invariants: force `RemoteCompactionSupport::Unsupported` and disable WebSockets/prewarm.
+- `agent-studios-runtime-session` crate:
+  - `StaticModelsManager`: zero-discovery static catalog wrapping `codex_models_manager::manager::StaticModelsManager` with in-memory metadata.
+  - `model_descriptor_to_model_info`: maps descriptor limits, display name, visibility, and reasoning presets (`Low`, `Medium`, `High`) to `ModelInfo`.
+  - `PreparedRuntimeSession`: wraps `ModelRuntimeOverride`, deterministic `model_provider_id`, `selected_model`, and `available_models`.
+  - `prepare_start_thread_options` / `apply_to_start_thread_options`: configures thread options and disables provider model fallback.
+  - `AgentStudiosRuntimeSessionFactory`:
+    - Native `OpenAiResponses` path: resolves via `CodexProviderBridge` with `inference_backend = None`.
+    - Custom protocol path (`OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`): session-scoped `RuntimeRouter` as `ModelInferenceBackend`.
+    - Session-scoped route isolation preventing collisions on shared model IDs across concurrent sessions.
+- Integration tests:
+  - Verified native Responses bridge, Anthropic Messages, Gemini generateContent, Chat Completions, zero discovery, error handling, and session isolation.
+
 ### M08: Internal Multi-Agent Extension
 - Enhance internal agent runner to instantiate multiple isolated agent configurations.
 - Allow per-agent role specifications, provider assignments, reasoning depths, and tool budgets.

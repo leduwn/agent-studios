@@ -1,0 +1,39 @@
+[package]
+name = "agent-studios-runtime-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-provider = { path = "../provider" }
+agent-studios-protocol-adapters = { path = "../protocol-adapters" }
+agent-studios-runtime-transport = { path = "../runtime-transport" }
+agent-studios-codex-bridge = { path = "../codex-bridge" }
+codex-core-api = { path = "../../../codex-rs/core-api" }
+codex-core = { path = "../../../codex-rs/core" }
+codex-model-provider = { path = "../../../codex-rs/model-provider" }
+codex-model-provider-info = { path = "../../../codex-rs/model-provider-info" }
+codex-models-manager = { path = "../../../codex-rs/models-manager" }
+codex-protocol = { path = "../../../codex-rs/protocol" }
+codex-http-client = { path = "../../../codex-rs/http-client" }
+codex-login = { path = "../../../codex-rs/login" }
+tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
+tracing = "0.1"
+async-trait = "0.1"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }
+bytes = "1.6"
+http = "1"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["sync", "time", "rt-multi-thread", "macros"] }
+wiremock = "0.6"
+tempfile = "3"

@@ -52,3 +52,17 @@ This document catalogs all intentional, minimal patches maintained inside the `c
   - `codex-rs/core/src/client_tests.rs`: Verifies custom backend invocation, request fidelity
     (model, thread/turn context), response stream flow through Codex pipeline (`map_response_stream`),
     error propagation, and WebSocket/prewarm bypass.
+
+### Patch 002: Thread Model Runtime Override Seam (Milestone M07.6)
+
+- **Seam Commit**: `3686e61f7c` (branch: `feat/provider-runtime-session-factory`)
+- **Purpose**: Enables external thread managers to supply a thread-scoped model runtime override (`SharedModelProvider` paired strictly with `SharedModelsManager`) at thread spawn time, ensuring early models manager resolution, preventing split-brain session states, supporting child session inheritance, and disabling remote compaction / WebSockets for custom backends.
+- **Files Modified**:
+  - `codex-rs/core/src/model_runtime.rs` (new file): Defines `ModelRuntimeOverride` encapsulating `(SharedModelProvider, SharedModelsManager)`.
+  - `codex-rs/core/src/lib.rs`: Re-exports `ModelRuntimeOverride`.
+  - `codex-rs/core-api/src/lib.rs`: Re-exports `ModelRuntimeOverride`.
+  - `codex-rs/core/src/thread_manager.rs`: Adds `model_runtime_override: Option<ModelRuntimeOverride>` to `StartThreadOptions` and `ThreadSpawnRequest`.
+  - `codex-rs/core/src/session/session.rs`: Adds `model_runtime_override` to `SessionSpawnArgs`, resolves `override_models_manager` before `ModelClientSession` construction, propagates override to child/delegate/fork sessions, and forces `RemoteCompactionSupport::Unsupported` for custom inference backends.
+- **Targeted Verification Tests**:
+  - `codex-rs/core/src/model_runtime_tests.rs`: Verifies tuple encapsulation, accessors, into_parts decomposition, and clone semantics.
+  - `codex-rs/core/src/thread_manager_tests.rs`: Verifies `StartThreadOptions` initialization with and without override.
