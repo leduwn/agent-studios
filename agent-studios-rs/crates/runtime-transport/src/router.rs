@@ -3,9 +3,9 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use agent_studios_provider::capabilities::CapabilitySupport;
-use agent_studios_provider::id::{ModelId, ProviderInstanceId};
+use agent_studios_provider::id::ProviderInstanceId;
 use agent_studios_provider::instance::ProviderInstance;
-use agent_studios_provider::model::{ModelDescriptor, ModelLimits};
+use agent_studios_provider::model::ModelDescriptor;
 use agent_studios_provider::protocol::ProtocolFamily;
 use codex_api::{ApiError, ResponseStream, ResponsesApiRequest};
 use codex_model_provider::{ModelInferenceBackend, ModelInferenceContext, ModelProviderFuture};
@@ -65,12 +65,14 @@ impl fmt::Debug for RuntimeRouter {
     }
 }
 
+pub const AGENT_STUDIOS_USER_AGENT: &str = "AgentStudios/dev";
+
 impl RuntimeRouter {
-    pub fn new(
+    pub fn try_new(
         secret_resolver: Arc<dyn SecretResolver>,
         continuation_manager: Arc<ContinuationManager>,
-    ) -> Self {
-        Self::new_with_options(
+    ) -> Result<Self, TransportError> {
+        Self::try_new_with_options(
             secret_resolver,
             continuation_manager,
             RuntimeTransportOptions::default(),
@@ -78,18 +80,19 @@ impl RuntimeRouter {
         )
     }
 
-    pub fn new_with_options(
+    pub fn try_new_with_options(
         secret_resolver: Arc<dyn SecretResolver>,
         continuation_manager: Arc<ContinuationManager>,
         options: RuntimeTransportOptions,
         diagnostic_sink: Arc<dyn RuntimeDiagnosticSink>,
-    ) -> Self {
+    ) -> Result<Self, TransportError> {
         let client = reqwest::Client::builder()
             .connect_timeout(options.connect_timeout)
+            .user_agent(AGENT_STUDIOS_USER_AGENT)
             .build()
-            .unwrap_or_default();
+            .map_err(|e| TransportError::HttpClientBuildError(e.to_string()))?;
 
-        Self {
+        Ok(Self {
             client,
             options,
             diagnostic_sink,
@@ -101,7 +104,28 @@ impl RuntimeRouter {
             chat_driver: Arc::new(ChatCompletionsDriver::new()),
             anthropic_driver: Arc::new(AnthropicDriver::new()),
             gemini_driver: Arc::new(GeminiDriver::new()),
-        }
+        })
+    }
+
+    pub fn new(
+        secret_resolver: Arc<dyn SecretResolver>,
+        continuation_manager: Arc<ContinuationManager>,
+    ) -> Result<Self, TransportError> {
+        Self::try_new(secret_resolver, continuation_manager)
+    }
+
+    pub fn new_with_options(
+        secret_resolver: Arc<dyn SecretResolver>,
+        continuation_manager: Arc<ContinuationManager>,
+        options: RuntimeTransportOptions,
+        diagnostic_sink: Arc<dyn RuntimeDiagnosticSink>,
+    ) -> Result<Self, TransportError> {
+        Self::try_new_with_options(
+            secret_resolver,
+            continuation_manager,
+            options,
+            diagnostic_sink,
+        )
     }
 
     /// Registers a provider instance.
@@ -117,9 +141,37 @@ impl RuntimeRouter {
     }
 
     /// Registers an explicit route binding a model slug to an instance and its ModelDescriptor.
-    pub fn register_route(&self, model: impl Into<String>, route: RuntimeModelRoute) {
+    pub fn register_route(
+        &self,
+        model: impl Into<String>,
+        route: RuntimeModelRoute,
+    ) -> Result<(), TransportError> {
+        let model_str = model.into();
+        if route.instance_id != route.descriptor.provider_instance_id {
+            return Err(TransportError::InvalidModelRoute(format!(
+                "Route instance_id '{}' does not match descriptor provider_instance_id '{}'",
+                route.instance_id, route.descriptor.provider_instance_id
+            )));
+        }
+
+        if route.descriptor.id.as_str() != model_str {
+            return Err(TransportError::InvalidModelRoute(format!(
+                "Model key '{model_str}' does not match descriptor id '{}'",
+                route.descriptor.id.as_str()
+            )));
+        }
+
+        let instances = self.provider_instances.read().unwrap();
+        if !instances.contains_key(&route.instance_id) {
+            return Err(TransportError::ProviderNotFound(format!(
+                "Provider instance '{}' was not found in registry",
+                route.instance_id
+            )));
+        }
+
         let mut routes = self.model_routes.write().unwrap();
-        routes.insert(model.into(), route);
+        routes.insert(model_str, route);
+        Ok(())
     }
 
     /// Convenience method to register a model descriptor and bind it to an instance.
@@ -128,27 +180,8 @@ impl RuntimeRouter {
         model: impl Into<String>,
         instance_id: ProviderInstanceId,
         descriptor: ModelDescriptor,
-    ) {
-        self.register_route(model, RuntimeModelRoute::new(instance_id, descriptor));
-    }
-
-    /// Binds a specific model slug to a provider instance with a default descriptor.
-    pub fn route_model(&self, model: impl Into<String>, instance_id: ProviderInstanceId) {
-        let model_str = model.into();
-        let model_id =
-            ModelId::new(&model_str).unwrap_or_else(|_| ModelId::new("default-model").unwrap());
-        let descriptor = ModelDescriptor {
-            provider_instance_id: instance_id,
-            id: model_id,
-            display_name: model_str.clone(),
-            capabilities: Default::default(),
-            limits: ModelLimits {
-                context_window_tokens: None,
-                max_output_tokens: Some(4096),
-            },
-            metadata_source: Default::default(),
-        };
-        self.register_route(model_str, RuntimeModelRoute::new(instance_id, descriptor));
+    ) -> Result<(), TransportError> {
+        self.register_route(model, RuntimeModelRoute::new(instance_id, descriptor))
     }
 
     /// Resolves the provider instance and model descriptor for an incoming request.
@@ -168,40 +201,9 @@ impl RuntimeRouter {
             return Ok((instance, route.descriptor.clone()));
         }
 
-        let active_id = {
-            let active = self.active_instance_id.read().unwrap();
-            *active
-        };
-
-        let target_id = active_id.ok_or_else(|| {
-            TransportError::ProviderNotFound(format!(
-                "No provider instance configured or routed for model '{}'",
-                request.model
-            ))
-        })?;
-
-        let instances = self.provider_instances.read().unwrap();
-        let instance = instances.get(&target_id).cloned().ok_or_else(|| {
-            TransportError::ProviderNotFound(format!(
-                "Provider instance '{target_id}' was not found in registry"
-            ))
-        })?;
-
-        let model_id = ModelId::new(&request.model)
-            .unwrap_or_else(|_| ModelId::new("fallback-model").unwrap());
-        let default_descriptor = ModelDescriptor {
-            provider_instance_id: target_id,
-            id: model_id,
-            display_name: request.model.clone(),
-            capabilities: Default::default(),
-            limits: ModelLimits {
-                context_window_tokens: None,
-                max_output_tokens: Some(4096),
-            },
-            metadata_source: Default::default(),
-        };
-
-        Ok((instance, default_descriptor))
+        Err(TransportError::ModelRouteNotFound {
+            model: request.model.clone(),
+        })
     }
 
     /// Validates requested capabilities against the model's declared capability profile.

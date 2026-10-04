@@ -29,12 +29,8 @@ impl Default for RuntimeTransportOptions {
 impl RuntimeTransportOptions {
     /// Validates an outbound URL string against remote HTTP policy and returns parsed `url::Url`.
     pub fn validate_url(&self, raw_url: &str) -> Result<url::Url, TransportError> {
-        let parsed = url::Url::parse(raw_url).map_err(|e| {
-            TransportError::InvalidEndpoint(format!(
-                "Malformed URL '{}': {e}",
-                sanitize_error_message(raw_url)
-            ))
-        })?;
+        let parsed = url::Url::parse(raw_url)
+            .map_err(|e| TransportError::InvalidEndpoint(format!("Malformed URL: {e}")))?;
 
         match parsed.scheme() {
             "https" => Ok(parsed),
@@ -49,8 +45,10 @@ impl RuntimeTransportOptions {
                 if is_loopback || self.allow_insecure_remote_http {
                     Ok(parsed)
                 } else {
+                    let mut safe_url = parsed.clone();
+                    safe_url.set_query(None);
                     Err(TransportError::InsecureRemoteHttpRejected {
-                        url: sanitize_error_message(raw_url),
+                        url: safe_url.to_string(),
                     })
                 }
             }
@@ -61,10 +59,12 @@ impl RuntimeTransportOptions {
     }
 }
 
-/// Reads an upstream HTTP error response body up to `max_bytes` without unbounded memory buffering.
+/// Reads an upstream HTTP error response body up to `max_bytes` without unbounded memory buffering,
+/// redacting sensitive credentials and query parameters.
 pub async fn read_bounded_error_body(
     mut resp: reqwest::Response,
     max_bytes: usize,
+    auth: Option<&crate::auth::ResolvedAuth>,
 ) -> Result<String, TransportError> {
     use bytes::BytesMut;
 
@@ -74,13 +74,20 @@ pub async fn read_bounded_error_body(
             let remaining = max_bytes.saturating_sub(buf.len());
             buf.extend_from_slice(&chunk_res[..remaining]);
             let s = String::from_utf8_lossy(&buf).to_string();
-            let sanitized = sanitize_error_message(&s);
+            let mut sanitized = sanitize_error_message(&s);
+            if let Some(a) = auth {
+                sanitized = a.redact_secrets(&sanitized);
+            }
             return Ok(format!("{sanitized} [TRUNCATED at {max_bytes} bytes]"));
         }
         buf.extend_from_slice(&chunk_res);
     }
     let s = String::from_utf8_lossy(&buf).to_string();
-    Ok(sanitize_error_message(&s))
+    let mut sanitized = sanitize_error_message(&s);
+    if let Some(a) = auth {
+        sanitized = a.redact_secrets(&sanitized);
+    }
+    Ok(sanitized)
 }
 
 #[cfg(test)]

@@ -74,24 +74,70 @@ pub enum TransportError {
 
     #[error("Provider not found: {0}")]
     ProviderNotFound(String),
+
+    #[error("No route configured for model '{model}'")]
+    ModelRouteNotFound { model: String },
+
+    #[error("Invalid model route: {0}")]
+    InvalidModelRoute(String),
+
+    #[error("Request headers timeout exceeded")]
+    RequestHeadersTimeout,
+
+    #[error("Stream idle timeout exceeded: no SSE events received within configured window")]
+    StreamIdleTimeout,
+
+    #[error("Reserved query parameter '{parameter}' collision: controlled by runtime transport")]
+    ReservedQueryParameterCollision { parameter: String },
+
+    #[error("Failed to construct HTTP client: {0}")]
+    HttpClientBuildError(String),
 }
 
 /// Sanitizes an error message by redacting credential query parameters and secret tokens.
 pub fn sanitize_error_message(msg: &str) -> String {
-    let mut result = String::with_capacity(msg.len());
-    let mut remaining = msg;
+    let mut result = msg.to_string();
 
-    while let Some(pos) = remaining.find("key=") {
-        let (before, after) = remaining.split_at(pos);
-        result.push_str(before);
-        result.push_str("key=[REDACTED]");
-        let val_start = &after["key=".len()..];
-        let end_idx = val_start
-            .find(['&', ' ', ')', '"', '\'', '>'])
-            .unwrap_or(val_start.len());
-        remaining = &val_start[end_idx..];
+    // Strip "for url (...)" if present to avoid leaking full request URLs
+    while let Some(start) = result.find("for url (") {
+        if let Some(end) = result[start..].find(')') {
+            result.replace_range(start..=start + end, "");
+        } else {
+            break;
+        }
     }
-    result.push_str(remaining);
+
+    // Strip generic query params with credentials
+    let sensitive_keys = [
+        "key=",
+        "token=",
+        "access_token=",
+        "secret=",
+        "password=",
+        "auth=",
+        "api_key=",
+        "apikey=",
+    ];
+
+    for key_pattern in sensitive_keys {
+        let mut search_from = 0;
+        while let Some(rel_pos) = result[search_from..].find(key_pattern) {
+            let pos = search_from + rel_pos;
+            let val_start = pos + key_pattern.len();
+            if result[val_start..].starts_with("[REDACTED]") {
+                search_from = val_start + "[REDACTED]".len();
+                continue;
+            }
+            let end_idx = result[val_start..]
+                .find(['&', ' ', ')', '"', '\'', '>', '\n'])
+                .map(|i| val_start + i)
+                .unwrap_or(result.len());
+            let replacement = format!("{key_pattern}[REDACTED]");
+            result.replace_range(pos..end_idx, &replacement);
+            search_from = pos + replacement.len();
+        }
+    }
+
     result
 }
 
@@ -121,8 +167,11 @@ impl From<agent_studios_protocol_adapters::gemini::GeminiAdapterError> for Trans
 
 impl From<reqwest::Error> for TransportError {
     fn from(err: reqwest::Error) -> Self {
+        let err = err.without_url();
+        let is_connect = err.is_connect();
+        let is_timeout = err.is_timeout();
         let sanitized = sanitize_error_message(&err.to_string());
-        if err.is_connect() || err.is_timeout() {
+        if is_connect || is_timeout {
             Self::Network(sanitized)
         } else {
             Self::Http(sanitized)

@@ -125,6 +125,29 @@ impl ResolvedAuth {
         }
         builder
     }
+
+    /// Redacts known credential values (tokens, secrets, API keys) from text.
+    pub fn redact_secrets(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (_, val) in &self.query_params {
+            let secret = val.expose_secret();
+            if !secret.is_empty() {
+                result = result.replace(secret, "[REDACTED]");
+            }
+        }
+        for (_, val) in &self.headers {
+            if let Ok(val_str) = val.to_str() {
+                if let Some(token) = val_str.strip_prefix("Bearer ") {
+                    if !token.is_empty() {
+                        result = result.replace(token, "[REDACTED]");
+                    }
+                } else if !val_str.is_empty() {
+                    result = result.replace(val_str, "[REDACTED]");
+                }
+            }
+        }
+        result
+    }
 }
 
 #[cfg(test)]

@@ -45,12 +45,19 @@ impl SseParser {
         }
     }
 
+    fn total_retained_bytes(&self) -> usize {
+        self.accumulated_data_bytes
+            + self.buffer.len()
+            + self.current_event.as_ref().map_or(0, |s| s.len())
+            + self.current_id.as_ref().map_or(0, |s| s.len())
+    }
+
     /// Pushes incoming byte chunks into the buffer and drains all complete SSE events.
     pub fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, TransportError> {
         self.buffer.extend_from_slice(chunk);
-        if self.buffer.len() > self.max_event_bytes {
+        if self.total_retained_bytes() > self.max_event_bytes {
             return Err(TransportError::SseFrameTooLarge {
-                size: self.buffer.len(),
+                size: self.total_retained_bytes(),
                 max_bytes: self.max_event_bytes,
             });
         }
@@ -88,9 +95,9 @@ impl SseParser {
             } else if let Some(stripped) = line_str.strip_prefix("data:") {
                 let data_line = stripped.strip_prefix(' ').unwrap_or(stripped);
                 self.accumulated_data_bytes += data_line.len();
-                if self.accumulated_data_bytes > self.max_event_bytes {
+                if self.total_retained_bytes() > self.max_event_bytes {
                     return Err(TransportError::SseFrameTooLarge {
-                        size: self.accumulated_data_bytes,
+                        size: self.total_retained_bytes(),
                         max_bytes: self.max_event_bytes,
                     });
                 }
@@ -98,9 +105,21 @@ impl SseParser {
             } else if let Some(stripped) = line_str.strip_prefix("event:") {
                 let event_type = stripped.strip_prefix(' ').unwrap_or(stripped);
                 self.current_event = Some(event_type.to_string());
+                if self.total_retained_bytes() > self.max_event_bytes {
+                    return Err(TransportError::SseFrameTooLarge {
+                        size: self.total_retained_bytes(),
+                        max_bytes: self.max_event_bytes,
+                    });
+                }
             } else if let Some(stripped) = line_str.strip_prefix("id:") {
                 let id = stripped.strip_prefix(' ').unwrap_or(stripped);
                 self.current_id = Some(id.to_string());
+                if self.total_retained_bytes() > self.max_event_bytes {
+                    return Err(TransportError::SseFrameTooLarge {
+                        size: self.total_retained_bytes(),
+                        max_bytes: self.max_event_bytes,
+                    });
+                }
             }
         }
 
@@ -120,6 +139,14 @@ impl SseParser {
                 })?;
                 if let Some(stripped) = line.strip_prefix("data:") {
                     let data_line = stripped.strip_prefix(' ').unwrap_or(stripped);
+                    let new_total = self.accumulated_data_bytes + data_line.len();
+                    if new_total > self.max_event_bytes {
+                        return Err(TransportError::SseFrameTooLarge {
+                            size: new_total,
+                            max_bytes: self.max_event_bytes,
+                        });
+                    }
+                    self.accumulated_data_bytes = new_total;
                     self.current_data.push(data_line.to_string());
                 } else if let Some(stripped) = line.strip_prefix("event:") {
                     let event_type = stripped.strip_prefix(' ').unwrap_or(stripped);
@@ -130,6 +157,13 @@ impl SseParser {
                 }
             }
             self.buffer.clear();
+        }
+
+        if self.total_retained_bytes() > self.max_event_bytes {
+            return Err(TransportError::SseFrameTooLarge {
+                size: self.total_retained_bytes(),
+                max_bytes: self.max_event_bytes,
+            });
         }
 
         let mut events = Vec::new();

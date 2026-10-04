@@ -71,13 +71,12 @@ impl ProtocolDriver for AnthropicDriver {
             Some(&continuation_tx.staged().anthropic),
         )?;
 
-        let base = instance.endpoint.base_url.trim_end_matches('/');
-        let url_str = if base.ends_with("/messages") {
-            base.to_string()
-        } else {
-            format!("{base}/messages")
-        };
-        let validated_url = options.validate_url(&url_str)?;
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
+        let mut path = validated_url.path().trim_end_matches('/').to_string();
+        if !path.ends_with("/messages") {
+            path.push_str("/messages");
+            validated_url.set_path(&path);
+        }
 
         let mut req = client.post(validated_url.as_str());
         req = auth.apply(req);
@@ -100,10 +99,14 @@ impl ProtocolDriver for AnthropicDriver {
         }
         req = req.json(&translation.request);
 
-        let resp = req.send().await?;
+        let resp = tokio::time::timeout(options.request_headers_timeout, req.send())
+            .await
+            .map_err(|_| TransportError::RequestHeadersTimeout)?
+            .map_err(TransportError::from)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = read_bounded_error_body(resp, options.max_error_body_bytes).await?;
+            let body =
+                read_bounded_error_body(resp, options.max_error_body_bytes, Some(auth)).await?;
             return Err(TransportError::Http(format!(
                 "Anthropic messages request failed with status {status}: {body}"
             )));
@@ -123,6 +126,8 @@ impl ProtocolDriver for AnthropicDriver {
         let mut sse_stream = SseStream::with_max_bytes(bytes_stream, options.max_sse_event_bytes);
         let mut translator = AnthropicMessagesAdapter::new_stream_translator();
 
+        let stream_idle_timeout = options.stream_idle_timeout;
+
         tokio::spawn(async move {
             let mut tx_opt = Some(continuation_tx);
             let mut completed = false;
@@ -131,11 +136,14 @@ impl ProtocolDriver for AnthropicDriver {
                 tokio::select! {
                     _ = &mut interrupt_rx => {
                         let _ = tx_event.send(Err(ApiError::Stream("Stream was interrupted".to_string()))).await;
+                        if let Some(tx) = tx_opt.take() {
+                            tx.rollback();
+                        }
                         break;
                     }
-                    item = sse_stream.next() => {
+                    item = tokio::time::timeout(stream_idle_timeout, sse_stream.next()) => {
                         match item {
-                            Some(Ok(sse_event)) => {
+                            Ok(Some(Ok(sse_event))) => {
                                 let data = sse_event.data.trim();
                                 if data.is_empty() {
                                     continue;
@@ -145,8 +153,12 @@ impl ProtocolDriver for AnthropicDriver {
                                     Ok(ev) => ev,
                                     Err(e) => {
                                         let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                            "Failed to parse Anthropic stream event: {e} - buffer: '{data}'"
+                                            "Failed to parse Anthropic stream event (length {} bytes): {e}",
+                                            data.len()
                                         )))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 };
@@ -155,52 +167,78 @@ impl ProtocolDriver for AnthropicDriver {
                                     Ok(events) => {
                                         for ev in events {
                                             if matches!(ev, ResponseEvent::Completed { .. }) {
-                                                completed = true;
-                                                if let Some(mut tx) = tx_opt.take() {
+                                                if let Some(tx) = tx_opt.as_mut() {
                                                     *tx.anthropic_mut() = translator.continuation_state().clone();
-                                                    if let Err(e) = tx.commit() {
-                                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                            "Failed to commit continuation state: {e}"
-                                                        )))).await;
-                                                        return;
-                                                    }
                                                 }
-                                            }
-                                            if tx_event.send(Ok(ev)).await.is_err() {
+                                                if tx_event.send(Ok(ev)).await.is_ok() {
+                                                    completed = true;
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        match tx.commit() {
+                                                            Ok(()) => {}
+                                                            Err(e) => {
+                                                                let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                    "Failed to commit continuation state: {e}"
+                                                                )))).await;
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Receiver dropped before Completed delivery
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
+                                                    return;
+                                                }
+                                                break;
+                                            } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                // Receiver dropped mid-stream
+                                                if let Some(tx) = tx_opt.take() {
+                                                    tx.rollback();
+                                                }
                                                 return;
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 }
 
-                                if translator.is_completed() {
-                                    if let Some(mut tx) = tx_opt.take() {
-                                        *tx.anthropic_mut() = translator.continuation_state().clone();
-                                        if let Err(e) = tx.commit() {
-                                            let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                "Failed to commit continuation state: {e}"
-                                            )))).await;
-                                            return;
-                                        }
-                                    }
+                                if completed {
                                     break;
                                 }
                             }
-                            Some(Err(e)) => {
+                            Ok(Some(Err(e))) => {
                                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
                                 return;
                             }
-                            None => {
+                            Ok(None) => {
                                 if !completed && !translator.is_completed() {
                                     let _ = tx_event.send(Err(ApiError::Stream(
                                         "Anthropic stream terminated before receiving completion event".to_string()
                                     ))).await;
+                                    if let Some(tx) = tx_opt.take() {
+                                        tx.rollback();
+                                    }
                                 }
                                 break;
+                            }
+                            Err(_elapsed) => {
+                                let _ = tx_event.send(Err(ApiError::Stream(
+                                    TransportError::StreamIdleTimeout.to_string()
+                                ))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
+                                return;
                             }
                         }
                     }

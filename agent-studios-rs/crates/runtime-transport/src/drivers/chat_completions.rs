@@ -46,13 +46,12 @@ impl ProtocolDriver for ChatCompletionsDriver {
 
         let translation = ChatCompletionsAdapter::translate_request(&request)?;
 
-        let base = instance.endpoint.base_url.trim_end_matches('/');
-        let url_str = if base.ends_with("/chat/completions") {
-            base.to_string()
-        } else {
-            format!("{base}/chat/completions")
-        };
-        let validated_url = options.validate_url(&url_str)?;
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
+        let mut path = validated_url.path().trim_end_matches('/').to_string();
+        if !path.ends_with("/chat/completions") {
+            path.push_str("/chat/completions");
+            validated_url.set_path(&path);
+        }
 
         let mut req = client.post(validated_url.as_str());
         req = auth.apply(req);
@@ -65,10 +64,14 @@ impl ProtocolDriver for ChatCompletionsDriver {
         req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
         req = req.json(&translation.request);
 
-        let resp = req.send().await?;
+        let resp = tokio::time::timeout(options.request_headers_timeout, req.send())
+            .await
+            .map_err(|_| TransportError::RequestHeadersTimeout)?
+            .map_err(TransportError::from)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = read_bounded_error_body(resp, options.max_error_body_bytes).await?;
+            let body =
+                read_bounded_error_body(resp, options.max_error_body_bytes, Some(auth)).await?;
             return Err(TransportError::Http(format!(
                 "Chat completions request failed with status {status}: {body}"
             )));
@@ -88,6 +91,8 @@ impl ProtocolDriver for ChatCompletionsDriver {
         let mut sse_stream = SseStream::with_max_bytes(bytes_stream, options.max_sse_event_bytes);
         let mut translator = ChatCompletionsAdapter::new_stream_translator();
 
+        let stream_idle_timeout = options.stream_idle_timeout;
+
         tokio::spawn(async move {
             let mut tx_opt = Some(continuation_tx);
             let mut completed = false;
@@ -96,33 +101,53 @@ impl ProtocolDriver for ChatCompletionsDriver {
                 tokio::select! {
                     _ = &mut interrupt_rx => {
                         let _ = tx_event.send(Err(ApiError::Stream("Stream was interrupted".to_string()))).await;
+                        if let Some(tx) = tx_opt.take() {
+                            tx.rollback();
+                        }
                         break;
                     }
-                    item = sse_stream.next() => {
+                    item = tokio::time::timeout(stream_idle_timeout, sse_stream.next()) => {
                         match item {
-                            Some(Ok(sse_event)) => {
+                            Ok(Some(Ok(sse_event))) => {
                                 let data = sse_event.data.trim();
                                 if data == "[DONE]" {
                                     if !completed && !translator.is_completed() {
                                         match translator.finish() {
                                             Ok(events) => {
                                                 for ev in events {
-                                                    if matches!(ev, ResponseEvent::Completed { .. })
-                                                        && let Some(tx) = tx_opt.take()
-                                                        && let Err(e) = tx.commit()
-                                                    {
-                                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                            "Failed to commit continuation transaction: {e}"
-                                                        )))).await;
-                                                        return;
-                                                    }
-                                                    if tx_event.send(Ok(ev)).await.is_err() {
+                                                    if matches!(ev, ResponseEvent::Completed { .. }) {
+                                                        if tx_event.send(Ok(ev)).await.is_ok() {
+                                                            if let Some(tx) = tx_opt.take() {
+                                                                match tx.commit() {
+                                                                    Ok(()) => {}
+                                                                    Err(e) => {
+                                                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                            "Failed to commit continuation transaction: {e}"
+                                                                        )))).await;
+                                                                        return;
+                                                                    }
+                                                                }
+                                                            }
+                                                        } else {
+                                                            if let Some(tx) = tx_opt.take() {
+                                                                tx.rollback();
+                                                            }
+                                                            return;
+                                                        }
+                                                        break;
+                                                    } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                        if let Some(tx) = tx_opt.take() {
+                                                            tx.rollback();
+                                                        }
                                                         return;
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                                if let Some(tx) = tx_opt.take() {
+                                                    tx.rollback();
+                                                }
                                                 return;
                                             }
                                         }
@@ -133,7 +158,13 @@ impl ProtocolDriver for ChatCompletionsDriver {
                                 let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
                                     Ok(c) => c,
                                     Err(e) => {
-                                        let _ = tx_event.send(Err(ApiError::Stream(format!("Failed to parse chat chunk: {e}")))).await;
+                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                            "Failed to parse chat chunk (length {} bytes): {e}",
+                                            data.len()
+                                        )))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 };
@@ -142,68 +173,115 @@ impl ProtocolDriver for ChatCompletionsDriver {
                                     Ok(events) => {
                                         for ev in events {
                                             if matches!(ev, ResponseEvent::Completed { .. }) {
-                                                completed = true;
-                                                if let Some(tx) = tx_opt.take()
-                                                    && let Err(e) = tx.commit()
-                                                {
-                                                    let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                        "Failed to commit continuation transaction: {e}"
-                                                    )))).await;
+                                                if tx_event.send(Ok(ev)).await.is_ok() {
+                                                    completed = true;
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        match tx.commit() {
+                                                            Ok(()) => {}
+                                                            Err(e) => {
+                                                                let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                    "Failed to commit continuation transaction: {e}"
+                                                                )))).await;
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
                                                     return;
                                                 }
-                                            }
-                                            if tx_event.send(Ok(ev)).await.is_err() {
+                                                break;
+                                            } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                if let Some(tx) = tx_opt.take() {
+                                                    tx.rollback();
+                                                }
                                                 return;
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 }
 
-                                if translator.is_completed() {
-                                    if let Some(tx) = tx_opt.take()
-                                        && let Err(e) = tx.commit()
-                                    {
-                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                            "Failed to commit continuation transaction: {e}"
-                                        )))).await;
-                                        return;
-                                    }
+                                if completed {
                                     break;
                                 }
                             }
-                            Some(Err(e)) => {
+                            Ok(Some(Err(e))) => {
                                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
                                 return;
                             }
-                            None => {
-                                if !completed && !translator.is_completed()
-                                    && let Ok(events) = translator.finish()
-                                {
-                                    for ev in events {
-                                        if matches!(ev, ResponseEvent::Completed { .. }) {
-                                            completed = true;
-                                            if let Some(tx) = tx_opt.take()
-                                                && let Err(e) = tx.commit()
-                                            {
-                                                let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                    "Failed to commit continuation transaction: {e}"
-                                                )))).await;
-                                                return;
+                            Ok(None) => {
+                                if !completed && !translator.is_completed() {
+                                    match translator.finish() {
+                                        Ok(events) => {
+                                            for ev in events {
+                                            if matches!(ev, ResponseEvent::Completed { .. }) {
+                                                if tx_event.send(Ok(ev)).await.is_ok() {
+                                                    completed = true;
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        match tx.commit() {
+                                                            Ok(()) => {}
+                                                            Err(e) => {
+                                                                let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                    "Failed to commit continuation transaction: {e}"
+                                                                )))).await;
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
+                                                    return;
+                                                }
+                                                break;
+                                                } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
+                                                    return;
+                                                }
                                             }
                                         }
-                                        let _ = tx_event.send(Ok(ev)).await;
+                                        Err(e) => {
+                                            let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                            if let Some(tx) = tx_opt.take() {
+                                                tx.rollback();
+                                            }
+                                            return;
+                                        }
                                     }
                                 }
                                 if !completed && !translator.is_completed() {
                                     let _ = tx_event.send(Err(ApiError::Stream(
                                         "Chat completions stream ended before receiving completion event".to_string()
                                     ))).await;
+                                    if let Some(tx) = tx_opt.take() {
+                                        tx.rollback();
+                                    }
                                 }
                                 break;
+                            }
+                            Err(_elapsed) => {
+                                let _ = tx_event.send(Err(ApiError::Stream(
+                                    TransportError::StreamIdleTimeout.to_string()
+                                ))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
+                                return;
                             }
                         }
                     }

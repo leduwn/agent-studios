@@ -25,7 +25,7 @@ All modifications to `codex-rs` are documented with patch rationales and upstrea
 
 ---
 
-## 3. Runtime Transport Architecture & Hardening (M07.5.1)
+## 3. Runtime Transport Architecture & Hardening (M07.5.1 & M07.5.2)
 
 The `agent-studios-runtime-transport` crate is organized into modular, security-hardened components:
 
@@ -39,18 +39,19 @@ agent-studios-runtime-transport/
 │   │   ├── chat_completions.rs # OpenAI Chat Completions driver (POST /chat/completions)
 │   │   ├── gemini.rs     # Gemini generateContent driver (POST /models/{model}:streamGenerateContent)
 │   │   └── mod.rs
-│   ├── error.rs          # Strongly-typed transport error taxonomy & URL sanitization
+│   ├── error.rs          # Strongly-typed transport error taxonomy & URL/query secret sanitization
 │   ├── lib.rs            # Public API exports
 │   ├── options.rs        # RuntimeTransportOptions, URL validation & bounded error bodies
-│   ├── router.rs         # RuntimeRouter implementing ModelInferenceBackend & capability gating
+│   ├── router.rs         # RuntimeRouter implementing ModelInferenceBackend & fail-closed routing
 │   ├── secret.rs         # Zeroized SecretString & asynchronous SecretResolver
 │   ├── sse.rs            # Incremental byte-buffering SSE parser and stream adapter
 │   └── state.rs          # ContinuationKey, RAII lease & transactional state machine
 └── tests/
-    └── transport_mock_tests.rs # 21 comprehensive WireMock integration tests
+    └── transport_mock_tests.rs # 35 comprehensive WireMock integration tests
 ```
 
-### 3.1. Zero-Plaintext Secret Management & Auth Security (`secret.rs`, `auth.rs`)
+### 3.1. Zero-Plaintext Secret Management & Auth Security (`secret.rs`, `auth.rs`, `error.rs`)
+
 - `SecretString`: Secure container wrapping heap-allocated credential strings.
   - Implements `zeroize::ZeroizeOnDrop` to securely erase memory when dropped.
   - Custom `fmt::Debug`, `fmt::Display`, and `serde::Serialize` implementations that strictly output `"[REDACTED]"`.
@@ -64,42 +65,67 @@ agent-studios-runtime-transport/
   - Custom `Debug` implementation redacting all credentials.
   - Marks outbound credential headers sensitive (`HeaderValue::set_sensitive(true)`).
   - Performs pre-flight case-insensitive collision detection against static headers and query parameters (`check_collisions`).
-  - Safe error sanitization (`sanitize_error_message`) redacting sensitive query parameters (e.g. `key=...`) from reqwest errors.
+  - Redacts exact resolved credentials from upstream error bodies (`redact_secrets`).
+- Reqwest & Query Error Sanitization:
+  - Strips URLs and query strings from reqwest errors (`err.without_url()`) to prevent leaking embedded query credentials.
+  - Sanitizes error strings with `sanitize_error_message`, redacting sensitive query keys (`key=`, `token=`, `access_token=`, `secret=`, `password=`, `auth=`, `api_key=`, `apikey=`).
+  - Removes raw SSE frame payloads from error messages across all drivers to prevent leaking unparsed chunks.
 
 ### 3.2. Provider-Instance-Scoped Continuation & Concurrency Guards (`state.rs`)
+
 - `ContinuationKey`: Composite struct `ContinuationKey { provider_instance_id: ProviderInstanceId, thread_id: String }` ensuring multi-turn session continuation state is fully isolated per provider instance, preventing cross-provider state leakage.
 - `ContinuationLease`: RAII guard acquired during `begin_transaction`. If another inference request arrives for the same active `ContinuationKey`, it is deterministically rejected with `TransportError::ConcurrentThreadInference`. Releasing the lease occurs automatically on drop across all exit paths (commit, rollback, cancellation, receiver drop, or panic).
-- `ContinuationTransaction`:
-  - **Completed-Only Commit Invariant**: Turn changes (e.g., Anthropic message ID/thinking blocks, Gemini candidate parts/signatures) are staged in private memory. Durable commitment occurs strictly when `ResponseEvent::Completed` is received.
-  - **Rollback on Early EOF**: If a stream terminates (EOF) without emitting a completion event, staged changes are discarded and a typed stream error (`ApiError::Stream`) is emitted.
+- `ContinuationTransaction` (Channel-First Commit Invariant):
+  - **Channel-First Completed Delivery**: When a stream completion event is generated, `tx_event.send(Ok(ResponseEvent::Completed))` is dispatched to the client channel *before* `tx.commit()`.
+  - **Receiver Drop Safety**: If the client receiver drops before `Completed` can be delivered or mid-stream, `tx.rollback()` is executed immediately and the lease is released.
+  - **Single-Commit Invariant**: Exactly one continuation commit on successful delivery of `Completed`; exactly zero commits on early EOF, receiver drop, timeout, or cancellation.
   - **Commit Error Propagation**: Errors from `tx.commit()` are never swallowed (`let _ = tx.commit()`); commit errors immediately emit a stream error and abort the stream.
 
-### 3.3. Capability Gating & Diagnostic Sink (`router.rs`, `diagnostic.rs`)
-- Route resolution extracts both the `ProviderInstance` and its associated `ModelDescriptor`.
+### 3.3. Fail-Closed Routing & Capability Gating (`router.rs`, `diagnostic.rs`)
+
+- **No Synthetic Model Fabrication**: All synthetic 4096 model limits and fallback descriptors (`fallback-model`, `default-model`) are eliminated. Unregistered models fail closed immediately with `TransportError::ModelRouteNotFound`.
+- **Route Registration Validation**: `register_route` and `register_model` return `Result<(), TransportError>` validating that the route's `instance_id` matches the descriptor's `provider_instance_id`, the model slug matches the descriptor's `id`, and the target provider instance is registered.
+- **Fail-Closed HTTP Client Construction**: `RuntimeRouter::try_new` and `RuntimeRouter::try_new_with_options` construct `reqwest::Client` with explicit `connect_timeout` and User-Agent `AgentStudios/dev`.
 - Request capabilities (streaming, tool calling, parallel tool calling) are validated against `ModelDescriptor.capabilities`. Unsupported features fail closed with `TransportError::UnsupportedCapability`.
 - Unknown features emit non-blocking diagnostic notifications via `RuntimeDiagnosticSink`.
 - Anthropic requests require `ModelDescriptor.limits.max_output_tokens` and fail closed with `TransportError::MissingRequiredModelLimit` if unspecified.
 
 ### 3.4. Bounded Resource Safety & Network Policy (`options.rs`)
-- `RuntimeTransportOptions`:
-  - Configurable timeouts (`connect_timeout`, `request_timeout`, `stream_idle_timeout`).
-  - Limits on buffer sizes (`max_error_body_bytes`, `max_sse_event_bytes`).
-  - `validate_url`: Rejects insecure remote HTTP endpoints (`InsecureRemoteHttpRejected`) unless loopback/localhost or explicitly opted into via `allow_insecure_remote_http: true`.
-- `read_bounded_error_body`: Reads upstream HTTP error responses up to `max_error_body_bytes` to prevent unbounded memory consumption on faulty or malicious upstreams.
-- Gemini model slugs are safely percent-encoded in request URLs.
 
-### 3.5. Byte-Safe Incremental SSE Parser (`sse.rs`)
+- **Authoritative Defaults**:
+  - `connect_timeout`: `Duration::from_secs(10)` (10 seconds)
+  - `request_headers_timeout`: `Duration::from_secs(30)` (30 seconds)
+  - `stream_idle_timeout`: `Duration::from_secs(300)` (300 seconds)
+  - `max_sse_event_bytes`: `4 * 1024 * 1024` (4 MiB)
+  - `max_error_body_bytes`: `64 * 1024` (64 KiB)
+  - `allow_insecure_remote_http`: `false` (insecure remote HTTP disabled; loopback/localhost allowed)
+- `validate_url`: Rejects insecure remote HTTP endpoints (`InsecureRemoteHttpRejected`) unless loopback/localhost or explicitly opted into via `allow_insecure_remote_http: true`.
+- `read_bounded_error_body`: Reads upstream HTTP error responses up to `max_error_body_bytes` and applies credential redaction before producing error messages.
+- Timeouts enforced in all drivers:
+  - Request headers timeout: `tokio::time::timeout(options.request_headers_timeout, req.send())` -> `TransportError::RequestHeadersTimeout`.
+  - Stream idle timeout: `tokio::time::timeout(options.stream_idle_timeout, sse_stream.next())` -> `TransportError::StreamIdleTimeout`.
+
+### 3.5. URL & Query Composition with `url::Url` & Gemini Hardening (`drivers/`)
+
+- All drivers build URLs using `url::Url`, mutating path segments via `set_path()` and preserving existing base URL query parameters and ports without raw string concatenation.
+- **Gemini Wire Hardening**:
+  - Runtime ownership of `alt=sse`: checks for collisions where `alt != "sse"` (`TransportError::ReservedQueryParameterCollision`), appending `alt=sse` cleanly.
+  - Model slug is percent-encoded as a single path segment into `/models/{encoded_model}:streamGenerateContent`.
+  - Request ID extraction priority: `x-goog-request-id` -> `x-request-id` -> `request-id`.
+
+### 3.6. Byte-Safe Incremental SSE Parser (`sse.rs`)
+
 - `SseParser`:
   - Buffers raw bytes (`Vec<u8>`) rather than decoding byte chunks into UTF-8 strings before framing.
   - Splits frames on newline markers (`\n`), ensuring multibyte UTF-8 sequences (e.g. emojis, non-ASCII characters) split across TCP chunks are preserved intact.
-  - Enforces `max_event_bytes` on accumulated frame size, rejecting oversized frames with `TransportError::SseFrameTooLarge`.
+  - Enforces `max_event_bytes` on accumulated frame size during both chunk ingestion and terminal `finish()` flushes, rejecting oversized events with `TransportError::SseFrameTooLarge`.
   - Handles comments, multi-line data blocks, and flushes trailing unclosed frames upon completion.
 
 ---
 
 ## 4. Verification & Mock Testing
 
-The test suite in `tests/transport_mock_tests.rs` validates all 14 correctness and security behaviors against a `wiremock` HTTP server:
+The test suite in `tests/transport_mock_tests.rs` validates all 35 correctness and security behaviors against a `wiremock` HTTP server:
 1. `test_chat_completions_wiremock`: Full streaming cycle from mock OpenAI `/chat/completions` endpoint.
 2. `test_anthropic_wiremock`: Full streaming cycle from mock Anthropic `/messages` endpoint.
 3. `test_gemini_wiremock`: Full streaming cycle from mock Gemini `:streamGenerateContent` endpoint.
@@ -121,3 +147,17 @@ The test suite in `tests/transport_mock_tests.rs` validates all 14 correctness a
 19. `test_bounded_error_body_truncation`: Upstream error bodies truncated to limit.
 20. `test_remote_http_rejection_and_loopback_allowed`: Insecure remote HTTP rejected; localhost HTTP accepted.
 21. `test_gemini_url_encoding`: Model slugs with special characters correctly percent-encoded.
+22. `test_model_route_not_found_fail_closed`: Unrouted model requests fail closed with `ModelRouteNotFound`.
+23. `test_register_route_validation`: Route registration validates instance ID and model ID matches.
+24. `test_duplicate_model_id_different_instances`: Multiple instances can register identical model IDs without collision.
+25. `test_request_headers_timeout`: Exceeding `request_headers_timeout` triggers `RequestHeadersTimeout` error.
+26. `test_stream_idle_timeout`: Inter-event silence exceeding `stream_idle_timeout` triggers `StreamIdleTimeout` error.
+27. `test_receiver_drop_before_completed`: Dropping receiver before `Completed` rolls back continuation and releases lease.
+28. `test_receiver_drop_mid_stream`: Dropping receiver mid-stream rolls back continuation and releases lease.
+29. `test_gemini_alt_sse_query`: Gemini requests properly incorporate `alt=sse`.
+30. `test_gemini_reserved_alt_collision`: Colliding `alt != "sse"` parameter triggers `ReservedQueryParameterCollision`.
+31. `test_gemini_request_id_headers_priority`: Header priority `x-goog-request-id` > `x-request-id` > `request-id` enforced.
+32. `test_base_url_with_query_preserved`: Base URLs containing queries and paths are preserved across all drivers.
+33. `test_arbitrary_query_secret_sanitization`: Arbitrary query credentials are sanitized from errors.
+34. `test_read_bounded_error_body_redacts_auth_secrets`: Resolved auth credentials are redacted from bounded error bodies.
+35. `test_sse_finish_size_limit`: Trailing data exceeding frame size limit during `finish()` triggers `SseFrameTooLarge`.

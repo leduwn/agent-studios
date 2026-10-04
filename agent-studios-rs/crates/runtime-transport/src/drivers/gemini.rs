@@ -58,11 +58,42 @@ impl ProtocolDriver for GeminiDriver {
             Some(&continuation_tx.staged().gemini),
         )?;
 
-        let base = instance.endpoint.base_url.trim_end_matches('/');
-        let encoded_model: String =
-            url::form_urlencoded::byte_serialize(request.model.as_bytes()).collect();
-        let url_str = format!("{base}/models/{encoded_model}:streamGenerateContent");
-        let validated_url = options.validate_url(&url_str)?;
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
+
+        for (k, v) in validated_url.query_pairs() {
+            if k.eq_ignore_ascii_case("alt") && v != "sse" {
+                return Err(TransportError::ReservedQueryParameterCollision {
+                    parameter: "alt".to_string(),
+                });
+            }
+        }
+        for (k, v) in &instance.endpoint.query_params {
+            if k.eq_ignore_ascii_case("alt") && v != "sse" {
+                return Err(TransportError::ReservedQueryParameterCollision {
+                    parameter: "alt".to_string(),
+                });
+            }
+        }
+
+        let encoded_model: String = url::form_urlencoded::byte_serialize(request.model.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20");
+        let base_path = validated_url.path().trim_end_matches('/');
+        let new_path = format!("{base_path}/models/{encoded_model}:streamGenerateContent");
+        validated_url.set_path(&new_path);
+
+        let has_alt_sse = validated_url
+            .query_pairs()
+            .any(|(k, v)| k.eq_ignore_ascii_case("alt") && v == "sse")
+            || instance
+                .endpoint
+                .query_params
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("alt") && v == "sse");
+
+        if !has_alt_sse {
+            validated_url.query_pairs_mut().append_pair("alt", "sse");
+        }
 
         let mut req = client.post(validated_url.as_str());
         req = auth.apply(req);
@@ -75,10 +106,14 @@ impl ProtocolDriver for GeminiDriver {
         req = req.header(reqwest::header::CONTENT_TYPE, "application/json");
         req = req.json(&translation.request);
 
-        let resp = req.send().await?;
+        let resp = tokio::time::timeout(options.request_headers_timeout, req.send())
+            .await
+            .map_err(|_| TransportError::RequestHeadersTimeout)?
+            .map_err(TransportError::from)?;
         let status = resp.status();
         if !status.is_success() {
-            let body = read_bounded_error_body(resp, options.max_error_body_bytes).await?;
+            let body =
+                read_bounded_error_body(resp, options.max_error_body_bytes, Some(auth)).await?;
             return Err(TransportError::Http(format!(
                 "Gemini generate content request failed with status {status}: {body}"
             )));
@@ -86,7 +121,8 @@ impl ProtocolDriver for GeminiDriver {
 
         let upstream_request_id = resp
             .headers()
-            .get("x-request-id")
+            .get("x-goog-request-id")
+            .or_else(|| resp.headers().get("x-request-id"))
             .or_else(|| resp.headers().get("request-id"))
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
@@ -98,6 +134,8 @@ impl ProtocolDriver for GeminiDriver {
         let mut sse_stream = SseStream::with_max_bytes(bytes_stream, options.max_sse_event_bytes);
         let mut translator = GeminiAdapter::new_stream_translator();
 
+        let stream_idle_timeout = options.stream_idle_timeout;
+
         tokio::spawn(async move {
             let mut tx_opt = Some(continuation_tx);
             let mut completed = false;
@@ -106,11 +144,14 @@ impl ProtocolDriver for GeminiDriver {
                 tokio::select! {
                     _ = &mut interrupt_rx => {
                         let _ = tx_event.send(Err(ApiError::Stream("Stream was interrupted".to_string()))).await;
+                        if let Some(tx) = tx_opt.take() {
+                            tx.rollback();
+                        }
                         break;
                     }
-                    item = sse_stream.next() => {
+                    item = tokio::time::timeout(stream_idle_timeout, sse_stream.next()) => {
                         match item {
-                            Some(Ok(sse_event)) => {
+                            Ok(Some(Ok(sse_event))) => {
                                 let data = sse_event.data.trim();
                                 if data.is_empty() {
                                     continue;
@@ -120,8 +161,12 @@ impl ProtocolDriver for GeminiDriver {
                                     Ok(c) => c,
                                     Err(e) => {
                                         let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                            "Failed to parse Gemini stream chunk: {e} - buffer: '{data}'"
+                                            "Failed to parse Gemini stream chunk (length {} bytes): {e}",
+                                            data.len()
                                         )))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 };
@@ -130,63 +175,90 @@ impl ProtocolDriver for GeminiDriver {
                                     Ok(events) => {
                                         for ev in events {
                                             if matches!(ev, ResponseEvent::Completed { .. }) {
-                                                completed = true;
-                                                if let Some(mut tx) = tx_opt.take() {
+                                                if let Some(tx) = tx_opt.as_mut() {
                                                     *tx.gemini_mut() = translator.continuation_state().clone();
-                                                    if let Err(e) = tx.commit() {
-                                                        let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                            "Failed to commit continuation state: {e}"
-                                                        )))).await;
-                                                        return;
-                                                    }
                                                 }
-                                            }
-                                            if tx_event.send(Ok(ev)).await.is_err() {
+                                                if tx_event.send(Ok(ev)).await.is_ok() {
+                                                    completed = true;
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        match tx.commit() {
+                                                            Ok(()) => {}
+                                                            Err(e) => {
+                                                                let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                    "Failed to commit continuation state: {e}"
+                                                                )))).await;
+                                                                return;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
+                                                    return;
+                                                }
+                                                break;
+                                            } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                if let Some(tx) = tx_opt.take() {
+                                                    tx.rollback();
+                                                }
                                                 return;
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                        if let Some(tx) = tx_opt.take() {
+                                            tx.rollback();
+                                        }
                                         return;
                                     }
                                 }
 
-                                if translator.is_completed() {
-                                    if let Some(mut tx) = tx_opt.take() {
-                                        *tx.gemini_mut() = translator.continuation_state().clone();
-                                        if let Err(e) = tx.commit() {
-                                            let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                "Failed to commit continuation state: {e}"
-                                            )))).await;
-                                            return;
-                                        }
-                                    }
+                                if completed {
                                     break;
                                 }
                             }
-                            Some(Err(e)) => {
+                            Ok(Some(Err(e))) => {
                                 let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
                                 return;
                             }
-                            None => {
+                            Ok(None) => {
                                 if !completed && !translator.is_completed() {
                                     match translator.finish_stream() {
                                         Ok(events) => {
                                             for ev in events {
                                                 if matches!(ev, ResponseEvent::Completed { .. }) {
-                                                    completed = true;
-                                                    if let Some(mut tx) = tx_opt.take() {
+                                                    if let Some(tx) = tx_opt.as_mut() {
                                                         *tx.gemini_mut() = translator.continuation_state().clone();
-                                                        if let Err(e) = tx.commit() {
-                                                            let _ = tx_event.send(Err(ApiError::Stream(format!(
-                                                                "Failed to commit continuation state: {e}"
-                                                            )))).await;
-                                                            return;
-                                                        }
                                                     }
-                                                }
-                                                if tx_event.send(Ok(ev)).await.is_err() {
+                                                    if tx_event.send(Ok(ev)).await.is_ok() {
+                                                        completed = true;
+                                                        if let Some(tx) = tx_opt.take() {
+                                                            match tx.commit() {
+                                                                Ok(()) => {}
+                                                                Err(e) => {
+                                                                    let _ = tx_event.send(Err(ApiError::Stream(format!(
+                                                                        "Failed to commit continuation state: {e}"
+                                                                    )))).await;
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        if let Some(tx) = tx_opt.take() {
+                                                            tx.rollback();
+                                                        }
+                                                        return;
+                                                    }
+                                                    break;
+                                                } else if tx_event.send(Ok(ev)).await.is_err() {
+                                                    if let Some(tx) = tx_opt.take() {
+                                                        tx.rollback();
+                                                    }
                                                     return;
                                                 }
                                             }
@@ -195,6 +267,9 @@ impl ProtocolDriver for GeminiDriver {
                                             let _ = tx_event.send(Err(ApiError::Stream(format!(
                                                 "Gemini finish_stream failed: {e}"
                                             )))).await;
+                                            if let Some(tx) = tx_opt.take() {
+                                                tx.rollback();
+                                            }
                                             return;
                                         }
                                     }
@@ -203,8 +278,20 @@ impl ProtocolDriver for GeminiDriver {
                                     let _ = tx_event.send(Err(ApiError::Stream(
                                         "Gemini stream ended before receiving completion event".to_string()
                                     ))).await;
+                                    if let Some(tx) = tx_opt.take() {
+                                        tx.rollback();
+                                    }
                                 }
                                 break;
+                            }
+                            Err(_elapsed) => {
+                                let _ = tx_event.send(Err(ApiError::Stream(
+                                    TransportError::StreamIdleTimeout.to_string()
+                                ))).await;
+                                if let Some(tx) = tx_opt.take() {
+                                    tx.rollback();
+                                }
+                                return;
                             }
                         }
                     }
