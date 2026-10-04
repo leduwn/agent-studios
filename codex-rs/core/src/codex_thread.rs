@@ -943,6 +943,14 @@ impl CodexThread {
         self.session.thread_config_snapshot().await
     }
 
+    pub fn model_runtime_override(&self) -> Option<crate::model_runtime::ModelRuntimeOverride> {
+        self.session.model_runtime_override()
+    }
+
+    pub async fn model_provider_id(&self) -> String {
+        self.session.model_provider_id().await
+    }
+
     /// Returns the active turn's reviewer, including live updates, or the thread default.
     pub async fn approvals_reviewer_for_turn(&self, turn_id: &str) -> ApprovalsReviewer {
         if let Some((turn, settings, _, _)) = self

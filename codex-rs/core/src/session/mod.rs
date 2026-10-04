@@ -482,6 +482,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) git_enrichment_policy: GitEnrichmentPolicy,
     pub(crate) windows_sandbox_proxy_settings_mode:
         codex_sandboxing::WindowsSandboxProxySettingsMode,
+    pub(crate) model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -590,7 +591,15 @@ impl Session {
             inherited_multi_agent_version,
             git_enrichment_policy,
             windows_sandbox_proxy_settings_mode,
+            model_runtime_override,
         } = args;
+        let (override_provider, models_manager) = match model_runtime_override.as_ref() {
+            Some(runtime_override) => {
+                let (provider, manager) = runtime_override.clone().into_parts();
+                (Some(provider), manager)
+            }
+            None => (None, models_manager),
+        };
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -834,10 +843,12 @@ impl Session {
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
         let session_configuration = SessionConfiguration {
             turn_extension_init,
-            provider: create_model_provider(
-                config.model_provider.clone(),
-                Some(Arc::clone(&auth_manager)),
-            ),
+            provider: override_provider.unwrap_or_else(|| {
+                create_model_provider(
+                    config.model_provider.clone(),
+                    Some(Arc::clone(&auth_manager)),
+                )
+            }),
             step_settings: Arc::new(StepSettings {
                 collaboration_mode,
                 reasoning_summary: config.model_reasoning_summary,
@@ -920,6 +931,7 @@ impl Session {
             multi_agent_version,
             git_enrichment_policy,
             windows_sandbox_proxy_settings_mode,
+            model_runtime_override,
         ))
         .await
         .map_err(|e| {

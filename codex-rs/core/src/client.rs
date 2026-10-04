@@ -1080,6 +1080,11 @@ impl ModelClient {
         true
     }
 
+    /// Returns a reference to the shared model provider driving this client.
+    pub fn shared_provider(&self) -> &SharedModelProvider {
+        &self.state.provider
+    }
+
     /// Returns auth + provider configuration resolved from the current session auth state.
     ///
     /// This centralizes setup used by both prewarm and normal request paths so they stay in

@@ -38,6 +38,7 @@ pub use codex_core::EnvironmentNetworkPolicy;
 pub use codex_core::ForkSnapshot;
 pub use codex_core::LoadedAgentsMd;
 pub use codex_core::McpManager;
+pub use codex_core::ModelRuntimeOverride;
 pub use codex_core::NetworkDomainPermission;
 pub use codex_core::NetworkDomainPermissionEntry;
 pub use codex_core::NetworkDomainPermissions;

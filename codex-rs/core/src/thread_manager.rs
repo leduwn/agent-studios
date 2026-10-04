@@ -18,6 +18,7 @@ use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::mcp::McpManager;
+use crate::model_runtime::ModelRuntimeOverride;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
 use crate::session::GitEnrichmentPolicy;
@@ -295,6 +296,8 @@ pub struct StartThreadOptions {
     pub reserved_thread_id: Option<ThreadId>,
     /// Initial thread-owned plugin selection; omission restores persisted settings.
     pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Optional thread model runtime override strictly pairing provider and models manager.
+    pub model_runtime_override: Option<ModelRuntimeOverride>,
 }
 
 impl StartThreadOptions {
@@ -319,6 +322,7 @@ impl StartThreadOptions {
             client_mcp_extensions: ClientMcpExtensions::default(),
             reserved_thread_id: None,
             disabled_plugin_ids: None,
+            model_runtime_override: None,
         }
     }
 }
@@ -1095,6 +1099,11 @@ impl ThreadManager {
             ));
         }
         let parent = self.get_thread(parent_thread_id).await?;
+        if options.model_runtime_override.is_none()
+            && options.config.model_provider_id == parent.session.model_provider_id().await
+        {
+            options.model_runtime_override = parent.session.model_runtime_override();
+        }
         options.initial_history = history;
         options.internal_parent = Some(InternalSessionParent {
             thread_id: parent_thread_id,
@@ -1941,6 +1950,9 @@ impl ThreadManagerState {
         environments: Option<Vec<TurnEnvironmentSelection>>,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
+        let model_runtime_override = self
+            .model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
+            .await;
         let options = StartThreadOptions {
             history_mode,
             session_source: Some(session_source),
@@ -1949,6 +1961,7 @@ impl ThreadManagerState {
             environments,
             client_mcp_extensions,
             dynamic_tools,
+            model_runtime_override,
             ..StartThreadOptions::new(config)
         };
         let mut request =
@@ -2015,6 +2028,9 @@ impl ThreadManagerState {
         thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
+        let model_runtime_override = self
+            .model_runtime_override_for_child(parent_thread_id, &config.model_provider_id)
+            .await;
         let options = StartThreadOptions {
             initial_history,
             history_mode,
@@ -2023,6 +2039,7 @@ impl ThreadManagerState {
             environments,
             thread_extension_init,
             client_mcp_extensions,
+            model_runtime_override,
             ..StartThreadOptions::new(config)
         };
         let mut request =
@@ -2033,6 +2050,20 @@ impl ThreadManagerState {
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
         Box::pin(self.spawn_thread(request)).await
+    }
+
+    async fn model_runtime_override_for_child(
+        &self,
+        parent_thread_id: Option<ThreadId>,
+        child_provider_id: &str,
+    ) -> Option<ModelRuntimeOverride> {
+        let parent_thread_id = parent_thread_id?;
+        let parent = self.get_thread(parent_thread_id).await.ok()?;
+        if parent.session.model_provider_id().await == child_provider_id {
+            parent.session.model_runtime_override()
+        } else {
+            None
+        }
     }
 
     async fn client_mcp_extensions_for_child(
@@ -2095,7 +2126,26 @@ impl ThreadManagerState {
             client_mcp_extensions,
             mut reserved_thread_id,
             disabled_plugin_ids,
+            model_runtime_override,
         } = options;
+        let model_runtime_override = match model_runtime_override {
+            Some(r) => Some(r),
+            None => {
+                if let Some(parent_id) = parent_thread_id {
+                    if let Ok(parent) = self.get_thread(parent_id).await {
+                        if parent.session.model_provider_id().await == config.model_provider_id {
+                            parent.session.model_runtime_override()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
         // Older callers and saved reviewers identify isolation through their source.
@@ -2355,6 +2405,7 @@ impl ThreadManagerState {
                 GitEnrichmentPolicy::Fresh
             },
             windows_sandbox_proxy_settings_mode,
+            model_runtime_override,
         })
         .await;
         let (session, io) = match spawn_result {

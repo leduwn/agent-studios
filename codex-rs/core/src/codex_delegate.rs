@@ -89,6 +89,12 @@ pub(crate) async fn run_codex_thread_interactive(
     };
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     thread_extension_init.insert(isolation);
+    let model_runtime_override =
+        if config.model_provider_id == parent_session.model_provider_id().await {
+            parent_session.model_runtime_override()
+        } else {
+            None
+        };
     let spawn_result = Session::spawn(SessionSpawnArgs {
         startup: Some(Arc::clone(&startup)),
         config,
@@ -144,6 +150,7 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_multi_agent_version: Some(MultiAgentVersion::Disabled),
         git_enrichment_policy,
         windows_sandbox_proxy_settings_mode,
+        model_runtime_override,
     })
     .or_cancel(&cancel_token)
     .await;

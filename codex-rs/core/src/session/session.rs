@@ -97,6 +97,7 @@ pub(crate) struct Session {
     pub(super) fork_persistence: ForkPersistence,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
     pub(super) next_internal_sub_id: AtomicU64,
+    pub(super) model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
 }
 
 #[derive(Clone)]
@@ -666,6 +667,21 @@ impl Session {
         self.services.agent_control.identity()
     }
 
+    pub(crate) fn model_runtime_override(
+        &self,
+    ) -> Option<crate::model_runtime::ModelRuntimeOverride> {
+        self.model_runtime_override.clone()
+    }
+
+    pub(crate) async fn model_provider_id(&self) -> String {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .model_provider_id
+            .clone()
+    }
+
     pub(crate) async fn originator(&self) -> String {
         let state = self.state.lock().await;
         state.session_configuration.originator.clone()
@@ -793,6 +809,7 @@ impl Session {
         multi_agent_version: Option<MultiAgentVersion>,
         git_enrichment_policy: GitEnrichmentPolicy,
         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
+        model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -1847,6 +1864,7 @@ impl Session {
                 fork_persistence,
                 forked_from_ordinal_exclusive,
                 next_internal_sub_id: AtomicU64::new(0),
+                model_runtime_override,
             });
             if let Some(startup) = &startup {
                 let _ = startup.session.set(Arc::clone(&sess));

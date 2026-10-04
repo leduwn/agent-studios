@@ -480,7 +480,9 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        let remote_compaction = if self.info.is_openai()
+        let remote_compaction = if self.inference_backend.is_some() {
+            RemoteCompactionSupport::Unsupported
+        } else if self.info.is_openai()
             || is_azure_responses_provider(&self.info.name, self.info.base_url.as_deref())
         {
             RemoteCompactionSupport::V2
@@ -826,6 +828,34 @@ mod tests {
             let provider = create_model_provider(provider_info, /*auth_manager*/ None);
             assert_eq!(provider.capabilities().remote_compaction, expected);
         }
+    }
+
+    #[test]
+    fn configured_provider_with_inference_backend_forces_unsupported_remote_compaction() {
+        use crate::ModelInferenceContext;
+
+        #[derive(Debug)]
+        struct DummyBackend;
+        impl ModelInferenceBackend for DummyBackend {
+            fn stream<'a>(
+                &'a self,
+                _request: codex_api::ResponsesApiRequest,
+                _context: ModelInferenceContext,
+            ) -> ModelProviderFuture<'a, Result<codex_api::ResponseStream, codex_api::ApiError>>
+            {
+                Box::pin(async { Err(codex_api::ApiError::Stream("dummy".to_string())) })
+            }
+        }
+
+        let provider = create_model_provider_with_inference_backend(
+            ModelProviderInfo::create_openai_provider(None),
+            None,
+            Some(Arc::new(DummyBackend)),
+        );
+        assert_eq!(
+            provider.capabilities().remote_compaction,
+            RemoteCompactionSupport::Unsupported
+        );
     }
 
     #[test]
