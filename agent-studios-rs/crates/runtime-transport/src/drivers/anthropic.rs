@@ -42,9 +42,11 @@ impl ProtocolDriver for AnthropicDriver {
         continuation_tx: ContinuationTransaction,
         options: &RuntimeTransportOptions,
     ) -> Result<ResponseStream, TransportError> {
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
         auth.check_collisions(
             instance.endpoint.static_headers.keys(),
             instance.endpoint.query_params.keys(),
+            validated_url.query_pairs().map(|(k, _)| k),
         )?;
 
         let max_tokens = descriptor.limits.max_output_tokens.ok_or_else(|| {
@@ -71,7 +73,6 @@ impl ProtocolDriver for AnthropicDriver {
             Some(&continuation_tx.staged().anthropic),
         )?;
 
-        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
         let mut path = validated_url.path().trim_end_matches('/').to_string();
         if !path.ends_with("/messages") {
             path.push_str("/messages");

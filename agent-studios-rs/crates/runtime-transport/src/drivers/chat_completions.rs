@@ -39,14 +39,15 @@ impl ProtocolDriver for ChatCompletionsDriver {
         continuation_tx: ContinuationTransaction,
         options: &RuntimeTransportOptions,
     ) -> Result<ResponseStream, TransportError> {
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
         auth.check_collisions(
             instance.endpoint.static_headers.keys(),
             instance.endpoint.query_params.keys(),
+            validated_url.query_pairs().map(|(k, _)| k),
         )?;
 
         let translation = ChatCompletionsAdapter::translate_request(&request)?;
 
-        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
         let mut path = validated_url.path().trim_end_matches('/').to_string();
         if !path.ends_with("/chat/completions") {
             path.push_str("/chat/completions");

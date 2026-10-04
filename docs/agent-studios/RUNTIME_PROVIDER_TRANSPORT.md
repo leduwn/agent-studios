@@ -64,8 +64,10 @@ agent-studios-runtime-transport/
 - `ResolvedAuth`:
   - Custom `Debug` implementation redacting all credentials.
   - Marks outbound credential headers sensitive (`HeaderValue::set_sensitive(true)`).
-  - Performs pre-flight case-insensitive collision detection against static headers and query parameters (`check_collisions`).
-  - Redacts exact resolved credentials from upstream error bodies (`redact_secrets`).
+  - Performs pre-flight case-insensitive collision detection against static headers, endpoint query parameters, and query parameters embedded in `EndpointProfile.base_url` (`check_collisions`).
+  - Distinguishes collision location (`"static_headers"`, `"query_params"`, or `"base_url_query"`), returning `TransportError::AuthenticationCollision { name, location }`.
+  - Collision matching is strictly case-insensitive (`eq_ignore_ascii_case`), preventing bypasses through casing variants (`KEY`, `key`, `Key`).
+  - Redacts exact resolved credentials from upstream error bodies (`redact_secrets`) and never exposes query parameter values in diagnostics.
 - Reqwest & Query Error Sanitization:
   - Strips URLs and query strings from reqwest errors (`err.without_url()`) to prevent leaking embedded query credentials.
   - Sanitizes error strings with `sanitize_error_message`, redacting sensitive query keys (`key=`, `token=`, `access_token=`, `secret=`, `password=`, `auth=`, `api_key=`, `apikey=`).
@@ -85,6 +87,11 @@ agent-studios-runtime-transport/
 
 - **No Synthetic Model Fabrication**: All synthetic 4096 model limits and fallback descriptors (`fallback-model`, `default-model`) are eliminated. Unregistered models fail closed immediately with `TransportError::ModelRouteNotFound`.
 - **Route Registration Validation**: `register_route` and `register_model` return `Result<(), TransportError>` validating that the route's `instance_id` matches the descriptor's `provider_instance_id`, the model slug matches the descriptor's `id`, and the target provider instance is registered.
+- **Duplicate Route Policy & Multi-Instance Catalog Distinction**:
+  - Re-registering an identical route succeeds idempotently.
+  - Conflicting re-registration targeting a different instance fails closed with `TransportError::DuplicateModelRoute { model, existing_instance_id }`.
+  - **Single-Slug Router vs Multi-Instance Catalog**: `ProviderCatalog` supports multiple provider instances offering the same model ID (e.g., multiple instances offering `gpt-4o`). However, a single `RuntimeRouter` binds each unique model slug to exactly one instance. Separate `RuntimeRouter` instances can bind the same model slug to different instances. Full multi-instance `ModelRef` selection (disambiguating model calls by provider instance ID) lands in Milestone M07.6.
+- **Dead State Elimination**: `active_instance_id` and `set_active_instance()` are removed from `RuntimeRouter`. Routing is driven purely by the request's model slug.
 - **Fail-Closed HTTP Client Construction**: `RuntimeRouter::try_new` and `RuntimeRouter::try_new_with_options` construct `reqwest::Client` with explicit `connect_timeout` and User-Agent `AgentStudios/dev`.
 - Request capabilities (streaming, tool calling, parallel tool calling) are validated against `ModelDescriptor.capabilities`. Unsupported features fail closed with `TransportError::UnsupportedCapability`.
 - Unknown features emit non-blocking diagnostic notifications via `RuntimeDiagnosticSink`.
@@ -104,12 +111,19 @@ agent-studios-runtime-transport/
 - Timeouts enforced in all drivers:
   - Request headers timeout: `tokio::time::timeout(options.request_headers_timeout, req.send())` -> `TransportError::RequestHeadersTimeout`.
   - Stream idle timeout: `tokio::time::timeout(options.stream_idle_timeout, sse_stream.next())` -> `TransportError::StreamIdleTimeout`.
+  - Stalling stream idle timeout is verified against a real local stalling TCP server (`tokio::net::TcpListener`) on localhost:0 that holds the socket open without emitting subsequent SSE frames, confirming `StreamIdleTimeout` error emission, stream termination, and lease cleanup without relying on WireMock sleep tricks.
+- Receiver drop safety:
+  - If the receiver drops before stream completion or mid-stream, continuation transactions are immediately rolled back and the active lease is released.
+  - Verified in tests via bounded polling loops checking `!continuation_manager.is_in_flight(&key)`.
 
 ### 3.5. URL & Query Composition with `url::Url` & Gemini Hardening (`drivers/`)
 
 - All drivers build URLs using `url::Url`, mutating path segments via `set_path()` and preserving existing base URL query parameters and ports without raw string concatenation.
-- **Gemini Wire Hardening**:
-  - Runtime ownership of `alt=sse`: checks for collisions where `alt != "sse"` (`TransportError::ReservedQueryParameterCollision`), appending `alt=sse` cleanly.
+- **Gemini Wire Hardening & Canonical `alt=sse` Framing**:
+  - Runtime ownership of `alt=sse`: Outbound Gemini requests must contain `alt=sse` exactly once.
+  - Rejects any configured `alt != "sse"` from either base URL query or endpoint query params with `ReservedQueryParameterCollision`.
+  - Rejects duplicate configured `alt` parameters across configuration sources (base URL and endpoint query params) or within either source with `ReservedQueryParameterCollision`.
+  - Appends `alt=sse` cleanly exactly once when not explicitly provided.
   - Model slug is percent-encoded as a single path segment into `/models/{encoded_model}:streamGenerateContent`.
   - Request ID extraction priority: `x-goog-request-id` -> `x-request-id` -> `request-id`.
 
@@ -125,7 +139,7 @@ agent-studios-runtime-transport/
 
 ## 4. Verification & Mock Testing
 
-The test suite in `tests/transport_mock_tests.rs` validates all 35 correctness and security behaviors against a `wiremock` HTTP server:
+The test suite in `tests/transport_mock_tests.rs` validates all 42 correctness and security behaviors against mock and real network endpoints:
 1. `test_chat_completions_wiremock`: Full streaming cycle from mock OpenAI `/chat/completions` endpoint.
 2. `test_anthropic_wiremock`: Full streaming cycle from mock Anthropic `/messages` endpoint.
 3. `test_gemini_wiremock`: Full streaming cycle from mock Gemini `:streamGenerateContent` endpoint.
@@ -141,23 +155,30 @@ The test suite in `tests/transport_mock_tests.rs` validates all 35 correctness a
 13. `test_sensitive_header_marking`: Outbound auth headers marked sensitive.
 14. `test_auth_collision_rejection`: Collisions between auth headers and static headers rejected.
 15. `test_empty_secret_rejection`: Empty secrets rejected fail-closed.
-16. `test_safe_error_mapping_redacts_keys`: Credentials redacted from error messages.
-17. `test_sse_split_multibyte_utf8`: Multibyte UTF-8 split across SSE frames decoded without corruption.
-18. `test_sse_frame_size_limit`: Oversized SSE frames rejected with `SseFrameTooLarge`.
-19. `test_bounded_error_body_truncation`: Upstream error bodies truncated to limit.
-20. `test_remote_http_rejection_and_loopback_allowed`: Insecure remote HTTP rejected; localhost HTTP accepted.
-21. `test_gemini_url_encoding`: Model slugs with special characters correctly percent-encoded.
-22. `test_model_route_not_found_fail_closed`: Unrouted model requests fail closed with `ModelRouteNotFound`.
-23. `test_register_route_validation`: Route registration validates instance ID and model ID matches.
-24. `test_duplicate_model_id_different_instances`: Multiple instances can register identical model IDs without collision.
-25. `test_request_headers_timeout`: Exceeding `request_headers_timeout` triggers `RequestHeadersTimeout` error.
-26. `test_stream_idle_timeout`: Inter-event silence exceeding `stream_idle_timeout` triggers `StreamIdleTimeout` error.
-27. `test_receiver_drop_before_completed`: Dropping receiver before `Completed` rolls back continuation and releases lease.
-28. `test_receiver_drop_mid_stream`: Dropping receiver mid-stream rolls back continuation and releases lease.
-29. `test_gemini_alt_sse_query`: Gemini requests properly incorporate `alt=sse`.
-30. `test_gemini_reserved_alt_collision`: Colliding `alt != "sse"` parameter triggers `ReservedQueryParameterCollision`.
-31. `test_gemini_request_id_headers_priority`: Header priority `x-goog-request-id` > `x-request-id` > `request-id` enforced.
-32. `test_base_url_with_query_preserved`: Base URLs containing queries and paths are preserved across all drivers.
-33. `test_arbitrary_query_secret_sanitization`: Arbitrary query credentials are sanitized from errors.
-34. `test_read_bounded_error_body_redacts_auth_secrets`: Resolved auth credentials are redacted from bounded error bodies.
-35. `test_sse_finish_size_limit`: Trailing data exceeding frame size limit during `finish()` triggers `SseFrameTooLarge`.
+16. `test_base_url_query_auth_collision_rejection`: Pre-flight detection of base URL query auth collision fail-closed.
+17. `test_base_url_query_auth_collision_case_insensitive`: Case-insensitive matching for base URL query auth collisions (`KEY`, `key`).
+18. `test_safe_error_mapping_redacts_keys`: Credentials redacted from error messages.
+19. `test_sse_split_multibyte_utf8`: Multibyte UTF-8 split across SSE frames decoded without corruption.
+20. `test_sse_frame_size_limit`: Oversized SSE frames rejected with `SseFrameTooLarge`.
+21. `test_bounded_error_body_truncation`: Upstream error bodies truncated to limit.
+22. `test_remote_http_rejection_and_loopback_allowed`: Insecure remote HTTP rejected; localhost HTTP accepted.
+23. `test_gemini_url_encoding`: Model slugs with special characters correctly percent-encoded.
+24. `test_model_route_not_found_fail_closed`: Unrouted model requests fail closed with `ModelRouteNotFound`.
+25. `test_register_route_validation`: Route registration validates instance ID and model ID matches.
+26. `test_catalog_descriptor_duplicate_model_id_across_instances`: ProviderCatalog / descriptors support identical model IDs across instances.
+27. `test_single_router_duplicate_model_route_rejection`: RuntimeRouter rejects ambiguous second binding for the same model slug.
+28. `test_separate_routers_bind_same_slug_to_different_instances`: Separate routers bind identical model slug to different instances.
+29. `test_request_headers_timeout`: Exceeding `request_headers_timeout` triggers `RequestHeadersTimeout` error.
+30. `test_stream_idle_timeout`: Inter-event silence exceeding `stream_idle_timeout` triggers `StreamIdleTimeout` error on real stalling TCP server.
+31. `test_receiver_drop_before_completed`: Dropping receiver before `Completed` rolls back continuation and releases lease.
+32. `test_receiver_drop_mid_stream`: Dropping receiver mid-stream rolls back continuation and releases lease.
+33. `test_gemini_alt_case_a_runtime_inserts_alt`: Gemini driver automatically inserts `alt=sse` when missing.
+34. `test_gemini_alt_case_b_base_url_has_alt`: Gemini driver accepts pre-configured `alt=sse` in base URL without duplication.
+35. `test_gemini_alt_case_c_endpoint_query_has_alt`: Gemini driver accepts pre-configured `alt=sse` in endpoint query params without duplication.
+36. `test_gemini_alt_case_d_both_sources_alt_rejected`: Gemini driver rejects `alt` configured across both sources.
+37. `test_gemini_alt_case_e_invalid_alt_value_rejected`: Gemini driver rejects `alt != "sse"`.
+38. `test_gemini_request_id_headers_priority`: Header priority `x-goog-request-id` > `x-request-id` > `request-id` enforced.
+39. `test_base_url_with_query_preserved`: Base URLs containing queries and paths are preserved across all drivers.
+40. `test_arbitrary_query_secret_sanitization`: Arbitrary query credentials are sanitized from errors.
+41. `test_read_bounded_error_body_redacts_auth_secrets`: Resolved auth credentials are redacted from bounded error bodies.
+42. `test_sse_finish_size_limit`: Trailing data exceeding frame size limit during `finish()` triggers `SseFrameTooLarge`.

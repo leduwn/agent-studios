@@ -80,11 +80,13 @@ impl ResolvedAuth {
         }
     }
 
-    /// Verifies that authentication credentials do not collide case-insensitively with static headers or query parameters.
-    pub fn check_collisions<K1: AsRef<str>, K2: AsRef<str>>(
+    /// Verifies that authentication credentials do not collide case-insensitively with static headers,
+    /// endpoint query parameters, or query parameters already embedded in the base URL.
+    pub fn check_collisions<K1: AsRef<str>, K2: AsRef<str>, K3: AsRef<str>>(
         &self,
         static_headers: impl IntoIterator<Item = K1>,
-        query_params: impl IntoIterator<Item = K2>,
+        endpoint_query_params: impl IntoIterator<Item = K2>,
+        base_url_query_params: impl IntoIterator<Item = K3>,
     ) -> Result<(), TransportError> {
         let headers_list: Vec<K1> = static_headers.into_iter().collect();
         for header in self.headers.keys() {
@@ -99,7 +101,20 @@ impl ResolvedAuth {
             }
         }
 
-        let queries_list: Vec<K2> = query_params.into_iter().collect();
+        let base_queries_list: Vec<K3> = base_url_query_params.into_iter().collect();
+        for (param_name, _) in &self.query_params {
+            if let Some(colliding) = base_queries_list
+                .iter()
+                .find(|k| k.as_ref().eq_ignore_ascii_case(param_name))
+            {
+                return Err(TransportError::AuthenticationCollision {
+                    name: colliding.as_ref().to_string(),
+                    location: "base_url_query",
+                });
+            }
+        }
+
+        let queries_list: Vec<K2> = endpoint_query_params.into_iter().collect();
         for (param_name, _) in &self.query_params {
             if let Some(colliding) = queries_list
                 .iter()
@@ -247,9 +262,14 @@ mod tests {
         let mut static_headers = HashMap::new();
         static_headers.insert("Authorization".to_string(), "custom".to_string());
         let query_params: HashMap<String, String> = HashMap::new();
+        let base_queries: Vec<String> = vec![];
 
         let err = auth
-            .check_collisions(static_headers.keys(), query_params.keys())
+            .check_collisions(
+                static_headers.keys(),
+                query_params.keys(),
+                base_queries.iter(),
+            )
             .unwrap_err();
         match err {
             TransportError::AuthenticationCollision { name, location } => {
@@ -265,12 +285,33 @@ mod tests {
         query_params_colliding.insert("API_KEY".to_string(), "val".to_string());
 
         let err_q = auth
-            .check_collisions(static_headers_clean.keys(), query_params_colliding.keys())
+            .check_collisions(
+                static_headers_clean.keys(),
+                query_params_colliding.keys(),
+                base_queries.iter(),
+            )
             .unwrap_err();
         match err_q {
             TransportError::AuthenticationCollision { name, location } => {
                 assert_eq!(name, "API_KEY");
                 assert_eq!(location, "query_params");
+            }
+            other => panic!("Unexpected error: {other:?}"),
+        }
+
+        // Colliding base_url query parameter with different case
+        let base_queries_colliding = ["Api_Key".to_string()];
+        let err_base = auth
+            .check_collisions(
+                static_headers_clean.keys(),
+                query_params.keys(),
+                base_queries_colliding.iter(),
+            )
+            .unwrap_err();
+        match err_base {
+            TransportError::AuthenticationCollision { name, location } => {
+                assert_eq!(name, "Api_Key");
+                assert_eq!(location, "base_url_query");
             }
             other => panic!("Unexpected error: {other:?}"),
         }

@@ -81,6 +81,14 @@ pub enum TransportError {
     #[error("Invalid model route: {0}")]
     InvalidModelRoute(String),
 
+    #[error(
+        "Duplicate route registration for model '{model}': already registered to instance '{existing_instance_id}'"
+    )]
+    DuplicateModelRoute {
+        model: String,
+        existing_instance_id: ProviderInstanceId,
+    },
+
     #[error("Request headers timeout exceeded")]
     RequestHeadersTimeout,
 

@@ -116,7 +116,6 @@ async fn test_chat_completions_wiremock() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o-mini");
     router
@@ -202,7 +201,6 @@ async fn test_anthropic_wiremock() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_anthropic_descriptor(instance_id, "claude-3-5-sonnet");
     router
@@ -282,7 +280,6 @@ async fn test_gemini_wiremock() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gemini-2.5-flash");
     router
@@ -351,7 +348,6 @@ async fn test_transactional_rollback_on_error() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -410,7 +406,6 @@ async fn test_cancellation_propagation() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -499,7 +494,6 @@ async fn test_concurrent_thread_isolation() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_anthropic_descriptor(instance_id, "claude-3-5-sonnet");
     router
@@ -583,7 +577,6 @@ async fn test_same_thread_concurrency_rejection() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -674,7 +667,6 @@ async fn test_completed_only_commit_invariant() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -999,9 +991,14 @@ fn test_auth_collision_rejection() {
 
     let static_headers = ["authorization".to_string()];
     let query_params: Vec<String> = vec![];
+    let base_url_queries: Vec<String> = vec![];
 
     let err = auth
-        .check_collisions(static_headers.iter(), query_params.iter())
+        .check_collisions(
+            static_headers.iter(),
+            query_params.iter(),
+            base_url_queries.iter(),
+        )
         .unwrap_err();
     match err {
         TransportError::AuthenticationCollision { name, location } => {
@@ -1010,6 +1007,117 @@ fn test_auth_collision_rejection() {
         }
         other => panic!("Unexpected error: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_base_url_query_auth_collision_rejection() {
+    let mock_server = MockServer::start().await;
+
+    let sec_ref = SecretReference {
+        backend: SecretBackend::EnvironmentVariable,
+        locator: "SECRET_KEY".to_string(),
+    };
+    let secret_resolver = Arc::new(
+        InMemorySecretResolver::new().with_env_secret("SECRET_KEY", "super-secret-query-token"),
+    );
+    let continuation_manager = Arc::new(ContinuationManager::new());
+    let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
+
+    let instance_id = ProviderInstanceId::new();
+    let base_url = format!("{}/v1?totally_custom_token=STATIC", mock_server.uri());
+    let instance = ProviderInstance::new(
+        instance_id,
+        ProviderId::new("openai").unwrap(),
+        "Collision Instance",
+        ProtocolFamily::OpenAiChatCompletions,
+        EndpointProfile::new(&base_url).unwrap(),
+        AuthenticationScheme::QueryParameter {
+            parameter_name: "totally_custom_token".to_string(),
+            secret: sec_ref,
+        },
+    )
+    .unwrap();
+
+    router.register_instance(instance);
+    let desc = test_descriptor(instance_id, "gpt-4o");
+    router.register_model("gpt-4o", instance_id, desc).unwrap();
+
+    let req = create_test_request("gpt-4o");
+    let ctx = ModelInferenceContext {
+        thread_id: "thread-coll-1".to_string(),
+        turn_id: None,
+    };
+
+    let err = match router.stream(req, ctx).await {
+        Err(e) => e,
+        Ok(_) => panic!("Expected error, got Ok stream"),
+    };
+    let err_display = format!("{err}");
+    let err_debug = format!("{err:?}");
+    assert!(err_display.contains("totally_custom_token"));
+    assert!(err_display.contains("base_url_query"));
+    assert!(!err_display.contains("super-secret-query-token"));
+    assert!(!err_debug.contains("super-secret-query-token"));
+
+    // Verify no HTTP request was sent to the mock server
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 0);
+}
+
+#[tokio::test]
+async fn test_base_url_query_auth_collision_case_insensitive() {
+    let mock_server = MockServer::start().await;
+
+    let sec_ref = SecretReference {
+        backend: SecretBackend::EnvironmentVariable,
+        locator: "SECRET_KEY".to_string(),
+    };
+    let secret_resolver =
+        Arc::new(InMemorySecretResolver::new().with_env_secret("SECRET_KEY", "secret-token-val"));
+    let continuation_manager = Arc::new(ContinuationManager::new());
+    let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
+
+    let instance_id = ProviderInstanceId::new();
+    let base_url = format!("{}/v1?TOTALLY_CUSTOM_TOKEN=STATIC", mock_server.uri());
+    let instance = ProviderInstance::new(
+        instance_id,
+        ProviderId::new("openai").unwrap(),
+        "Collision Case Instance",
+        ProtocolFamily::OpenAiChatCompletions,
+        EndpointProfile::new(&base_url).unwrap(),
+        AuthenticationScheme::QueryParameter {
+            parameter_name: "totally_custom_token".to_string(),
+            secret: sec_ref,
+        },
+    )
+    .unwrap();
+
+    router.register_instance(instance);
+    let desc = test_descriptor(instance_id, "gpt-4o");
+    router.register_model("gpt-4o", instance_id, desc).unwrap();
+
+    let req = create_test_request("gpt-4o");
+    let ctx = ModelInferenceContext {
+        thread_id: "thread-coll-case".to_string(),
+        turn_id: None,
+    };
+
+    let err = match router.stream(req, ctx).await {
+        Err(e) => e,
+        Ok(_) => panic!("Expected error, got Ok stream"),
+    };
+    let err_display = format!("{err}");
+    let err_debug = format!("{err:?}");
+    assert!(
+        err_display.contains("TOTALLY_CUSTOM_TOKEN")
+            || err_display.contains("totally_custom_token")
+    );
+    assert!(err_display.contains("base_url_query"));
+    assert!(!err_display.contains("secret-token-val"));
+    assert!(!err_debug.contains("secret-token-val"));
+
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 0);
 }
 
 #[test]
@@ -1126,7 +1234,6 @@ async fn test_gemini_url_encoding() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "publishers/google/models/gemini-2.0-flash");
     router
@@ -1197,7 +1304,6 @@ async fn test_bounded_error_body_truncation() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -1296,7 +1402,6 @@ async fn test_receiver_drop_before_completed() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_anthropic_descriptor(instance_id, "claude-3-5-sonnet");
     router
@@ -1320,10 +1425,14 @@ async fn test_receiver_drop_before_completed() {
     }
     drop(stream);
 
-    // Give background task time to detect receiver drop and release lease
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     let key = ContinuationKey::new(instance_id, thread_id);
+    for _ in 0..100 {
+        if !continuation_manager.is_in_flight(&key) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
     assert!(!continuation_manager.is_in_flight(&key));
     let state = continuation_manager.get(&key);
     assert!(state.anthropic.is_empty());
@@ -1368,7 +1477,6 @@ async fn test_receiver_drop_mid_stream() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -1386,9 +1494,14 @@ async fn test_receiver_drop_mid_stream() {
     let _ = stream.next().await;
     drop(stream);
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     let key = ContinuationKey::new(instance_id, thread_id);
+    for _ in 0..100 {
+        if !continuation_manager.is_in_flight(&key) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
     assert!(!continuation_manager.is_in_flight(&key));
 }
 
@@ -1440,7 +1553,6 @@ async fn test_request_headers_timeout() {
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -1463,18 +1575,28 @@ async fn test_request_headers_timeout() {
 
 #[tokio::test]
 async fn test_stream_idle_timeout() {
-    let mock_server = MockServer::start().await;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    // Send one chunk then wait a long time before closing
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string("data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"start\"},\"finish_reason\":null}]}\n\n"),
-        )
-        .mount(&mock_server)
-        .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", local_addr);
+
+    let server_handle = tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+
+            let response_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
+            let _ = socket.write_all(response_headers.as_bytes()).await;
+
+            let first_event = "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"start\"},\"finish_reason\":null}]}\n\n";
+            let _ = socket.write_all(first_event.as_bytes()).await;
+            let _ = socket.flush().await;
+
+            // Keep connection open and stall without sending any more data
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
 
     let sec_ref = SecretReference {
         backend: SecretBackend::EnvironmentVariable,
@@ -1503,13 +1625,12 @@ async fn test_stream_idle_timeout() {
         ProviderId::new("openai").unwrap(),
         "Mock Idle Timeout",
         ProtocolFamily::OpenAiChatCompletions,
-        EndpointProfile::new(mock_server.uri()).unwrap(),
+        EndpointProfile::new(&base_url).unwrap(),
         AuthenticationScheme::BearerToken { secret: sec_ref },
     )
     .unwrap();
 
     router.register_instance(instance);
-    router.set_active_instance(instance_id);
 
     let desc = test_descriptor(instance_id, "gpt-4o");
     router.register_model("gpt-4o", instance_id, desc).unwrap();
@@ -1523,18 +1644,40 @@ async fn test_stream_idle_timeout() {
 
     let mut stream = router.stream(req, ctx).await.unwrap();
 
-    // Consume first event
+    // Consume initial events emitted from the first chunk
     let first = stream.next().await;
-    assert!(first.is_some());
+    assert!(matches!(first, Some(Ok(ResponseEvent::Created { .. }))));
 
-    // Next event should time out due to stream_idle_timeout
     let second = stream.next().await;
+    assert!(matches!(
+        second,
+        Some(Ok(ResponseEvent::OutputItemAdded(_)))
+    ));
+
+    let third = stream.next().await;
+    assert!(matches!(third, Some(Ok(ResponseEvent::OutputTextDelta(ref d))) if d == "start"));
+
+    // Next event MUST be StreamIdleTimeout (unconditional assert, not if let)
+    let fourth = stream.next().await;
+    match fourth {
+        Some(Err(e)) => {
+            let err_str = e.to_string();
+            assert!(
+                err_str.contains("Stream idle timeout"),
+                "Expected Stream idle timeout error, got: {err_str}"
+            );
+        }
+        other => panic!("Expected Some(Err(StreamIdleTimeout)), got: {other:?}"),
+    }
+
+    // Stream must terminate after error
+    let fifth = stream.next().await;
+    assert!(fifth.is_none());
+
     let key = ContinuationKey::new(instance_id, thread_id);
     assert!(!continuation_manager.is_in_flight(&key));
 
-    if let Some(Err(e)) = second {
-        assert!(e.to_string().contains("Stream idle timeout"));
-    }
+    let _ = server_handle.await;
 }
 
 #[tokio::test]
@@ -1598,7 +1741,24 @@ async fn test_register_route_validation() {
 }
 
 #[tokio::test]
-async fn test_duplicate_model_id_different_instances() {
+async fn test_catalog_descriptor_duplicate_model_id_across_instances() {
+    let instance_1 = ProviderInstanceId::new();
+    let instance_2 = ProviderInstanceId::new();
+
+    let desc1 = test_descriptor(instance_1, "gpt-4o");
+    let desc2 = test_descriptor(instance_2, "gpt-4o");
+
+    assert_eq!(desc1.id.as_str(), "gpt-4o");
+    assert_eq!(desc2.id.as_str(), "gpt-4o");
+    assert_ne!(desc1.provider_instance_id, desc2.provider_instance_id);
+
+    // Both descriptors exist concurrently and are valid for their respective instances
+    assert_eq!(desc1.provider_instance_id, instance_1);
+    assert_eq!(desc2.provider_instance_id, instance_2);
+}
+
+#[tokio::test]
+async fn test_single_router_duplicate_model_route_rejection() {
     let secret_resolver = Arc::new(InMemorySecretResolver::new());
     let continuation_manager = Arc::new(ContinuationManager::new());
     let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
@@ -1635,23 +1795,85 @@ async fn test_duplicate_model_id_different_instances() {
     router
         .register_model("gpt-4o", instance_1, desc1.clone())
         .unwrap();
-    let (inst, desc) = router
-        .resolve_route(&create_test_request("gpt-4o"))
-        .unwrap();
-    assert_eq!(inst.id, instance_1);
-    assert_eq!(desc.provider_instance_id, instance_1);
 
-    // Explicit re-registration binds gpt-4o to instance 2
-    router.register_model("gpt-4o", instance_2, desc2).unwrap();
-    let (inst2, desc2_res) = router
-        .resolve_route(&create_test_request("gpt-4o"))
-        .unwrap();
-    assert_eq!(inst2.id, instance_2);
-    assert_eq!(desc2_res.provider_instance_id, instance_2);
+    // Idempotent re-registration of exact same route succeeds
+    assert!(router.register_model("gpt-4o", instance_1, desc1).is_ok());
+
+    // Conflicting re-registration targeting a different instance fails closed with DuplicateModelRoute
+    let err = router
+        .register_model("gpt-4o", instance_2, desc2)
+        .unwrap_err();
+    match err {
+        TransportError::DuplicateModelRoute {
+            model,
+            existing_instance_id,
+        } => {
+            assert_eq!(model, "gpt-4o");
+            assert_eq!(existing_instance_id, instance_1);
+        }
+        other => panic!("Expected DuplicateModelRoute, got: {other:?}"),
+    }
 }
 
 #[tokio::test]
-async fn test_gemini_alt_sse_query() {
+async fn test_separate_routers_bind_same_slug_to_different_instances() {
+    let secret_resolver_1 = Arc::new(InMemorySecretResolver::new());
+    let cont_manager_1 = Arc::new(ContinuationManager::new());
+    let router_1 = RuntimeRouter::new(secret_resolver_1, cont_manager_1).unwrap();
+
+    let secret_resolver_2 = Arc::new(InMemorySecretResolver::new());
+    let cont_manager_2 = Arc::new(ContinuationManager::new());
+    let router_2 = RuntimeRouter::new(secret_resolver_2, cont_manager_2).unwrap();
+
+    let instance_1 = ProviderInstanceId::new();
+    let instance_2 = ProviderInstanceId::new();
+
+    let p1 = ProviderInstance::new(
+        instance_1,
+        ProviderId::new("openai").unwrap(),
+        "OpenAI East",
+        ProtocolFamily::OpenAiChatCompletions,
+        EndpointProfile::new("http://localhost:8080").unwrap(),
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+    let p2 = ProviderInstance::new(
+        instance_2,
+        ProviderId::new("openai").unwrap(),
+        "OpenAI West",
+        ProtocolFamily::OpenAiChatCompletions,
+        EndpointProfile::new("http://localhost:8081").unwrap(),
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+
+    router_1.register_instance(p1);
+    router_2.register_instance(p2);
+
+    let desc1 = test_descriptor(instance_1, "gpt-4o");
+    let desc2 = test_descriptor(instance_2, "gpt-4o");
+
+    // Router 1 binds gpt-4o to instance 1
+    router_1
+        .register_model("gpt-4o", instance_1, desc1)
+        .unwrap();
+    // Router 2 binds gpt-4o to instance 2
+    router_2
+        .register_model("gpt-4o", instance_2, desc2)
+        .unwrap();
+
+    let req = create_test_request("gpt-4o");
+    let (inst_1, desc_res_1) = router_1.resolve_route(&req).unwrap();
+    assert_eq!(inst_1.id, instance_1);
+    assert_eq!(desc_res_1.provider_instance_id, instance_1);
+
+    let (inst_2, desc_res_2) = router_2.resolve_route(&req).unwrap();
+    assert_eq!(inst_2.id, instance_2);
+    assert_eq!(desc_res_2.provider_instance_id, instance_2);
+}
+
+#[tokio::test]
+async fn test_gemini_alt_case_a_runtime_inserts_alt() {
     let mock_server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -1659,7 +1881,7 @@ async fn test_gemini_alt_sse_query() {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "text/event-stream")
-                .set_body_string("data: {\"responseId\":\"1\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"alt test\"}]},\"finishReason\":\"STOP\"}]}\n\n"),
+                .set_body_string("data: {\"responseId\":\"1\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"alt A\"}]},\"finishReason\":\"STOP\"}]}\n\n"),
         )
         .mount(&mock_server)
         .await;
@@ -1677,7 +1899,7 @@ async fn test_gemini_alt_sse_query() {
     let instance = ProviderInstance::new(
         instance_id,
         ProviderId::new("google").unwrap(),
-        "Gemini Alt",
+        "Gemini Alt Case A",
         ProtocolFamily::GeminiGenerateContent,
         EndpointProfile::new(mock_server.uri()).unwrap(),
         AuthenticationScheme::QueryParameter {
@@ -1695,28 +1917,186 @@ async fn test_gemini_alt_sse_query() {
 
     let req = create_test_request("gemini-2.5-flash");
     let ctx = ModelInferenceContext {
-        thread_id: "thread-alt-sse".to_string(),
+        thread_id: "thread-alt-case-a".to_string(),
         turn_id: None,
     };
-    let stream = router.stream(req, ctx).await;
-    assert!(stream.is_ok());
+    let mut stream = router.stream(req, ctx).await.unwrap();
+    while let Some(res) = stream.next().await {
+        let _ = res.unwrap();
+    }
+
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let alts: Vec<_> = reqs[0]
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == "alt")
+        .collect();
+    assert_eq!(
+        alts.len(),
+        1,
+        "alt query parameter must appear exactly once"
+    );
+    assert_eq!(alts[0].1, "sse");
 }
 
 #[tokio::test]
-async fn test_gemini_reserved_alt_collision() {
+async fn test_gemini_alt_case_b_base_url_has_alt() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/models/.*:streamGenerateContent$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"responseId\":\"1\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"alt B\"}]},\"finishReason\":\"STOP\"}]}\n\n"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let sec_ref = SecretReference {
+        backend: SecretBackend::EnvironmentVariable,
+        locator: "KEY".to_string(),
+    };
+    let secret_resolver =
+        Arc::new(InMemorySecretResolver::new().with_env_secret("KEY", "mock-val"));
+    let continuation_manager = Arc::new(ContinuationManager::new());
+    let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
+
+    let instance_id = ProviderInstanceId::new();
+    let base_url = format!("{}/v1?alt=sse", mock_server.uri());
+    let instance = ProviderInstance::new(
+        instance_id,
+        ProviderId::new("google").unwrap(),
+        "Gemini Alt Case B",
+        ProtocolFamily::GeminiGenerateContent,
+        EndpointProfile::new(&base_url).unwrap(),
+        AuthenticationScheme::QueryParameter {
+            parameter_name: "key".to_string(),
+            secret: sec_ref,
+        },
+    )
+    .unwrap();
+
+    router.register_instance(instance);
+    let desc = test_descriptor(instance_id, "gemini-2.5-flash");
+    router
+        .register_model("gemini-2.5-flash", instance_id, desc)
+        .unwrap();
+
+    let req = create_test_request("gemini-2.5-flash");
+    let ctx = ModelInferenceContext {
+        thread_id: "thread-alt-case-b".to_string(),
+        turn_id: None,
+    };
+    let mut stream = router.stream(req, ctx).await.unwrap();
+    while let Some(res) = stream.next().await {
+        let _ = res.unwrap();
+    }
+
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let alts: Vec<_> = reqs[0]
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == "alt")
+        .collect();
+    assert_eq!(
+        alts.len(),
+        1,
+        "alt query parameter must appear exactly once"
+    );
+    assert_eq!(alts[0].1, "sse");
+}
+
+#[tokio::test]
+async fn test_gemini_alt_case_c_endpoint_query_has_alt() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/models/.*:streamGenerateContent$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"responseId\":\"1\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"alt C\"}]},\"finishReason\":\"STOP\"}]}\n\n"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let sec_ref = SecretReference {
+        backend: SecretBackend::EnvironmentVariable,
+        locator: "KEY".to_string(),
+    };
+    let secret_resolver =
+        Arc::new(InMemorySecretResolver::new().with_env_secret("KEY", "mock-val"));
+    let continuation_manager = Arc::new(ContinuationManager::new());
+    let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
+
+    let instance_id = ProviderInstanceId::new();
+    let mut ep = EndpointProfile::new(mock_server.uri()).unwrap();
+    ep.query_params.insert("alt".to_string(), "sse".to_string());
+
+    let instance = ProviderInstance::new(
+        instance_id,
+        ProviderId::new("google").unwrap(),
+        "Gemini Alt Case C",
+        ProtocolFamily::GeminiGenerateContent,
+        ep,
+        AuthenticationScheme::QueryParameter {
+            parameter_name: "key".to_string(),
+            secret: sec_ref,
+        },
+    )
+    .unwrap();
+
+    router.register_instance(instance);
+    let desc = test_descriptor(instance_id, "gemini-2.5-flash");
+    router
+        .register_model("gemini-2.5-flash", instance_id, desc)
+        .unwrap();
+
+    let req = create_test_request("gemini-2.5-flash");
+    let ctx = ModelInferenceContext {
+        thread_id: "thread-alt-case-c".to_string(),
+        turn_id: None,
+    };
+    let mut stream = router.stream(req, ctx).await.unwrap();
+    while let Some(res) = stream.next().await {
+        let _ = res.unwrap();
+    }
+
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 1);
+    let alts: Vec<_> = reqs[0]
+        .url
+        .query_pairs()
+        .filter(|(k, _)| k == "alt")
+        .collect();
+    assert_eq!(
+        alts.len(),
+        1,
+        "alt query parameter must appear exactly once"
+    );
+    assert_eq!(alts[0].1, "sse");
+}
+
+#[tokio::test]
+async fn test_gemini_alt_case_d_both_sources_alt_rejected() {
+    let mock_server = MockServer::start().await;
+
     let secret_resolver = Arc::new(InMemorySecretResolver::new());
     let continuation_manager = Arc::new(ContinuationManager::new());
     let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
 
     let instance_id = ProviderInstanceId::new();
-    let mut ep = EndpointProfile::new("http://localhost:8080").unwrap();
-    ep.query_params
-        .insert("alt".to_string(), "json".to_string()); // Not "sse"!
+    let base_url = format!("{}/v1?alt=sse", mock_server.uri());
+    let mut ep = EndpointProfile::new(&base_url).unwrap();
+    ep.query_params.insert("alt".to_string(), "sse".to_string());
 
     let instance = ProviderInstance::new(
         instance_id,
         ProviderId::new("google").unwrap(),
-        "Gemini Alt Collision",
+        "Gemini Alt Case D",
         ProtocolFamily::GeminiGenerateContent,
         ep,
         AuthenticationScheme::None,
@@ -1731,14 +2111,64 @@ async fn test_gemini_reserved_alt_collision() {
 
     let req = create_test_request("gemini-2.5-flash");
     let ctx = ModelInferenceContext {
-        thread_id: "thread-alt-coll".to_string(),
+        thread_id: "thread-alt-case-d".to_string(),
         turn_id: None,
     };
+
     let err = match router.stream(req, ctx).await {
         Err(e) => e,
-        Ok(_) => panic!("Expected collision error for alt!=sse"),
+        Ok(_) => panic!("Expected error, got Ok stream"),
     };
     assert!(err.to_string().contains("Reserved query parameter 'alt'"));
+
+    // Verify no HTTP request was sent
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 0);
+}
+
+#[tokio::test]
+async fn test_gemini_alt_case_e_invalid_alt_value_rejected() {
+    let mock_server = MockServer::start().await;
+
+    let secret_resolver = Arc::new(InMemorySecretResolver::new());
+    let continuation_manager = Arc::new(ContinuationManager::new());
+    let router = RuntimeRouter::new(secret_resolver, continuation_manager).unwrap();
+
+    let instance_id = ProviderInstanceId::new();
+    let base_url = format!("{}/v1?alt=json", mock_server.uri());
+    let ep = EndpointProfile::new(&base_url).unwrap();
+
+    let instance = ProviderInstance::new(
+        instance_id,
+        ProviderId::new("google").unwrap(),
+        "Gemini Alt Case E",
+        ProtocolFamily::GeminiGenerateContent,
+        ep,
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+
+    router.register_instance(instance);
+    let desc = test_descriptor(instance_id, "gemini-2.5-flash");
+    router
+        .register_model("gemini-2.5-flash", instance_id, desc)
+        .unwrap();
+
+    let req = create_test_request("gemini-2.5-flash");
+    let ctx = ModelInferenceContext {
+        thread_id: "thread-alt-case-e".to_string(),
+        turn_id: None,
+    };
+
+    let err = match router.stream(req, ctx).await {
+        Err(e) => e,
+        Ok(_) => panic!("Expected error, got Ok stream"),
+    };
+    assert!(err.to_string().contains("Reserved query parameter 'alt'"));
+
+    // Verify no HTTP request was sent
+    let reqs = mock_server.received_requests().await.unwrap();
+    assert_eq!(reqs.len(), 0);
 }
 
 #[tokio::test]

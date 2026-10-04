@@ -46,7 +46,6 @@ pub struct RuntimeRouter {
     options: RuntimeTransportOptions,
     diagnostic_sink: Arc<dyn RuntimeDiagnosticSink>,
     provider_instances: RwLock<HashMap<ProviderInstanceId, ProviderInstance>>,
-    active_instance_id: RwLock<Option<ProviderInstanceId>>,
     model_routes: RwLock<HashMap<String, RuntimeModelRoute>>,
     secret_resolver: Arc<dyn SecretResolver>,
     continuation_manager: Arc<ContinuationManager>,
@@ -58,7 +57,6 @@ pub struct RuntimeRouter {
 impl fmt::Debug for RuntimeRouter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimeRouter")
-            .field("active_instance_id", &self.active_instance_id)
             .field("model_routes", &self.model_routes)
             .field("continuation_manager", &self.continuation_manager)
             .finish()
@@ -97,7 +95,6 @@ impl RuntimeRouter {
             options,
             diagnostic_sink,
             provider_instances: RwLock::new(HashMap::new()),
-            active_instance_id: RwLock::new(None),
             model_routes: RwLock::new(HashMap::new()),
             secret_resolver,
             continuation_manager,
@@ -134,13 +131,11 @@ impl RuntimeRouter {
         map.insert(instance.id, instance);
     }
 
-    /// Sets the default active provider instance.
-    pub fn set_active_instance(&self, id: ProviderInstanceId) {
-        let mut active = self.active_instance_id.write().unwrap();
-        *active = Some(id);
-    }
-
     /// Registers an explicit route binding a model slug to an instance and its ModelDescriptor.
+    ///
+    /// Duplicate registrations for the same model slug are handled explicitly:
+    /// - Identical registrations succeed idempotently.
+    /// - Conflicting registrations targeting a different route or instance are rejected with `DuplicateModelRoute`.
     pub fn register_route(
         &self,
         model: impl Into<String>,
@@ -170,6 +165,16 @@ impl RuntimeRouter {
         }
 
         let mut routes = self.model_routes.write().unwrap();
+        if let Some(existing) = routes.get(&model_str) {
+            if *existing == route {
+                return Ok(());
+            }
+            return Err(TransportError::DuplicateModelRoute {
+                model: model_str,
+                existing_instance_id: existing.instance_id,
+            });
+        }
+
         routes.insert(model_str, route);
         Ok(())
     }

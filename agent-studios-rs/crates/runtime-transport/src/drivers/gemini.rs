@@ -41,9 +41,11 @@ impl ProtocolDriver for GeminiDriver {
         continuation_tx: ContinuationTransaction,
         options: &RuntimeTransportOptions,
     ) -> Result<ResponseStream, TransportError> {
+        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
         auth.check_collisions(
             instance.endpoint.static_headers.keys(),
             instance.endpoint.query_params.keys(),
+            validated_url.query_pairs().map(|(k, _)| k),
         )?;
 
         let mut gemini_options = GeminiAdapterOptions::new();
@@ -57,8 +59,6 @@ impl ProtocolDriver for GeminiDriver {
             &gemini_options,
             Some(&continuation_tx.staged().gemini),
         )?;
-
-        let mut validated_url = options.validate_url(&instance.endpoint.base_url)?;
 
         for (k, v) in validated_url.query_pairs() {
             if k.eq_ignore_ascii_case("alt") && v != "sse" {
@@ -75,6 +75,27 @@ impl ProtocolDriver for GeminiDriver {
             }
         }
 
+        let base_alt_count = validated_url
+            .query_pairs()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("alt"))
+            .count();
+        let endpoint_alt_count = instance
+            .endpoint
+            .query_params
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("alt"))
+            .count();
+
+        // Reject duplicate configured alt across configuration sources or within either source
+        if (base_alt_count > 0 && endpoint_alt_count > 0)
+            || base_alt_count > 1
+            || endpoint_alt_count > 1
+        {
+            return Err(TransportError::ReservedQueryParameterCollision {
+                parameter: "alt".to_string(),
+            });
+        }
+
         let encoded_model: String = url::form_urlencoded::byte_serialize(request.model.as_bytes())
             .collect::<String>()
             .replace('+', "%20");
@@ -82,15 +103,7 @@ impl ProtocolDriver for GeminiDriver {
         let new_path = format!("{base_path}/models/{encoded_model}:streamGenerateContent");
         validated_url.set_path(&new_path);
 
-        let has_alt_sse = validated_url
-            .query_pairs()
-            .any(|(k, v)| k.eq_ignore_ascii_case("alt") && v == "sse")
-            || instance
-                .endpoint
-                .query_params
-                .iter()
-                .any(|(k, v)| k.eq_ignore_ascii_case("alt") && v == "sse");
-
+        let has_alt_sse = base_alt_count > 0 || endpoint_alt_count > 0;
         if !has_alt_sse {
             validated_url.query_pairs_mut().append_pair("alt", "sse");
         }
