@@ -11,11 +11,22 @@ use codex_models_manager::manager::{
 };
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::{
-    ModelInfo, ModelPreset, ModelVisibility, ModelsResponse, ReasoningEffort, ReasoningEffortPreset,
+    InputModality, ModelInfo, ModelPreset, ModelVisibility, ModelsResponse,
 };
 
+use crate::error::RuntimeSessionError;
+
 /// Converts an Agent Studios `ModelDescriptor` into a Codex `ModelInfo`.
-pub fn model_descriptor_to_model_info(descriptor: &ModelDescriptor) -> ModelInfo {
+///
+/// Ensures explicit, scrubbed metadata without false fallback values:
+/// - Explicit `context_window` and `max_context_window` using checked `i64::try_from` (or `None`).
+/// - Input modalities strictly derived from descriptor capabilities (`Text` always; `Image` and `Audio` when supported).
+/// - No synthetic reasoning levels invented (`supported_reasoning_levels` empty, `default_reasoning_level` none).
+/// - Provider-native server features disabled (`supports_search_tool = false`).
+/// - Codex host-level capabilities preserved (`include_skills_usage_instructions = true`, etc.).
+pub fn model_descriptor_to_model_info(
+    descriptor: &ModelDescriptor,
+) -> Result<ModelInfo, RuntimeSessionError> {
     let slug = descriptor.id.as_str();
     let mut info = codex_models_manager::model_info::model_info_from_slug(slug);
     info.slug = slug.to_string();
@@ -26,30 +37,42 @@ pub fn model_descriptor_to_model_info(descriptor: &ModelDescriptor) -> ModelInfo
     info.supported_in_api = true;
     info.used_fallback_model_metadata = false;
 
-    if let Some(ctx) = descriptor.limits.context_window_tokens {
-        info.context_window = Some(ctx as i64);
-        info.max_context_window = Some(ctx as i64);
-    }
+    // Checked context window conversion; unknown context remains None (never 272,000 fallback)
+    let context_window = match descriptor.limits.context_window_tokens {
+        Some(tokens) => {
+            let converted = i64::try_from(tokens).map_err(|_| {
+                RuntimeSessionError::ModelMetadataOutOfRange(format!(
+                    "Model '{slug}' context_window_tokens '{tokens}' exceeds i64 range"
+                ))
+            })?;
+            Some(converted)
+        }
+        None => None,
+    };
+    info.context_window = context_window;
+    info.max_context_window = context_window;
 
-    if descriptor.capabilities.reasoning == CapabilitySupport::Supported {
-        info.default_reasoning_level = Some(ReasoningEffort::Medium);
-        info.supported_reasoning_levels = vec![
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Low,
-                description: "Low reasoning effort".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::Medium,
-                description: "Medium reasoning effort".to_string(),
-            },
-            ReasoningEffortPreset {
-                effort: ReasoningEffort::High,
-                description: "High reasoning effort".to_string(),
-            },
-        ];
+    // Explicit input modalities derived solely from descriptor capabilities
+    let mut modalities = vec![InputModality::Text];
+    if descriptor.capabilities.vision_input == CapabilitySupport::Supported {
+        modalities.push(InputModality::Image);
     }
+    if descriptor.capabilities.audio_input == CapabilitySupport::Supported {
+        modalities.push(InputModality::Audio);
+    }
+    info.input_modalities = modalities;
 
-    info
+    // Do not invent synthetic reasoning effort levels
+    info.supported_reasoning_levels = Vec::new();
+    info.default_reasoning_level = None;
+
+    // Disable provider-native server search while preserving host tool instructions
+    info.supports_search_tool = false;
+    info.include_skills_usage_instructions = true;
+    info.include_plugin_usage_instructions = true;
+    info.include_apps_usage_instructions = true;
+
+    Ok(info)
 }
 
 /// Static, zero-discovery model manager serving model definitions directly from
@@ -62,17 +85,20 @@ pub struct StaticModelsManager {
 
 impl StaticModelsManager {
     /// Constructs a `StaticModelsManager` from descriptors.
-    pub fn new(auth_manager: Option<Arc<AuthManager>>, descriptors: &[ModelDescriptor]) -> Self {
-        let models: Vec<ModelInfo> = descriptors
-            .iter()
-            .map(model_descriptor_to_model_info)
-            .collect();
+    pub fn new(
+        auth_manager: Option<Arc<AuthManager>>,
+        descriptors: &[ModelDescriptor],
+    ) -> Result<Self, RuntimeSessionError> {
+        let mut models = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            models.push(model_descriptor_to_model_info(descriptor)?);
+        }
         let model_count = models.len();
         let inner = codex_models_manager::manager::StaticModelsManager::new(
             auth_manager,
             ModelsResponse { models },
         );
-        Self { inner, model_count }
+        Ok(Self { inner, model_count })
     }
 
     /// Converts this manager into a shared dynamic reference suitable for Codex sessions.

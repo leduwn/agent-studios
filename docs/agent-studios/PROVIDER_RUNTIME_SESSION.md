@@ -77,38 +77,61 @@ In Agent Studios, all provider and model metadata is managed authoritatively by 
 
 ### Translation Semantics (`model_descriptor_to_model_info`)
 
-| Field | Source / Transformation |
-| :--- | :--- |
-| `slug` | `descriptor.id.as_str()` |
-| `display_name` | `descriptor.display_name.clone()` |
-| `description` | `Some("{display_name} via Agent Studios")` |
-| `visibility` | `ModelVisibility::List` |
-| `priority` | `0` |
-| `supported_in_api` | `true` |
-| `used_fallback_model_metadata` | `false` |
-| `context_window` / `max_context_window` | Mapped from `descriptor.limits.context_window_tokens` |
-| `default_reasoning_level` | `Some(ReasoningEffort::Medium)` when `capabilities.reasoning == Supported` |
-| `supported_reasoning_levels` | `[Low, Medium, High]` presets when `capabilities.reasoning == Supported` |
+In Milestone M07.6.1, `model_descriptor_to_model_info` is fallible (`Result<ModelInfo, RuntimeSessionError>`) and strictly scrubbed to eliminate all synthetic fallback defaults inherited from upstream `codex_models_manager::model_info::model_info_from_slug`:
+
+| Field | Source / Transformation | Fallback Scrubbing Invariant |
+| :--- | :--- | :--- |
+| `slug` | `descriptor.id.as_str()` | Exact model identifier |
+| `display_name` | `descriptor.display_name.clone()` | Preserved |
+| `description` | `Some("{display_name} via Agent Studios")` | Informational |
+| `visibility` | `ModelVisibility::List` | Discoverable in thread |
+| `priority` | `0` | Default priority |
+| `supported_in_api` | `true` | Explicitly supported |
+| `used_fallback_model_metadata` | `false` | Explicitly marked non-fallback |
+| `supports_search_tool` | `false` | Scrubbed server-hosted search tool |
+| `context_window` / `max_context_window` | Checked conversion from `descriptor.limits.context_window_tokens` via `i64::try_from(ctx)` | If `None`, set strictly to `None` (never retains synthetic 272,000 fallback). Overflow returns `RuntimeSessionError::ModelMetadataOutOfRange`. |
+| `input_modalities` | Derived from `descriptor.capabilities` | Explicitly constructed: always `[Text]`; includes `Image` iff `vision_input == Supported`; includes `Audio` iff `audio_input == Supported`. |
+| `default_reasoning_level` | `None` | Synthetic default reasoning level cleared |
+| `supported_reasoning_levels` | `vec![]` | Synthetic `[Low, Medium, High]` presets eliminated |
+| `include_skills_usage_instructions` | `true` | Preserved host instructions |
+| `include_agent_descriptions_instructions` | `true` | Preserved host instructions |
+| `include_shell_command_descriptions_instructions` | `true` | Preserved host instructions |
 
 ---
 
-## 4. Runtime Session Factory & Dual Execution Paths
+## 4. Runtime Session Factory & Execution Semantics (M07.6.1)
 
-`AgentStudiosRuntimeSessionFactory` converts catalog definitions into injection-ready `PreparedRuntimeSession` objects.
+`AgentStudiosRuntimeSessionFactory` converts catalog definitions into injection-ready `PreparedRuntimeSession` objects using an authoritative model reference.
 
-### Dual Execution Paths
+### Authoritative `ModelRef` Contract
 
-1. **Native `OpenAiResponses` Bridge**:
-   - Provider instances configured with `ProtocolFamily::OpenAiResponses` resolve via `CodexProviderBridge::resolve`.
-   - Attaches `inference_backend = None`.
-   - Codex uses its native Responses client directly against the provider's endpoint with resolved credentials.
+- `prepare_runtime_session(&self, model_ref: &ModelRef) -> Result<PreparedRuntimeSession, RuntimeSessionError>` requires an immutable composite key `ModelRef(ProviderInstanceId, ModelId)`.
+- Eliminates accidental or alphabetical default model fallbacks; sessions are strictly bound to the requested model.
 
-2. **Custom Protocols (`OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`)**:
-   - Provider instances configured with custom protocols construct a session-scoped `RuntimeRouter`.
-   - The router registers the instance and all its associated models.
-   - Attaches the router as `Arc<dyn ModelInferenceBackend>`.
-   - Forces `RemoteCompactionSupport::Unsupported`.
-   - Codex compiles semantic `ResponsesApiRequest` payloads and routes them through the router, which drives HTTP SSE streaming via the appropriate protocol driver and emits canonical `ResponseEvent` streams.
+### Custom Provider Login Independence
+
+- Custom protocol providers (`OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`) inject `auth_manager = None` into both `create_model_provider_with_inference_backend` and `StaticModelsManager::new`.
+- This decouples custom providers completely from Codex account login mechanisms, refresh tokens, and authentication prompts.
+
+### Protocol Routing & Wire Safety
+
+- Explicitly routes:
+  - `ProtocolFamily::OpenAiResponses`: Native Responses bridge (`inference_backend = None`).
+  - `ProtocolFamily::OpenAiChatCompletions`, `ProtocolFamily::AnthropicMessages`, `ProtocolFamily::GeminiGenerateContent`: Driven by session-scoped `RuntimeRouter`.
+  - `ProtocolFamily::Custom(name)`: Fails closed immediately with `RuntimeSessionError::UnsupportedProtocol(name)`.
+- Protocol adapters unpack nested tool namespaces (`{"type": "namespace", "tools": [...]}`) into flat function definitions for non-Responses protocols while skipping server-hosted Responses API tools (`web_search`, `tool_search`).
+
+### Prepared Session Introspection & Secret Safety
+
+- `PreparedRuntimeSession` stores:
+  - `model_ref: ModelRef`
+  - `protocol: ProtocolFamily`
+  - `model_provider_id: String`
+  - `selected_model: String`
+  - `available_models: Vec<String>`
+  - `model_runtime_override: ModelRuntimeOverride`
+- Implements accessors: `model_ref()`, `provider_instance_id()`, `protocol()`, `selected_model()`, `model_provider_id()`, `available_models()`, `model_runtime_override()`.
+- Implements secret-free `Debug` formatting redacting internal implementation pointers.
 
 ### Session-Scoped Router Isolation
 
@@ -121,10 +144,10 @@ To prevent route and state collisions across concurrent sessions:
 
 ## 5. Thread Injection Lifecycle
 
-1. **Selection**: Control plane selects `ProviderInstanceId` and optional target `ModelId`.
+1. **Selection**: Control plane selects authoritative `ModelRef(ProviderInstanceId, ModelId)`.
 2. **Preparation**:
    ```rust
-   let prepared = factory.prepare_runtime_session(&instance_id, target_model_id)?;
+   let prepared = factory.prepare_runtime_session(&model_ref)?;
    ```
 3. **Options Injection**:
    ```rust
@@ -135,4 +158,4 @@ To prevent route and state collisions across concurrent sessions:
    ```rust
    let thread = thread_manager.start_thread_with_options(options).await?;
    ```
-5. **Session Execution**: The thread executes with strict pairing between static model metadata and runtime inference dispatch.
+5. **Session Execution**: The thread executes with strict pairing between static model metadata and runtime inference dispatch. Internal child/fork sessions inherit the runtime override when provider IDs match.

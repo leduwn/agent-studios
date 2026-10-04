@@ -22,6 +22,12 @@ pub enum RuntimeSessionError {
         provider_instance_id: ProviderInstanceId,
     },
 
+    #[error("Unsupported protocol: {0}")]
+    UnsupportedProtocol(String),
+
+    #[error("Model metadata limit out of range: {0}")]
+    ModelMetadataOutOfRange(String),
+
     #[error("Transport error: {0}")]
     Transport(#[from] TransportError),
 

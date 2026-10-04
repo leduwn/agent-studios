@@ -37,3 +37,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1.40", features = ["sync", "time", "rt-multi-thread", "macros"] }
 wiremock = "0.6"
 tempfile = "3"
+codex-exec-server = { path = "../../../codex-rs/exec-server" }
+codex-extension-api = { path = "../../../codex-rs/ext/extension-api" }
+codex-home = { path = "../../../codex-rs/codex-home" }
+codex-thread-store = { path = "../../../codex-rs/thread-store" }
+codex-attachment-store = { path = "../../../codex-rs/attachment-store" }
+codex-config = { path = "../../../codex-rs/config" }
+codex-utils-absolute-path = { path = "../../../codex-rs/utils/absolute-path" }

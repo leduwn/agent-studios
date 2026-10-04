@@ -170,6 +170,36 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - Integration tests:
   - Verified native Responses bridge, Anthropic Messages, Gemini generateContent, Chat Completions, zero discovery, error handling, and session isolation.
 
+### M07.6.1: Runtime Session Semantics & Full Thread E2E (Completed on `feat/provider-runtime-session-factory`)
+
+- Authoritative `ModelRef` Contract:
+  - Made `ModelRef(ProviderInstanceId, ModelId)` the mandatory, authoritative primary input to `prepare_runtime_session`.
+  - Eliminated arbitrary or alphabetical default model fallbacks; session execution is strictly bound to user-selected model key.
+- `PreparedRuntimeSession` Metadata & Introspection:
+  - Stored immutable `ModelRef` and `ProtocolFamily` inside `PreparedRuntimeSession`.
+  - Exposed accessors: `model_ref()`, `provider_instance_id()`, `protocol()`, `selected_model()`, `model_provider_id()`, `available_models()`.
+  - Implemented secret-free `Debug` formatting redacting internal implementation pointers.
+- Scrubbed `ModelInfo` Metadata & Fallback Elimination:
+  - Prevented synthetic default metadata from `model_info_from_slug`:
+    - If `limits.context_window_tokens` is `None`, context limits are set strictly to `None` (preventing synthetic 272k fallback).
+    - Checked conversion with `i64::try_from(ctx)` returning `RuntimeSessionError::ModelMetadataOutOfRange` on overflow.
+    - Explicit input modalities: always includes `Text`; includes `Image` only if `vision_input == Supported`; includes `Audio` only if `audio_input == Supported`.
+    - Scrubbed synthetic `Low/Medium/High` reasoning levels: set `supported_reasoning_levels = vec![]` and `default_reasoning_level = None`.
+    - Preserved host instructions (`include_skills_usage_instructions = true`, etc.) while clearing `used_fallback_model_metadata = false` and `supports_search_tool = false`.
+- Custom Provider Login Independence:
+  - Injected `auth_manager = None` for custom protocols into `create_model_provider_with_inference_backend` and `StaticModelsManager::new`.
+  - Fully decoupled custom providers from Codex account auth loops, login flows, and token refresh interceptors.
+- Protocol Adapters Tool Namespace Unpacking:
+  - In `request.rs` across ChatCompletions, Anthropic Messages, and Gemini adapters, unpacked nested namespace tool groups (`{"type": "namespace", "tools": [...]}`) into flat function definitions.
+  - Gracefully skipped Responses API server-hosted tools (`web_search`, `tool_search`) during translation to function-calling wire formats.
+- Comprehensive Thread E2E Integration Suite (`thread_e2e_tests.rs`):
+  - Real `ThreadManager` start and turn execution against local wiremock endpoints across all 4 supported protocols (OpenAI Responses native bridge, OpenAI Chat Completions, Anthropic Messages, and Google Gemini generateContent).
+  - Validated that custom backend is used, `/models` discovery is never called, no login is required, and failure in custom protocol never falls back silently to `/responses`.
+  - Inspected outbound wire requests verifying natural Codex host tools (`exec_command`, `apply_patch`, etc.) are preserved.
+  - Verified child and fork runtime inheritance: internal sessions (`SessionSource::Internal`) inherit parent override when provider IDs match, and isolate when provider IDs differ.
+- UI Localization Note:
+  - UI provider and model selection interfaces require full i18n localization support (English and Vietnamese) in desktop/Code-OSS milestones (M13+).
+
 ### M08: Internal Multi-Agent Extension
 - Enhance internal agent runner to instantiate multiple isolated agent configurations.
 - Allow per-agent role specifications, provider assignments, reasoning depths, and tool budgets.

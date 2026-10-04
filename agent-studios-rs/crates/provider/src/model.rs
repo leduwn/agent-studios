@@ -134,6 +134,14 @@ impl ModelRef {
             model_id,
         }
     }
+
+    pub fn provider_instance_id(&self) -> &ProviderInstanceId {
+        &self.provider_instance_id
+    }
+
+    pub fn model_id(&self) -> &ModelId {
+        &self.model_id
+    }
 }
 
 impl fmt::Display for ModelRef {

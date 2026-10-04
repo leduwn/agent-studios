@@ -217,13 +217,13 @@ fn test_tools_schema_flat_to_nested_translation() {
 #[test]
 fn test_unsupported_tool_type_rejected() {
     let mut req = create_base_request();
-    let web_search_tools = json!([
+    let unsupported_tools = json!([
         {
-            "type": "web_search",
-            "description": "Search the web"
+            "type": "unsupported_custom_tool",
+            "description": "Unsupported custom tool"
         }
     ]);
-    let raw = serde_json::value::to_raw_value(&web_search_tools).unwrap();
+    let raw = serde_json::value::to_raw_value(&unsupported_tools).unwrap();
     req.tools = Some(ResponsesApiTools::from(Arc::from(raw)));
 
     let err = ChatCompletionsAdapter::translate_request(&req).unwrap_err();

@@ -4,7 +4,6 @@ use agent_studios_codex_bridge::{
     CodexBridgeOptions, CodexProviderBridge, deterministic_codex_provider_key,
 };
 use agent_studios_provider::ProviderCatalog;
-use agent_studios_provider::id::{ModelId, ProviderInstanceId};
 use agent_studios_provider::model::{ModelDescriptor, ModelRef};
 use agent_studios_provider::protocol::ProtocolFamily;
 use agent_studios_runtime_transport::diagnostic::{
@@ -95,22 +94,26 @@ impl AgentStudiosRuntimeSessionFactory {
         &self.continuation_manager
     }
 
-    /// Prepares a runtime session override for the specified provider instance and model.
+    /// Prepares a runtime session override for the specified authoritative `ModelRef`.
     ///
     /// - Verifies that the provider instance exists and is enabled.
     /// - Collects all registered model descriptors for this instance.
-    /// - Verifies or derives the target model slug.
-    /// - Constructs a static, zero-discovery `StaticModelsManager`.
+    /// - Verifies that the target model is explicitly registered for this provider instance.
+    /// - Constructs a static, zero-discovery `StaticModelsManager` with scrubbed metadata.
     /// - Configures the provider runtime:
     ///   - For `OpenAiResponses`: resolves via `CodexProviderBridge` with native execution.
     ///   - For custom protocols (`OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`):
     ///     instantiates a session-scoped `RuntimeRouter` registering all instance models.
+    ///   - For `Custom(name)`: fails closed with `RuntimeSessionError::UnsupportedProtocol`.
+    /// - Isolates custom providers from Codex `AuthManager` to ensure login-independence.
     /// - Strictly pairs `SharedModelProvider` and `SharedModelsManager` in `ModelRuntimeOverride`.
     pub fn prepare_runtime_session(
         &self,
-        instance_id: &ProviderInstanceId,
-        target_model_id: Option<&ModelId>,
+        model_ref: &ModelRef,
     ) -> Result<PreparedRuntimeSession, RuntimeSessionError> {
+        let instance_id = model_ref.provider_instance_id();
+        let target_model_id = model_ref.model_id();
+
         // 1. Fetch provider instance
         let instance = self
             .catalog
@@ -137,39 +140,38 @@ impl AgentStudiosRuntimeSessionFactory {
         // Sort deterministically by id
         models.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
 
-        // 3. Resolve selected model
-        let selected_model = match target_model_id {
-            Some(target_id) => {
-                let found = models.iter().find(|m| &m.id == target_id);
-                if found.is_none() {
-                    return Err(RuntimeSessionError::ModelNotFound {
-                        model_id: target_id.clone(),
-                        provider_instance_id: *instance_id,
-                    });
-                }
-                target_id.as_str().to_string()
-            }
-            None => models[0].id.as_str().to_string(),
+        // 3. Verify target model exists
+        let found = models.iter().find(|m| &m.id == target_model_id);
+        if found.is_none() {
+            return Err(RuntimeSessionError::ModelNotFound {
+                model_id: target_model_id.clone(),
+                provider_instance_id: *instance_id,
+            });
+        }
+
+        // 4. Custom providers must be login-independent (auth_manager = None)
+        let custom_auth_manager = match &instance.protocol {
+            ProtocolFamily::OpenAiResponses => self.auth_manager.clone(),
+            _ => None,
         };
 
-        // 4. Build StaticModelsManager (zero discovery, static catalog)
+        // 5. Build StaticModelsManager (zero discovery, static catalog, scrubbed metadata)
         let models_manager =
-            StaticModelsManager::new(self.auth_manager.clone(), &models).into_shared();
+            StaticModelsManager::new(custom_auth_manager.clone(), &models)?.into_shared();
 
-        // 5. Deterministic Codex provider key
+        // 6. Deterministic Codex provider key
         let codex_provider_key = deterministic_codex_provider_key(instance_id);
 
-        // 6. Build Provider info & inference backend
+        // 7. Build Provider info & inference backend with explicit protocol matching
         let (provider_info, inference_backend) = match &instance.protocol {
             ProtocolFamily::OpenAiResponses => {
-                let target_id = ModelId::new(&selected_model)
-                    .map_err(|e| RuntimeSessionError::Config(e.to_string()))?;
-                let model_ref = ModelRef::new(*instance_id, target_id);
                 let binding =
-                    CodexProviderBridge::resolve(&self.catalog, &model_ref, self.bridge_options)?;
+                    CodexProviderBridge::resolve(&self.catalog, model_ref, self.bridge_options)?;
                 (binding.provider_info, None)
             }
-            _ => {
+            ProtocolFamily::OpenAiChatCompletions
+            | ProtocolFamily::AnthropicMessages
+            | ProtocolFamily::GeminiGenerateContent => {
                 // Session-scoped RuntimeRouter
                 let router = RuntimeRouter::try_new_with_options(
                     self.secret_resolver.clone(),
@@ -194,15 +196,18 @@ impl AgentStudiosRuntimeSessionFactory {
                 };
                 (provider_info, Some(backend))
             }
+            ProtocolFamily::Custom(name) => {
+                return Err(RuntimeSessionError::UnsupportedProtocol(name.clone()));
+            }
         };
 
         let shared_provider = create_model_provider_with_inference_backend(
             provider_info,
-            self.auth_manager.clone(),
+            custom_auth_manager,
             inference_backend,
         );
 
-        // 7. Strictly pair provider and models manager in ModelRuntimeOverride
+        // 8. Strictly pair provider and models manager in ModelRuntimeOverride
         let runtime_override = ModelRuntimeOverride::new(shared_provider, models_manager);
 
         let available_models: Vec<String> = models
@@ -212,8 +217,9 @@ impl AgentStudiosRuntimeSessionFactory {
 
         Ok(PreparedRuntimeSession::new(
             runtime_override,
+            model_ref.clone(),
+            instance.protocol.clone(),
             codex_provider_key,
-            selected_model,
             available_models,
         ))
     }
@@ -221,9 +227,8 @@ impl AgentStudiosRuntimeSessionFactory {
     /// Alias for `prepare_runtime_session`.
     pub fn prepare_session(
         &self,
-        instance_id: &ProviderInstanceId,
-        target_model_id: Option<&ModelId>,
+        model_ref: &ModelRef,
     ) -> Result<PreparedRuntimeSession, RuntimeSessionError> {
-        self.prepare_runtime_session(instance_id, target_model_id)
+        self.prepare_runtime_session(model_ref)
     }
 }

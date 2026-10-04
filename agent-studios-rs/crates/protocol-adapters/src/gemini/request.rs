@@ -15,6 +15,25 @@ use super::types::{
     GeminiThinkingLevel, GeminiThinkingPolicy, GeminiTool, GeminiToolConfig,
 };
 
+fn flatten_tool_definitions(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut flattened = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let tool_type = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if tool_type == "namespace" {
+            if let Some(inner) = tool.get("tools").and_then(|v| v.as_array()) {
+                flattened.extend(flatten_tool_definitions(inner));
+            }
+        } else if tool_type == "web_search" || tool_type == "tool_search" {
+            // Server-hosted Responses API tools have no counterpart in wire formats that only accept functions;
+            // skip them rather than failing the entire request.
+            continue;
+        } else {
+            flattened.push(tool.clone());
+        }
+    }
+    flattened
+}
+
 /// Translates a Codex `ResponsesApiRequest` into a Gemini `generateContent` wire request.
 pub fn translate_request(
     request: &ResponsesApiRequest,
@@ -427,7 +446,8 @@ pub fn translate_request(
         })?;
 
         if let Some(tool_array) = tools_json.as_array() {
-            for tool in tool_array {
+            let flattened = flatten_tool_definitions(tool_array);
+            for tool in &flattened {
                 let tool_type = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if tool_type != "function" {
                     return Err(GeminiAdapterError::UnsupportedToolType(format!(

@@ -74,6 +74,25 @@ pub struct AnthropicRequestTranslation {
     pub warnings: Vec<AnthropicAdapterWarning>,
 }
 
+fn flatten_tool_definitions(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut flattened = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let tool_type = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if tool_type == "namespace" {
+            if let Some(inner) = tool.get("tools").and_then(|v| v.as_array()) {
+                flattened.extend(flatten_tool_definitions(inner));
+            }
+        } else if tool_type == "web_search" || tool_type == "tool_search" {
+            // Server-hosted Responses API tools have no counterpart in wire formats that only accept functions;
+            // skip them rather than failing the entire request.
+            continue;
+        } else {
+            flattened.push(tool.clone());
+        }
+    }
+    flattened
+}
+
 /// Translates a Codex `ResponsesApiRequest` into an `AnthropicMessagesRequest`.
 pub fn translate_request(
     codex_req: &ResponsesApiRequest,
@@ -375,8 +394,9 @@ pub fn translate_request(
             )
         })?;
 
-        let mut anthropic_tools = Vec::with_capacity(array.len());
-        for tool_val in array {
+        let flattened = flatten_tool_definitions(array);
+        let mut anthropic_tools = Vec::with_capacity(flattened.len());
+        for tool_val in &flattened {
             let tool_type = tool_val.get("type").and_then(|v| v.as_str()).unwrap_or("");
             if tool_type != "function" {
                 return Err(AnthropicAdapterError::UnsupportedToolType(format!(
