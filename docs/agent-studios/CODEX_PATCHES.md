@@ -66,3 +66,27 @@ This document catalogs all intentional, minimal patches maintained inside the `c
 - **Targeted Verification Tests**:
   - `codex-rs/core/src/model_runtime_tests.rs`: Verifies tuple encapsulation, accessors, into_parts decomposition, and clone semantics.
   - `codex-rs/core/src/thread_manager_tests.rs`: Verifies `StartThreadOptions` initialization with and without override.
+
+### Patch 003: Generic Spawn Runtime Override Seam (Milestone M08)
+
+- **Seam Commit**: `d61b153bce` (branch: `feat/internal-multi-agent-runtime`)
+- **Purpose**: Enables external orchestrators and parent threads to supply an explicit
+  `model_runtime_override: Option<ModelRuntimeOverride>` in `SpawnRequest` when launching
+  sub-agents via `AgentControl::spawn`. When supplied, the child agent adopts the authoritative
+  provider instance and models manager; when `None`, existing legacy inheritance from the
+  parent thread is preserved. Additionally exposes `CodexThread::agent_control(&self)` as a
+  clean façade.
+- **Files Modified**:
+  - `codex-rs/core/src/agent/api.rs`: Adds `pub model_runtime_override: Option<ModelRuntimeOverride>`
+    to `SpawnRequest`.
+  - `codex-rs/core/src/agent/control.rs`: Forwards `request.model_runtime_override` through
+    `spawn_agent_internal` into `spawn_new_thread_with_source` and `spawn_forked_thread`.
+  - `codex-rs/core/src/thread_manager.rs`: Extends `spawn_new_thread_with_source` and
+    `fork_thread_with_source` to accept `model_runtime_override`. Implements explicit override
+    precedence over parent session inheritance.
+  - `codex-rs/core/src/thread.rs`: Adds `pub fn agent_control(&self) -> Arc<dyn AgentControl>`
+    façade method on `CodexThread`.
+- **Targeted Verification Tests**:
+  - `codex-rs/core/tests/spawn_runtime_override_tests.rs`: Tests explicit override precedence over
+    parent inheritance, `None` fallback inheritance from parent session, and
+    `CodexThread::agent_control` façade functionality.

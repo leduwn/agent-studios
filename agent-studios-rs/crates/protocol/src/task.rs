@@ -42,9 +42,12 @@ impl TaskState {
                 | (Self::Ready, Self::Running | Self::Blocked | Self::Cancelled)
                 | (
                     Self::Running,
-                    Self::Paused | Self::Succeeded | Self::Failed | Self::Cancelled
+                    Self::Ready | Self::Paused | Self::Succeeded | Self::Failed | Self::Cancelled
                 )
-                | (Self::Paused, Self::Running | Self::Cancelled | Self::Failed)
+                | (
+                    Self::Paused,
+                    Self::Ready | Self::Running | Self::Cancelled | Self::Failed
+                )
         )
     }
 

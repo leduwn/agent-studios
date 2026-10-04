@@ -8,6 +8,7 @@ members = [
     "crates/protocol-adapters",
     "crates/runtime-transport",
     "crates/runtime-session",
+    "crates/internal-agent",
 ]
 
 [workspace.package]

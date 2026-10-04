@@ -200,9 +200,55 @@ This roadmap defines the strategic progression for building Agent Studios upon t
 - UI Localization Note:
   - UI provider and model selection interfaces require full i18n localization support (English and Vietnamese) in desktop/Code-OSS milestones (M13+).
 
-### M08: Internal Multi-Agent Extension
-- Enhance internal agent runner to instantiate multiple isolated agent configurations.
-- Allow per-agent role specifications, provider assignments, reasoning depths, and tool budgets.
+### M08: Internal Multi-Agent Runtime (Completed on `feat/internal-multi-agent-runtime`)
+
+- Establish `agent-studios-internal-agent` crate (`agent-studios-internal-agent`).
+- Generic Codex spawn runtime override seam (Patch 003):
+  - `model_runtime_override: Option<ModelRuntimeOverride>` added to `SpawnRequest`.
+  - Threaded through `AgentControl::spawn`, `spawn_agent_internal`, `spawn_new_thread_with_source`,
+    `spawn_forked_thread`, and `fork_thread_with_source`.
+  - Explicit child override takes precedence over parent inheritance; `None` retains existing
+    parent-thread inheritance.
+  - `CodexThread::agent_control(&self) -> Arc<dyn AgentControl>` clean façade.
+- Multi-agent specifications & profiles:
+  - `InternalAgentSpec`: independent role, display name, authoritative `ModelRef`, reasoning configuration
+    (`AgentReasoningSelection`), budget (`AgentExecutionBudget`), and workspace mode (`WorkspaceAccessMode`).
+  - `InternalTeamSpec`: team structure with coordinator and workers, alias uniqueness validation,
+    and agent lookup by alias or ID.
+- Single-writer ControlPlane actor (`ControlPlaneActor`, `ControlPlaneHandle`):
+  - Dedicated background Tokio actor owning `ControlPlane` exclusively to guarantee atomic state
+    transactions (`commit_transaction`) and deterministic FIFO event ordering without lock contention.
+  - Added `register_agent_with_id` in `ControlPlane` engine and actor.
+  - Task state machine enhancement in `agent-studios-protocol`: permitted `Running -> Ready` and
+    `Paused -> Ready` for task retries and requeuing.
+- Workspace access policy arbitrator (`WorkspacePolicyArbitrator`, `WorkspaceLease`):
+  - Enforces single `Mutating` lease exclusivity or parallel concurrent `ReadOnly` leases per workspace
+    key with RAII automatic release on drop.
+- Execution budget enforcement (`AgentBudgetTracker`):
+  - Enforces configurable bounds on turn count, tool call count, and wall-clock execution duration,
+    returning typed errors on budget exhaustion.
+- Structured coordinator DAG planning & validation:
+  - `CoordinatorDecision` (`Plan`, `Complete`, `Fail`) and `PlannedTask`.
+  - `CoordinatorPlanValidator`: acyclicity verification using Kahn's topological sort algorithm,
+    task key uniqueness, dependency existence, and atomic materialization into `ControlPlane`.
+- Supervisor orchestration engine (`AgentStudiosSupervisor`):
+  - Coordinates team boot, planning, materialization, task dependency resolution, lease acquisition,
+    run lifecycle tracking, and failure policies (`FailFast`, `ContinueIndependent`, `RetryTask`).
+- Pluggable execution backends:
+  - `AgentExecutor` trait decoupling execution from scheduling.
+  - `MockAgentExecutor` for deterministic unit testing.
+  - `CodexAgentExecutor` using `AgentStudiosRuntimeSessionFactory` for real thread runtime sessions.
+- Comprehensive test coverage (26 tests in crate):
+  - `profile_and_team_tests`: alias validation, duplicate rejection, reasoning effort, budget builder.
+  - `control_plane_actor_tests`: lifecycle, dependency unblocking, run states, concurrent handles.
+  - `workspace_policy_tests`: mutator exclusivity, concurrent readers, timeout acquisition.
+  - `budget_tests`: turn limits, tool call limits, unlimited budget.
+  - `coordinator_tests`: linear DAG, diamond DAG, cycle rejection, self-cycle rejection,
+    dependency validation, materialization.
+  - `supervisor_tests`: full success workflow, retry policy, fail-fast cascading cancellation.
+  - `cross_provider_team_e2e_tests`: full multi-agent execution with 3 distinct mock servers
+    (Coordinator on Gemini 2.5 Pro, Coder on Claude 3.7 Sonnet, Reviewer on GPT-4o), secret isolation,
+    and same-model-slug cross-instance isolation.
 
 ### M09: Worktree, Task & Artifact Orchestration
 - Extend Git worktree isolation for concurrent workers based on upstream Codex worktree infrastructure.

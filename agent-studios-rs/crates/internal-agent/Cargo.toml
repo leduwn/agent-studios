@@ -1,0 +1,41 @@
+[package]
+name = "agent-studios-internal-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-control-plane = { path = "../control-plane" }
+agent-studios-provider = { path = "../provider" }
+agent-studios-protocol-adapters = { path = "../protocol-adapters" }
+agent-studios-runtime-transport = { path = "../runtime-transport" }
+agent-studios-runtime-session = { path = "../runtime-session" }
+agent-studios-codex-bridge = { path = "../codex-bridge" }
+codex-core-api = { path = "../../../codex-rs/core-api" }
+codex-core = { path = "../../../codex-rs/core" }
+codex-protocol = { path = "../../../codex-rs/protocol" }
+tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
+tokio-util = { version = "0.7" }
+tracing = "0.1"
+async-trait = "0.1"
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["sync", "time", "rt-multi-thread", "macros"] }
+wiremock = "0.6"
+tempfile = "3"
+codex-login = { path = "../../../codex-rs/login" }
+codex-exec-server = { path = "../../../codex-rs/exec-server" }
+codex-extension-api = { path = "../../../codex-rs/ext/extension-api" }
+codex-home = { path = "../../../codex-rs/codex-home" }
+codex-thread-store = { path = "../../../codex-rs/thread-store" }
+codex-attachment-store = { path = "../../../codex-rs/attachment-store" }
+codex-config = { path = "../../../codex-rs/config" }
+codex-utils-absolute-path = { path = "../../../codex-rs/utils/absolute-path" }

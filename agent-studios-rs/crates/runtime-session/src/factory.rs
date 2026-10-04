@@ -94,6 +94,11 @@ impl AgentStudiosRuntimeSessionFactory {
         &self.continuation_manager
     }
 
+    /// Returns a reference to the transport options.
+    pub fn transport_options(&self) -> &RuntimeTransportOptions {
+        &self.transport_options
+    }
+
     /// Prepares a runtime session override for the specified authoritative `ModelRef`.
     ///
     /// - Verifies that the provider instance exists and is enabled.

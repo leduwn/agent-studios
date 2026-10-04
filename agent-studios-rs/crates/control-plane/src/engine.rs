@@ -717,11 +717,29 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         kind: AgentKind,
         role: Option<String>,
     ) -> Result<AgentDescriptor, ControlPlaneError> {
+        self.register_agent_with_id(studio_id, AgentId::new(), display_name, kind, role)
+    }
+
+    pub fn register_agent_with_id(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        display_name: impl Into<String>,
+        kind: AgentKind,
+        role: Option<String>,
+    ) -> Result<AgentDescriptor, ControlPlaneError> {
         if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
 
-        let agent = AgentDescriptor::new(studio_id, display_name, kind, role);
+        let agent = AgentDescriptor {
+            id: agent_id,
+            studio_id,
+            display_name: display_name.into(),
+            kind,
+            state: AgentState::Registered,
+            role,
+        };
         let event = ControlPlaneEvent::AgentRegistered {
             agent: agent.clone(),
         };
