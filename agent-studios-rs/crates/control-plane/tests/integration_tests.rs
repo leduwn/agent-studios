@@ -19,7 +19,7 @@ use agent_studios_protocol::event::{
 use agent_studios_protocol::id::{AgentId, ApprovalId, ArtifactId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{TaskRecord, TaskState};
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
 
 // ============================================================================
 // FailingEventStore Mock for Failure Injection
@@ -1278,4 +1278,170 @@ fn test_replay_corrupted_cross_studio_dependency_removed() {
 
     let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
     assert!(matches!(res, Err(ReplayError::StudioMismatch { .. })));
+}
+
+#[test]
+fn test_create_task_batch_success() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Batch Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Worker", AgentKind::Internal, None)
+        .unwrap();
+
+    let batch = vec![
+        BatchTaskSpec {
+            key: "task_a".to_string(),
+            title: "Task A".to_string(),
+            description: "First task".to_string(),
+            assigned_agent_id: Some(agent.id),
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec![],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "task_b".to_string(),
+            title: "Task B".to_string(),
+            description: "Second task depends on A".to_string(),
+            assigned_agent_id: Some(agent.id),
+            parent_task_key: Some("task_a".to_string()),
+            parent_task_id: None,
+            dependency_keys: vec!["task_a".to_string()],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "task_c".to_string(),
+            title: "Task C".to_string(),
+            description: "Third task depends on B".to_string(),
+            assigned_agent_id: Some(agent.id),
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec!["task_b".to_string()],
+            dependency_task_ids: vec![],
+        },
+    ];
+
+    let tasks = cp.create_task_batch(studio.id, batch).unwrap();
+    assert_eq!(tasks.len(), 3);
+
+    let task_a = &tasks[0];
+    let task_b = &tasks[1];
+    let task_c = &tasks[2];
+
+    assert_eq!(task_a.state, TaskState::Ready);
+    assert_eq!(task_b.state, TaskState::Blocked);
+    assert_eq!(task_c.state, TaskState::Blocked);
+
+    assert_eq!(task_b.parent_task_id, Some(task_a.id));
+    assert_eq!(task_b.dependencies, vec![task_a.id]);
+    assert_eq!(task_c.dependencies, vec![task_b.id]);
+
+    let events = cp.events_for_studio(studio.id, 1).unwrap();
+    assert_eq!(events.len(), 5);
+}
+
+#[test]
+fn test_create_task_batch_transactional_all_or_zero() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Batch Atomic Studio").unwrap();
+
+    let initial_task_count = cp.all_tasks().count();
+    let initial_event_count = cp.events_for_studio(studio.id, 1).unwrap().len();
+
+    let batch = vec![
+        BatchTaskSpec {
+            key: "t1".to_string(),
+            title: "T1".to_string(),
+            description: "desc1".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec![],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "t2".to_string(),
+            title: "T2".to_string(),
+            description: "desc2".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec!["t1".to_string()],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "t3".to_string(),
+            title: "T3".to_string(),
+            description: "desc3".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec!["t2".to_string()],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "t4".to_string(),
+            title: "T4".to_string(),
+            description: "desc4".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec!["non_existent_key".to_string()],
+            dependency_task_ids: vec![],
+        },
+    ];
+
+    let result = cp.create_task_batch(studio.id, batch);
+    assert!(result.is_err());
+
+    assert_eq!(cp.all_tasks().count(), initial_task_count);
+    assert_eq!(
+        cp.events_for_studio(studio.id, 1).unwrap().len(),
+        initial_event_count
+    );
+}
+
+#[test]
+fn test_create_task_batch_duplicate_key_rejected() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Dup Key Studio").unwrap();
+
+    let batch = vec![
+        BatchTaskSpec {
+            key: "same_key".to_string(),
+            title: "T1".to_string(),
+            description: "desc1".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec![],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "same_key".to_string(),
+            title: "T2".to_string(),
+            description: "desc2".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec![],
+            dependency_task_ids: vec![],
+        },
+    ];
+
+    let result = cp.create_task_batch(studio.id, batch);
+    assert!(result.is_err());
+    assert_eq!(cp.all_tasks().count(), 0);
 }

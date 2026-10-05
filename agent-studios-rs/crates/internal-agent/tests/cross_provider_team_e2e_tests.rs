@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_studios_internal_agent::{
-    AgentExecutionBudget, AgentReasoningEffort, AgentReasoningSelection, CodexAgentExecutor,
-    InternalAgentSpec, InternalTeamSpec, WorkspaceAccessMode,
+    AgentExecutionBudget, AgentExecutionContext, AgentExecutor, AgentReasoningEffort,
+    AgentReasoningSelection, CodexAgentExecutor, InternalAgentSpec, InternalTeamSpec,
+    WorkspaceAccessMode,
 };
-use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_provider::ProviderCatalog;
 use agent_studios_provider::auth::AuthenticationScheme;
 use agent_studios_provider::capabilities::ModelCapabilities;
@@ -639,6 +640,209 @@ fn test_same_model_slug_cross_instance_isolation() {
         assert_eq!(
             reqs_b[0].headers.get("authorization").unwrap(),
             "Bearer token-tenant-B"
+        );
+    });
+}
+
+#[test]
+fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
+    run_with_large_stack(async {
+        let coord_server = MockServer::start().await;
+        let worker_server = MockServer::start().await;
+
+        let coord_sse = "data: {\"id\":\"chat-coord\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Coordinator initialized plan\"},\"finish_reason\":null}]}\n\n\
+                         data: {\"id\":\"chat-coord\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n\
+                         data: [DONE]\n\n";
+
+        let worker_turn1_sse = "data: {\"id\":\"chat-worker-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Worker turn 1 output\"},\"finish_reason\":null}]}\n\n\
+                                data: {\"id\":\"chat-worker-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n\
+                                data: [DONE]\n\n";
+
+        let worker_turn2_sse = "data: {\"id\":\"chat-worker-2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Worker turn 2 reused output\"},\"finish_reason\":null}]}\n\n\
+                                data: {\"id\":\"chat-worker-2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n\
+                                data: [DONE]\n\n";
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("Authorization", "Bearer coord-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(coord_sse),
+            )
+            .mount(&coord_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("Authorization", "Bearer worker-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(worker_turn1_sse),
+            )
+            .up_to_n_times(1)
+            .mount(&worker_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("Authorization", "Bearer worker-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(worker_turn2_sse),
+            )
+            .mount(&worker_server)
+            .await;
+
+        let mut catalog = ProviderCatalog::new();
+        let secret_resolver = Arc::new(
+            InMemorySecretResolver::new()
+                .with_env_secret("COORD_KEY", "coord-token")
+                .with_env_secret("WORKER_KEY", "worker-token"),
+        );
+
+        let coord_instance = register_provider_and_instance(
+            &mut catalog,
+            "coord-provider",
+            "Coord Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &coord_server.uri(),
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "COORD_KEY".to_string(),
+                },
+            },
+        );
+        let coord_model_id = ModelId::new("gpt-4o-coord").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    coord_instance,
+                    coord_model_id.clone(),
+                    "Coord Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let worker_instance = register_provider_and_instance(
+            &mut catalog,
+            "worker-provider",
+            "Worker Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &worker_server.uri(),
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "WORKER_KEY".to_string(),
+                },
+            },
+        );
+        let worker_model_id = ModelId::new("gpt-4o-worker").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    worker_instance,
+                    worker_model_id.clone(),
+                    "Worker Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let catalog = Arc::new(catalog);
+        let continuation_manager = Arc::new(ContinuationManager::new());
+        let factory =
+            AgentStudiosRuntimeSessionFactory::new(catalog, secret_resolver, continuation_manager);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, base_config) = create_test_thread_manager(temp_dir.path()).await;
+
+        let executor = CodexAgentExecutor::new(factory)
+            .with_thread_manager(Arc::new(manager))
+            .with_config(Arc::new(base_config));
+
+        let studio_id = StudioId::new();
+        let run_id = RunId::new();
+
+        let coord_id = AgentId::new();
+        let coord_spec = InternalAgentSpec::new(
+            coord_id,
+            "Coordinator",
+            "Coordinator",
+            ModelRef::new(coord_instance, coord_model_id),
+        );
+
+        let worker_id = AgentId::new();
+        let worker_spec = InternalAgentSpec::new(
+            worker_id,
+            "Worker 1",
+            "Developer",
+            ModelRef::new(worker_instance, worker_model_id),
+        )
+        .with_workspace_access(WorkspaceAccessMode::ReadOnly);
+
+        // 1. Root coordinator start
+        let coord_ctx = AgentExecutionContext {
+            studio_id,
+            task_id: Some(TaskId::new()),
+            run_id: Some(run_id),
+            agent_spec: coord_spec,
+            prompt: "Plan the project".to_string(),
+            budget: AgentExecutionBudget::default(),
+            parent_agent_id: None,
+        };
+
+        let coord_res = executor.execute_agent(coord_ctx).await.unwrap();
+        assert!(coord_res.success);
+        assert!(coord_res.output.contains("Coordinator initialized plan"));
+
+        // 2. Child worker spawn (turn 1)
+        let worker_turn1_ctx = AgentExecutionContext {
+            studio_id,
+            task_id: Some(TaskId::new()),
+            run_id: Some(run_id),
+            agent_spec: worker_spec.clone(),
+            prompt: "Do task turn 1".to_string(),
+            budget: AgentExecutionBudget::default(),
+            parent_agent_id: Some(coord_id),
+        };
+
+        let worker1_res = executor.execute_agent(worker_turn1_ctx).await.unwrap();
+        assert!(worker1_res.success);
+        assert!(worker1_res.output.contains("Worker turn 1 output"));
+
+        // 3. Child worker reuse (turn 2)
+        let worker_turn2_ctx = AgentExecutionContext {
+            studio_id,
+            task_id: Some(TaskId::new()),
+            run_id: Some(run_id),
+            agent_spec: worker_spec,
+            prompt: "Do follow-up task turn 2".to_string(),
+            budget: AgentExecutionBudget::default(),
+            parent_agent_id: Some(coord_id),
+        };
+
+        let worker2_res = executor.execute_agent(worker_turn2_ctx).await.unwrap();
+        assert!(worker2_res.success);
+        assert!(worker2_res.output.contains("Worker turn 2 reused output"));
+
+        // Verify running agent tree contains both agents
+        let running_map = executor.running_agents();
+        let running = running_map.read().await;
+        assert_eq!(running.len(), 2);
+        assert!(running.contains_key(&coord_id));
+        assert!(running.contains_key(&worker_id));
+        assert_eq!(
+            running.get(&worker_id).unwrap().parent_agent_id,
+            Some(coord_id)
         );
     });
 }

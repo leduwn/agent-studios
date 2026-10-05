@@ -2,9 +2,11 @@ use agent_studios_control_plane::SystemClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_internal_agent::{ControlPlaneActor, ControlPlaneHandle};
-use agent_studios_protocol::agent::AgentKind;
+use agent_studios_protocol::agent::{AgentKind, AgentState};
+use agent_studios_protocol::event::ControlPlaneEvent;
 use agent_studios_protocol::run::RunState;
-use agent_studios_protocol::task::TaskState;
+use agent_studios_protocol::task::{BatchTaskSpec, TaskState};
+use chrono::Utc;
 
 fn create_test_actor() -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
     let clock = SystemClock;
@@ -136,4 +138,142 @@ async fn test_actor_concurrent_handle_access() {
 
     let all_tasks = handle.get_studio_tasks(studio.id).await.unwrap();
     assert_eq!(all_tasks.len(), 10);
+}
+
+#[tokio::test]
+async fn test_actor_agent_state_transition() {
+    let (handle, _task) = create_test_actor();
+    let studio = handle.create_studio("Agent State Studio").await.unwrap();
+    let agent = handle
+        .register_agent(studio.id, "WorkerAgent", AgentKind::Internal, None)
+        .await
+        .unwrap();
+
+    assert_eq!(agent.state, AgentState::Registered);
+
+    handle
+        .transition_agent_state(agent.id, AgentState::Starting)
+        .await
+        .unwrap();
+    handle
+        .transition_agent_state(agent.id, AgentState::Idle)
+        .await
+        .unwrap();
+    handle
+        .transition_agent_state(agent.id, AgentState::Busy)
+        .await
+        .unwrap();
+
+    let state = handle.get_state().await.unwrap();
+    let updated_agent = state.agents.get(&agent.id).unwrap();
+    assert_eq!(updated_agent.state, AgentState::Busy);
+}
+
+#[tokio::test]
+async fn test_actor_task_batch_and_live_event_subscription() {
+    let (handle, _task) = create_test_actor();
+    let studio = handle.create_studio("Subscription Studio").await.unwrap();
+
+    // 1. Initial event subscription: historical should have studio created (seq 1)
+    let (historical, mut live_rx) = handle.subscribe_events(studio.id, 1).await.unwrap();
+    assert_eq!(historical.len(), 1);
+    assert_eq!(historical[0].sequence, 1);
+
+    // 2. Dispatch CreateTaskBatch
+    let batch = vec![
+        BatchTaskSpec {
+            key: "step_1".to_string(),
+            title: "Step 1".to_string(),
+            description: "First step".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec![],
+            dependency_task_ids: vec![],
+        },
+        BatchTaskSpec {
+            key: "step_2".to_string(),
+            title: "Step 2".to_string(),
+            description: "Second step".to_string(),
+            assigned_agent_id: None,
+            parent_task_key: None,
+            parent_task_id: None,
+            dependency_keys: vec!["step_1".to_string()],
+            dependency_task_ids: vec![],
+        },
+    ];
+
+    let tasks = handle.create_task_batch(studio.id, batch).await.unwrap();
+    assert_eq!(tasks.len(), 2);
+
+    // 3. Receive live events from subscription
+    let env1 = live_rx.recv().await.unwrap();
+    let env2 = live_rx.recv().await.unwrap();
+
+    assert_eq!(env1.sequence, 2);
+    assert_eq!(env2.sequence, 3);
+    assert!(matches!(env1.event, ControlPlaneEvent::TaskCreated { .. }));
+    assert!(matches!(env2.event, ControlPlaneEvent::TaskCreated { .. }));
+}
+
+#[tokio::test]
+async fn test_actor_record_observability_events() {
+    let (handle, _task) = create_test_actor();
+    let studio = handle.create_studio("Observability Studio").await.unwrap();
+    let agent = handle
+        .register_agent(studio.id, "ObsAgent", AgentKind::Internal, None)
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+
+    handle
+        .record_runtime_bound(
+            studio.id,
+            agent.id,
+            "codex",
+            "provider_1",
+            "model_1",
+            "openai_responses",
+        )
+        .await
+        .unwrap();
+
+    handle
+        .record_agent_spawned(studio.id, agent.id, "thread_123", None, None)
+        .await
+        .unwrap();
+
+    handle
+        .record_tool_started(studio.id, agent.id, None, None, "read_file", "call_1", now)
+        .await
+        .unwrap();
+
+    handle
+        .record_tool_completed(
+            studio.id,
+            agent.id,
+            None,
+            None,
+            "read_file",
+            "call_1",
+            42,
+            now,
+        )
+        .await
+        .unwrap();
+
+    handle
+        .record_budget_usage_updated(studio.id, agent.id, None, 5, 2, 10, 1)
+        .await
+        .unwrap();
+
+    handle
+        .record_budget_exceeded(studio.id, agent.id, None, "tool_calls", 100, 101)
+        .await
+        .unwrap();
+
+    let (events, _) = handle.subscribe_events(studio.id, 1).await.unwrap();
+    // StudioCreated(1) + AgentRegistered(2) + RuntimeBound(3) + Spawned(4) + ToolStarted(5) + ToolCompleted(6) + BudgetUpdated(7) + BudgetExceeded(8)
+    assert_eq!(events.len(), 8);
 }

@@ -1,5 +1,6 @@
 //! Observe real dispatch, completion, cancellation, and nested code-mode execution.
 use super::*;
+use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolDispatchInput;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolTimingBoundary;
@@ -216,5 +217,76 @@ async fn code_mode_reports_host_timing_without_nested_dispatch_timing() -> Resul
         .map(|(_, event)| *event)
         .collect::<Vec<_>>();
     assert_eq!(nested, vec!["start", "finish"]);
+    Ok(())
+}
+
+struct RejectingAuthorizer {
+    finish_outcomes: Mutex<Vec<ToolCallOutcome>>,
+    rejection_message: &'static str,
+}
+
+impl ToolLifecycleContributor for RejectingAuthorizer {
+    fn authorize_tool_call(&self, input: &ToolStartInput<'_>) -> Result<(), String> {
+        if input.tool_name.name == "update_plan" {
+            return Err(self.rejection_message.to_string());
+        }
+        Ok(())
+    }
+
+    fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
+        Box::pin(async move {
+            self.finish_outcomes
+                .lock()
+                .expect("lock should not be poisoned")
+                .push(input.outcome);
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_rejected_by_authorize_tool_call_is_blocked() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let requests = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_function_call(
+                    "plan",
+                    "update_plan",
+                    &json!({"plan": []}).to_string(),
+                ),
+                responses::ev_completed("first"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("answer", "done"),
+                responses::ev_completed("last"),
+            ]),
+        ],
+    )
+    .await;
+    let authorizer = Arc::new(RejectingAuthorizer {
+        finish_outcomes: Mutex::new(Vec::new()),
+        rejection_message: "tool call rejected by budget policy",
+    });
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(authorizer.clone());
+    let test = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| config.update_plan_enabled = true)
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_text_turn("update the plan").await?;
+    assert_eq!(requests.requests().len(), 2);
+    let outcomes = authorizer
+        .finish_outcomes
+        .lock()
+        .expect("lock should not be poisoned")
+        .clone();
+    assert_eq!(outcomes, vec![ToolCallOutcome::Blocked]);
+    let reqs = requests.requests();
+    let output = reqs[1]
+        .function_call_output_text("plan")
+        .expect("function call output for plan");
+    assert!(output.contains("tool call rejected by budget policy"));
     Ok(())
 }

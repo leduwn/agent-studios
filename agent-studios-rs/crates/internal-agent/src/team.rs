@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::id::{AgentId, StudioId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::InternalAgentError;
@@ -23,18 +23,46 @@ pub fn validate_alias(alias: &str) -> Result<(), InternalAgentError> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InternalTeamSpec {
+    pub studio_id: StudioId,
     pub team_id: String,
     pub coordinator: InternalAgentSpec,
     pub agents: HashMap<String, InternalAgentSpec>,
+    pub max_parallel_agents: Option<usize>,
 }
 
 impl InternalTeamSpec {
     pub fn new(team_id: impl Into<String>, coordinator: InternalAgentSpec) -> Self {
         Self {
+            studio_id: StudioId::new(),
             team_id: team_id.into(),
             coordinator,
             agents: HashMap::new(),
+            max_parallel_agents: None,
         }
+    }
+
+    pub fn for_studio(
+        studio_id: StudioId,
+        team_id: impl Into<String>,
+        coordinator: InternalAgentSpec,
+    ) -> Self {
+        Self {
+            studio_id,
+            team_id: team_id.into(),
+            coordinator,
+            agents: HashMap::new(),
+            max_parallel_agents: None,
+        }
+    }
+
+    pub fn with_studio_id(mut self, studio_id: StudioId) -> Self {
+        self.studio_id = studio_id;
+        self
+    }
+
+    pub fn with_max_parallel_agents(mut self, max: usize) -> Self {
+        self.max_parallel_agents = Some(max);
+        self
     }
 
     pub fn add_agent(

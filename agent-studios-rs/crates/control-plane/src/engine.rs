@@ -13,7 +13,8 @@ use agent_studios_protocol::id::{
 };
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{TaskRecord, TaskState};
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use chrono::{DateTime, Utc};
 
 use crate::clock::{Clock, SystemClock};
 use crate::error::{ControlPlaneError, ReplayError, StoreError, TaskGraphError};
@@ -587,6 +588,75 @@ impl ControlPlaneState {
                     }
                 }
             },
+
+            ControlPlaneEvent::AgentRuntimeBound { agent_id, .. } => {
+                if let Some(agent) = self.agents.get(agent_id)
+                    && envelope.studio_id != agent.studio_id
+                {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+            }
+
+            ControlPlaneEvent::AgentSpawned {
+                agent_id,
+                parent_agent_id,
+                ..
+            } => {
+                if let Some(agent) = self.agents.get(agent_id)
+                    && envelope.studio_id != agent.studio_id
+                {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if let Some(parent_id) = parent_agent_id
+                    && let Some(parent) = self.agents.get(parent_id)
+                    && envelope.studio_id != parent.studio_id
+                {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: parent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+            }
+
+            ControlPlaneEvent::ToolStarted { agent_id, .. }
+            | ControlPlaneEvent::ToolCompleted { agent_id, .. }
+            | ControlPlaneEvent::ToolFailed { agent_id, .. }
+            | ControlPlaneEvent::BudgetUsageUpdated { agent_id, .. }
+            | ControlPlaneEvent::BudgetExceeded { agent_id, .. } => {
+                if let Some(agent) = self.agents.get(agent_id)
+                    && envelope.studio_id != agent.studio_id
+                {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+            }
+
+            ControlPlaneEvent::TaskRetryScheduled {
+                task_id, attempt, ..
+            } => {
+                let task = self
+                    .task_graph
+                    .get_task_mut(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                task.retry_count = *attempt;
+                task.updated_at = now;
+            }
         }
 
         Ok(())
@@ -598,6 +668,7 @@ pub struct ControlPlane<C: Clock = SystemClock, S: EventStore = InMemoryStore> {
     clock: C,
     store: S,
     state: ControlPlaneState,
+    committed_events_buffer: Vec<EventEnvelope>,
 }
 
 impl Default for ControlPlane<SystemClock, InMemoryStore> {
@@ -619,11 +690,16 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             clock,
             store,
             state: ControlPlaneState::new(),
+            committed_events_buffer: Vec::new(),
         }
     }
 
     pub fn clock(&self) -> &C {
         &self.clock
+    }
+
+    pub fn drain_committed_events(&mut self) -> Vec<EventEnvelope> {
+        std::mem::take(&mut self.committed_events_buffer)
     }
 
     /// Returns a read-only reference to the underlying event store for diagnostics.
@@ -679,6 +755,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         // 5. Commit state transition only after store persistence succeeds
         self.state = staged_state;
+        self.committed_events_buffer.extend(envelopes.clone());
 
         Ok(envelopes)
     }
@@ -874,6 +951,170 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let event = ControlPlaneEvent::TaskCreated { task: task.clone() };
         self.commit_transaction(studio_id, vec![event])?;
         Ok(task)
+    }
+
+    pub fn create_task_batch(
+        &mut self,
+        studio_id: StudioId,
+        batch: Vec<BatchTaskSpec>,
+    ) -> Result<Vec<TaskRecord>, ControlPlaneError> {
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        if batch.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut key_to_id: HashMap<String, TaskId> = HashMap::with_capacity(batch.len());
+        let mut key_to_index: HashMap<String, usize> = HashMap::with_capacity(batch.len());
+
+        for (idx, spec) in batch.iter().enumerate() {
+            if spec.key.is_empty() {
+                return Err(ControlPlaneError::InvalidOperation(
+                    "Batch task key cannot be empty".to_string(),
+                ));
+            }
+            if key_to_id.contains_key(&spec.key) {
+                return Err(ControlPlaneError::InvalidOperation(format!(
+                    "Duplicate batch task key '{}'",
+                    spec.key
+                )));
+            }
+            key_to_id.insert(spec.key.clone(), TaskId::new());
+            key_to_index.insert(spec.key.clone(), idx);
+        }
+
+        let now = self.clock.now();
+        let mut created_tasks = Vec::with_capacity(batch.len());
+        let mut candidate_events = Vec::with_capacity(batch.len());
+
+        for (idx, spec) in batch.iter().enumerate() {
+            let task_id = *key_to_id.get(&spec.key).unwrap();
+
+            let parent_task_id = if let Some(parent_key) = &spec.parent_task_key {
+                let parent_idx = key_to_index.get(parent_key).ok_or_else(|| {
+                    ControlPlaneError::InvalidOperation(format!(
+                        "Unknown parent_task_key '{parent_key}' in batch"
+                    ))
+                })?;
+                if *parent_idx >= idx {
+                    return Err(ControlPlaneError::InvalidOperation(format!(
+                        "Forward reference to parent_task_key '{parent_key}' is not allowed"
+                    )));
+                }
+                let resolved_parent_id = *key_to_id.get(parent_key).unwrap();
+                if let Some(explicit_id) = spec.parent_task_id
+                    && explicit_id != resolved_parent_id
+                {
+                    return Err(ControlPlaneError::InvalidOperation(format!(
+                        "Mismatched parent_task_id and parent_task_key for task '{}'",
+                        spec.key
+                    )));
+                }
+                Some(resolved_parent_id)
+            } else if let Some(parent_id) = spec.parent_task_id {
+                let parent = self
+                    .state
+                    .task_graph
+                    .get_task(parent_id)
+                    .ok_or(ControlPlaneError::TaskNotFound(parent_id))?;
+                if parent.studio_id != studio_id {
+                    return Err(ControlPlaneError::StudioMismatch {
+                        expected: studio_id,
+                        actual: parent.studio_id,
+                    });
+                }
+                Some(parent_id)
+            } else {
+                None
+            };
+
+            if let Some(agent_id) = spec.assigned_agent_id {
+                let agent = self
+                    .state
+                    .agents
+                    .get(&agent_id)
+                    .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
+                if agent.studio_id != studio_id {
+                    return Err(ControlPlaneError::StudioMismatch {
+                        expected: studio_id,
+                        actual: agent.studio_id,
+                    });
+                }
+            }
+
+            let mut dependencies = Vec::new();
+
+            for &dep_id in &spec.dependency_task_ids {
+                let dep_task = self
+                    .state
+                    .task_graph
+                    .get_task(dep_id)
+                    .ok_or(ControlPlaneError::TaskNotFound(dep_id))?;
+                if dep_task.studio_id != studio_id {
+                    return Err(ControlPlaneError::StudioMismatch {
+                        expected: studio_id,
+                        actual: dep_task.studio_id,
+                    });
+                }
+                if !dependencies.contains(&dep_id) {
+                    dependencies.push(dep_id);
+                }
+            }
+
+            for dep_key in &spec.dependency_keys {
+                let dep_idx = key_to_index.get(dep_key).ok_or_else(|| {
+                    ControlPlaneError::InvalidOperation(format!(
+                        "Unknown dependency_key '{dep_key}' in batch"
+                    ))
+                })?;
+                if *dep_idx >= idx {
+                    return Err(ControlPlaneError::InvalidOperation(format!(
+                        "Forward reference to dependency_key '{dep_key}' is not allowed"
+                    )));
+                }
+                let resolved_dep_id = *key_to_id.get(dep_key).unwrap();
+                if !dependencies.contains(&resolved_dep_id) {
+                    dependencies.push(resolved_dep_id);
+                }
+            }
+
+            let all_deps_succeeded = dependencies.iter().all(|&dep_id| {
+                self.state
+                    .task_graph
+                    .get_task(dep_id)
+                    .map(|t| t.state == TaskState::Succeeded)
+                    .unwrap_or(false)
+            });
+
+            let initial_state = if dependencies.is_empty() || all_deps_succeeded {
+                TaskState::Ready
+            } else {
+                TaskState::Blocked
+            };
+
+            let task = TaskRecord {
+                id: task_id,
+                studio_id,
+                parent_task_id,
+                assigned_agent_id: spec.assigned_agent_id,
+                title: spec.title.clone(),
+                description: spec.description.clone(),
+                state: initial_state,
+                dependencies,
+                created_at: now,
+                updated_at: now,
+                retry_count: 0,
+            };
+
+            candidate_events.push(ControlPlaneEvent::TaskCreated { task: task.clone() });
+            created_tasks.push(task);
+        }
+
+        self.commit_transaction(studio_id, candidate_events)?;
+
+        Ok(created_tasks)
     }
 
     pub fn transition_task_state(
@@ -1327,6 +1568,189 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
     }
 
     // ========================================================================
+    // Orchestration & Observability Events
+    // ========================================================================
+
+    pub fn record_runtime_bound(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        runtime_kind: impl Into<String>,
+        provider_instance_id: impl Into<String>,
+        model_id: impl Into<String>,
+        protocol: impl Into<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::AgentRuntimeBound {
+            agent_id,
+            runtime_kind: runtime_kind.into(),
+            provider_instance_id: provider_instance_id.into(),
+            model_id: model_id.into(),
+            protocol: protocol.into(),
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_agent_spawned(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        thread_id: impl Into<String>,
+        parent_agent_id: Option<AgentId>,
+        parent_thread_id: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::AgentSpawned {
+            agent_id,
+            thread_id: thread_id.into(),
+            parent_agent_id,
+            parent_thread_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_tool_started(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::ToolStarted {
+            agent_id,
+            task_id,
+            run_id,
+            tool_name: tool_name.into(),
+            call_id: call_id.into(),
+            timestamp,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_tool_completed(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::ToolCompleted {
+            agent_id,
+            task_id,
+            run_id,
+            tool_name: tool_name.into(),
+            call_id: call_id.into(),
+            duration_ms,
+            timestamp,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_tool_failed(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        error: impl Into<String>,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::ToolFailed {
+            agent_id,
+            task_id,
+            run_id,
+            tool_name: tool_name.into(),
+            call_id: call_id.into(),
+            error: error.into(),
+            duration_ms,
+            timestamp,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_budget_usage_updated(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        turns_used: u32,
+        tool_calls_used: u32,
+        wall_clock_secs: u64,
+        child_agents_used: u32,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::BudgetUsageUpdated {
+            agent_id,
+            run_id,
+            turns_used,
+            tool_calls_used,
+            wall_clock_secs,
+            child_agents_used,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_budget_exceeded(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        dimension: impl Into<String>,
+        limit: u64,
+        actual: u64,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::BudgetExceeded {
+            agent_id,
+            run_id,
+            dimension: dimension.into(),
+            limit,
+            actual,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn schedule_task_retry(
+        &mut self,
+        studio_id: StudioId,
+        task_id: TaskId,
+        attempt: u32,
+        max_attempts: u32,
+        reason: impl Into<String>,
+        backoff_ms: u64,
+        next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::TaskRetryScheduled {
+            task_id,
+            attempt,
+            max_attempts,
+            reason: reason.into(),
+            backoff_ms,
+            next_retry_at,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    // ========================================================================
     // Cancellation Engine
     // ========================================================================
 
@@ -1623,6 +2047,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             clock,
             store,
             state,
+            committed_events_buffer: Vec::new(),
         })
     }
 }

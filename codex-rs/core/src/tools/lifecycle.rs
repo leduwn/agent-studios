@@ -18,6 +18,46 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 
+pub(crate) async fn authorize_tool_call(
+    invocation: &ToolInvocation,
+    mcp_tool: Option<&McpToolContext>,
+) -> Result<(), String> {
+    let contributors = invocation
+        .session
+        .services
+        .extensions
+        .tool_lifecycle_contributors();
+    if contributors.is_empty() {
+        return Ok(());
+    }
+    let thread_store = &invocation.session.services.thread_extension_data;
+    let conversation_history = invocation.session.conversation_history_snapshot().await;
+    let root_turn_id = invocation.turn.turn_metadata_state.root_turn_id();
+    let originating_item_id = invocation
+        .originating_call()
+        .await
+        .and_then(|origin| origin.item_id);
+
+    for contributor in contributors {
+        contributor.authorize_tool_call(&ToolStartInput {
+            session_store: &invocation.session.services.session_extension_data,
+            thread_store,
+            turn_store: invocation.turn.extension_data.as_ref(),
+            turn_id: invocation.turn.sub_id.as_str(),
+            root_turn_id: root_turn_id.as_deref(),
+            call_id: invocation.call_id.as_str(),
+            originating_item_id: originating_item_id.as_ref(),
+            tool_name: &invocation.tool_name,
+            mcp_tool,
+            permissions: Box::pin(async { tool_permission_context(invocation).await.ok() }),
+            payload: &invocation.payload,
+            conversation_history: Arc::clone(&conversation_history),
+            source: extension_tool_call_source(invocation.source.clone()),
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn notify_tool_start(
     invocation: &ToolInvocation,
     mcp_tool: Option<&McpToolContext>,

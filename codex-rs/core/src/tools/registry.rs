@@ -653,6 +653,24 @@ impl ToolRegistry {
             }
         }
 
+        if let Err(rejection) =
+            crate::tools::lifecycle::authorize_tool_call(&invocation, /*mcp_tool*/ None).await
+        {
+            if tool.is_builtin_control_tool() {
+                let mut analytics = ControlToolCallGuard::new(&invocation);
+                analytics.finish(ControlToolCallStatus::Rejected);
+            }
+            let err = FunctionCallError::RespondToModel(rejection);
+            dispatch_trace.record_failed(&err);
+            notify_tool_finish_if_unclaimed(
+                &invocation,
+                call_state.as_deref(),
+                ToolCallOutcome::Blocked,
+            )
+            .await;
+            return Err(err);
+        }
+
         if tool.mcp_server_name().is_none() {
             notify_tool_start(&invocation, /*mcp_tool*/ None).await;
         }

@@ -105,3 +105,43 @@ impl AgentDescriptor {
         }
     }
 }
+
+/// Execution budget limits for an agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentExecutionBudget {
+    pub max_turns: Option<u32>,
+    pub max_tool_calls: Option<u32>,
+    pub max_wall_clock_secs: Option<u64>,
+    pub max_child_agents: Option<u32>,
+}
+
+impl AgentExecutionBudget {
+    pub fn unlimited() -> Self {
+        Self {
+            max_turns: None,
+            max_tool_calls: None,
+            max_wall_clock_secs: None,
+            max_child_agents: None,
+        }
+    }
+
+    pub fn with_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+
+    pub fn with_tool_calls(mut self, tool_calls: u32) -> Self {
+        self.max_tool_calls = Some(tool_calls);
+        self
+    }
+
+    pub fn with_wall_clock_secs(mut self, secs: u64) -> Self {
+        self.max_wall_clock_secs = Some(secs);
+        self
+    }
+
+    pub fn with_child_agents(mut self, child_agents: u32) -> Self {
+        self.max_child_agents = Some(child_agents);
+        self
+    }
+}

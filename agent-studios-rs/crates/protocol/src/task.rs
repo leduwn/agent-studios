@@ -12,6 +12,7 @@ pub enum TaskState {
     Blocked,
     Ready,
     Running,
+    Retrying,
     Paused,
     Succeeded,
     Failed,
@@ -42,7 +43,16 @@ impl TaskState {
                 | (Self::Ready, Self::Running | Self::Blocked | Self::Cancelled)
                 | (
                     Self::Running,
-                    Self::Ready | Self::Paused | Self::Succeeded | Self::Failed | Self::Cancelled
+                    Self::Ready
+                        | Self::Paused
+                        | Self::Retrying
+                        | Self::Succeeded
+                        | Self::Failed
+                        | Self::Cancelled
+                )
+                | (
+                    Self::Retrying,
+                    Self::Ready | Self::Blocked | Self::Failed | Self::Cancelled
                 )
                 | (
                     Self::Paused,
@@ -81,6 +91,8 @@ pub struct TaskRecord {
     pub dependencies: Vec<TaskId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 impl TaskRecord {
@@ -111,6 +123,22 @@ impl TaskRecord {
             dependencies,
             created_at,
             updated_at: created_at,
+            retry_count: 0,
         }
     }
+}
+
+/// Provider-neutral task specification for atomic batch materialization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchTaskSpec {
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    pub assigned_agent_id: Option<AgentId>,
+    pub parent_task_key: Option<String>,
+    pub parent_task_id: Option<TaskId>,
+    #[serde(default)]
+    pub dependency_keys: Vec<String>,
+    #[serde(default)]
+    pub dependency_task_ids: Vec<TaskId>,
 }

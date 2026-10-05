@@ -41,6 +41,14 @@ impl AgentBudgetTracker {
         self.start_time.elapsed().as_secs()
     }
 
+    pub fn wall_clock_secs_used(&self) -> u64 {
+        self.elapsed_secs()
+    }
+
+    pub fn child_agents_used(&self) -> u32 {
+        0
+    }
+
     pub fn record_turn(&mut self) -> Result<(), InternalAgentError> {
         self.check_wall_clock()?;
         self.turns_used = self.turns_used.saturating_add(1);

@@ -48,47 +48,7 @@ impl WorkspaceAccessMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentExecutionBudget {
-    pub max_turns: Option<u32>,
-    pub max_tool_calls: Option<u32>,
-    pub max_wall_clock_secs: Option<u64>,
-}
-
-impl Default for AgentExecutionBudget {
-    fn default() -> Self {
-        Self {
-            max_turns: Some(25),
-            max_tool_calls: Some(100),
-            max_wall_clock_secs: Some(600),
-        }
-    }
-}
-
-impl AgentExecutionBudget {
-    pub fn unlimited() -> Self {
-        Self {
-            max_turns: None,
-            max_tool_calls: None,
-            max_wall_clock_secs: None,
-        }
-    }
-
-    pub fn with_turns(mut self, turns: u32) -> Self {
-        self.max_turns = Some(turns);
-        self
-    }
-
-    pub fn with_tool_calls(mut self, tool_calls: u32) -> Self {
-        self.max_tool_calls = Some(tool_calls);
-        self
-    }
-
-    pub fn with_wall_clock_secs(mut self, secs: u64) -> Self {
-        self.max_wall_clock_secs = Some(secs);
-        self
-    }
-}
+pub use agent_studios_protocol::agent::AgentExecutionBudget;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InternalAgentSpec {

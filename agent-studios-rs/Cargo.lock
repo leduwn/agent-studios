@@ -134,6 +134,7 @@ dependencies = [
  "agent-studios-runtime-session",
  "agent-studios-runtime-transport",
  "async-trait",
+ "chrono",
  "codex-attachment-store",
  "codex-config",
  "codex-core",
@@ -155,6 +156,22 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "agent-studios-orchestration"
+version = "0.1.0"
+dependencies = [
+ "agent-studios-control-plane",
+ "agent-studios-protocol",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

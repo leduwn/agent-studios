@@ -36,6 +36,7 @@ fn test_valid_linear_plan_topological_sort() {
             assigned_alias: "coder".to_string(),
             depends_on: vec![],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "t2".to_string(),
@@ -44,6 +45,7 @@ fn test_valid_linear_plan_topological_sort() {
             assigned_alias: "reviewer".to_string(),
             depends_on: vec!["t1".to_string()],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "t3".to_string(),
@@ -52,6 +54,7 @@ fn test_valid_linear_plan_topological_sort() {
             assigned_alias: "coordinator".to_string(),
             depends_on: vec!["t2".to_string()],
             workspace_access: None,
+            priority: None,
         },
     ];
 
@@ -70,6 +73,7 @@ fn test_valid_diamond_plan_topological_sort() {
             assigned_alias: "coordinator".to_string(),
             depends_on: vec![],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "branch_a".to_string(),
@@ -78,6 +82,7 @@ fn test_valid_diamond_plan_topological_sort() {
             assigned_alias: "coder".to_string(),
             depends_on: vec!["start".to_string()],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "branch_b".to_string(),
@@ -86,6 +91,7 @@ fn test_valid_diamond_plan_topological_sort() {
             assigned_alias: "reviewer".to_string(),
             depends_on: vec!["start".to_string()],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "join".to_string(),
@@ -94,6 +100,7 @@ fn test_valid_diamond_plan_topological_sort() {
             assigned_alias: "coordinator".to_string(),
             depends_on: vec!["branch_a".to_string(), "branch_b".to_string()],
             workspace_access: None,
+            priority: None,
         },
     ];
 
@@ -115,6 +122,7 @@ fn test_cyclic_plan_rejected() {
             assigned_alias: "coder".to_string(),
             depends_on: vec!["t2".to_string()],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "t2".to_string(),
@@ -123,6 +131,7 @@ fn test_cyclic_plan_rejected() {
             assigned_alias: "reviewer".to_string(),
             depends_on: vec!["t1".to_string()],
             workspace_access: None,
+            priority: None,
         },
     ];
 
@@ -143,6 +152,7 @@ fn test_self_cycle_rejected() {
         assigned_alias: "coder".to_string(),
         depends_on: vec!["t1".to_string()],
         workspace_access: None,
+        priority: None,
     }];
 
     let err = CoordinatorPlanValidator::validate(&tasks, &team);
@@ -162,6 +172,7 @@ fn test_missing_dependency_rejected() {
         assigned_alias: "coder".to_string(),
         depends_on: vec!["non_existent_key".to_string()],
         workspace_access: None,
+        priority: None,
     }];
 
     let err = CoordinatorPlanValidator::validate(&tasks, &team);
@@ -181,6 +192,7 @@ fn test_missing_agent_alias_rejected() {
         assigned_alias: "unknown_alias".to_string(),
         depends_on: vec![],
         workspace_access: None,
+        priority: None,
     }];
 
     let err = CoordinatorPlanValidator::validate(&tasks, &team);
@@ -240,6 +252,7 @@ async fn test_materialize_plan_in_control_plane() {
             assigned_alias: "coder".to_string(),
             depends_on: vec![],
             workspace_access: None,
+            priority: None,
         },
         PlannedTask {
             task_key: "k2".to_string(),
@@ -248,6 +261,7 @@ async fn test_materialize_plan_in_control_plane() {
             assigned_alias: "reviewer".to_string(),
             depends_on: vec!["k1".to_string()],
             workspace_access: None,
+            priority: None,
         },
     ];
 

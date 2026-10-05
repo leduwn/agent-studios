@@ -60,6 +60,7 @@ async fn test_supervisor_full_success_workflow() {
                 assigned_alias: "coder".to_string(),
                 depends_on: vec![],
                 workspace_access: None,
+                priority: None,
             },
             PlannedTask {
                 task_key: "review".to_string(),
@@ -68,6 +69,7 @@ async fn test_supervisor_full_success_workflow() {
                 assigned_alias: "reviewer".to_string(),
                 depends_on: vec!["code".to_string()],
                 workspace_access: None,
+                priority: None,
             },
         ],
     };
@@ -108,6 +110,7 @@ async fn test_supervisor_retry_policy() {
             assigned_alias: "coder".to_string(),
             depends_on: vec![],
             workspace_access: None,
+            priority: None,
         }],
     };
 
@@ -179,6 +182,7 @@ async fn test_supervisor_fail_fast_policy() {
                 assigned_alias: "coder".to_string(),
                 depends_on: vec![],
                 workspace_access: None,
+                priority: None,
             },
             PlannedTask {
                 task_key: "dependent".to_string(),
@@ -187,6 +191,7 @@ async fn test_supervisor_fail_fast_policy() {
                 assigned_alias: "reviewer".to_string(),
                 depends_on: vec!["broken".to_string()],
                 workspace_access: None,
+                priority: None,
             },
         ],
     };

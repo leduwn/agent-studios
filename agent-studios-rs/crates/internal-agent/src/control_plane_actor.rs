@@ -3,16 +3,19 @@ use agent_studios_control_plane::SystemClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::error::ControlPlaneError;
 use agent_studios_control_plane::store::InMemoryStore;
-use agent_studios_protocol::agent::{AgentDescriptor, AgentKind};
+use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState};
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
+use agent_studios_protocol::event::EventEnvelope;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{TaskRecord, TaskState};
-use tokio::sync::{mpsc, oneshot};
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use chrono::{DateTime, Utc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::error::InternalAgentError;
 
+#[allow(clippy::type_complexity)]
 pub enum ControlPlaneCommand {
     CreateStudio {
         name: String,
@@ -26,6 +29,11 @@ pub enum ControlPlaneCommand {
         role: Option<String>,
         respond_to: oneshot::Sender<Result<AgentDescriptor, ControlPlaneError>>,
     },
+    TransitionAgentState {
+        agent_id: AgentId,
+        new_state: AgentState,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
     CreateTask {
         studio_id: StudioId,
         title: String,
@@ -34,6 +42,11 @@ pub enum ControlPlaneCommand {
         assigned_agent_id: Option<AgentId>,
         dependencies: Vec<TaskId>,
         respond_to: oneshot::Sender<Result<TaskRecord, ControlPlaneError>>,
+    },
+    CreateTaskBatch {
+        studio_id: StudioId,
+        batch: Vec<BatchTaskSpec>,
+        respond_to: oneshot::Sender<Result<Vec<TaskRecord>, ControlPlaneError>>,
     },
     AddTaskDependency {
         task_id: TaskId,
@@ -59,6 +72,92 @@ pub enum ControlPlaneCommand {
         scope: CancellationScope,
         reason: Option<String>,
         respond_to: oneshot::Sender<Result<CancellationSummary, ControlPlaneError>>,
+    },
+    SubscribeEvents {
+        studio_id: StudioId,
+        from_sequence: u64,
+        respond_to: oneshot::Sender<
+            Result<(Vec<EventEnvelope>, broadcast::Receiver<EventEnvelope>), ControlPlaneError>,
+        >,
+    },
+    RecordRuntimeBound {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        runtime_kind: String,
+        provider_instance_id: String,
+        model_id: String,
+        protocol: String,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordAgentSpawned {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        thread_id: String,
+        parent_agent_id: Option<AgentId>,
+        parent_thread_id: Option<String>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordToolStarted {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: String,
+        call_id: String,
+        timestamp: DateTime<Utc>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordToolCompleted {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: String,
+        call_id: String,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordToolFailed {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: String,
+        call_id: String,
+        error: String,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordBudgetUsageUpdated {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        turns_used: u32,
+        tool_calls_used: u32,
+        wall_clock_secs: u64,
+        child_agents_used: u32,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordBudgetExceeded {
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        dimension: String,
+        limit: u64,
+        actual: u64,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    ScheduleTaskRetry {
+        studio_id: StudioId,
+        task_id: TaskId,
+        attempt: u32,
+        max_attempts: u32,
+        reason: String,
+        backoff_ms: u64,
+        next_retry_at: Option<DateTime<Utc>>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
     },
     GetState {
         respond_to: oneshot::Sender<ControlPlaneState>,
@@ -327,6 +426,298 @@ impl ControlPlaneHandle {
             .map_err(|_| InternalAgentError::ActorDropped)?;
         rx.await.map_err(|_| InternalAgentError::ActorDropped)
     }
+
+    pub async fn transition_agent_state(
+        &self,
+        agent_id: AgentId,
+        new_state: AgentState,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::TransitionAgentState {
+                agent_id,
+                new_state,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn create_task_batch(
+        &self,
+        studio_id: StudioId,
+        batch: Vec<BatchTaskSpec>,
+    ) -> Result<Vec<TaskRecord>, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CreateTaskBatch {
+                studio_id,
+                batch,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn subscribe_events(
+        &self,
+        studio_id: StudioId,
+        from_sequence: u64,
+    ) -> Result<(Vec<EventEnvelope>, broadcast::Receiver<EventEnvelope>), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::SubscribeEvents {
+                studio_id,
+                from_sequence,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_runtime_bound(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        runtime_kind: impl Into<String>,
+        provider_instance_id: impl Into<String>,
+        model_id: impl Into<String>,
+        protocol: impl Into<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordRuntimeBound {
+                studio_id,
+                agent_id,
+                runtime_kind: runtime_kind.into(),
+                provider_instance_id: provider_instance_id.into(),
+                model_id: model_id.into(),
+                protocol: protocol.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_agent_spawned(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        thread_id: impl Into<String>,
+        parent_agent_id: Option<AgentId>,
+        parent_thread_id: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordAgentSpawned {
+                studio_id,
+                agent_id,
+                thread_id: thread_id.into(),
+                parent_agent_id,
+                parent_thread_id,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_tool_started(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordToolStarted {
+                studio_id,
+                agent_id,
+                task_id,
+                run_id,
+                tool_name: tool_name.into(),
+                call_id: call_id.into(),
+                timestamp,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_tool_completed(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordToolCompleted {
+                studio_id,
+                agent_id,
+                task_id,
+                run_id,
+                tool_name: tool_name.into(),
+                call_id: call_id.into(),
+                duration_ms,
+                timestamp,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_tool_failed(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        tool_name: impl Into<String>,
+        call_id: impl Into<String>,
+        error: impl Into<String>,
+        duration_ms: u64,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordToolFailed {
+                studio_id,
+                agent_id,
+                task_id,
+                run_id,
+                tool_name: tool_name.into(),
+                call_id: call_id.into(),
+                error: error.into(),
+                duration_ms,
+                timestamp,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_budget_usage_updated(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        turns_used: u32,
+        tool_calls_used: u32,
+        wall_clock_secs: u64,
+        child_agents_used: u32,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordBudgetUsageUpdated {
+                studio_id,
+                agent_id,
+                run_id,
+                turns_used,
+                tool_calls_used,
+                wall_clock_secs,
+                child_agents_used,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_budget_exceeded(
+        &self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        dimension: impl Into<String>,
+        limit: u64,
+        actual: u64,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordBudgetExceeded {
+                studio_id,
+                agent_id,
+                run_id,
+                dimension: dimension.into(),
+                limit,
+                actual,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn schedule_task_retry(
+        &self,
+        studio_id: StudioId,
+        task_id: TaskId,
+        attempt: u32,
+        max_attempts: u32,
+        reason: impl Into<String>,
+        backoff_ms: u64,
+        next_retry_at: Option<DateTime<Utc>>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::ScheduleTaskRetry {
+                studio_id,
+                task_id,
+                attempt,
+                max_attempts,
+                reason: reason.into(),
+                backoff_ms,
+                next_retry_at,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
 }
 
 pub struct ControlPlaneActor;
@@ -336,6 +727,9 @@ impl ControlPlaneActor {
         mut control_plane: ControlPlane<SystemClock, InMemoryStore>,
     ) -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<ControlPlaneCommand>(1024);
+        let (broadcast_tx, _) = broadcast::channel::<EventEnvelope>(4096);
+        let broadcast_sender = broadcast_tx.clone();
+
         let handle = tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
                 match command {
@@ -365,6 +759,14 @@ impl ControlPlaneActor {
                         };
                         let _ = respond_to.send(res);
                     }
+                    ControlPlaneCommand::TransitionAgentState {
+                        agent_id,
+                        new_state,
+                        respond_to,
+                    } => {
+                        let res = control_plane.update_agent_state(agent_id, new_state);
+                        let _ = respond_to.send(res);
+                    }
                     ControlPlaneCommand::CreateTask {
                         studio_id,
                         title,
@@ -382,6 +784,14 @@ impl ControlPlaneActor {
                             assigned_agent_id,
                             dependencies,
                         );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::CreateTaskBatch {
+                        studio_id,
+                        batch,
+                        respond_to,
+                    } => {
+                        let res = control_plane.create_task_batch(studio_id, batch);
                         let _ = respond_to.send(res);
                     }
                     ControlPlaneCommand::AddTaskDependency {
@@ -424,6 +834,172 @@ impl ControlPlaneActor {
                         let res = control_plane.request_cancellation(scope, reason);
                         let _ = respond_to.send(res);
                     }
+                    ControlPlaneCommand::SubscribeEvents {
+                        studio_id,
+                        from_sequence,
+                        respond_to,
+                    } => {
+                        let sub_rx = broadcast_sender.subscribe();
+                        let res = control_plane
+                            .events_for_studio(studio_id, from_sequence)
+                            .map(|events| (events, sub_rx));
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordRuntimeBound {
+                        studio_id,
+                        agent_id,
+                        runtime_kind,
+                        provider_instance_id,
+                        model_id,
+                        protocol,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_runtime_bound(
+                            studio_id,
+                            agent_id,
+                            runtime_kind,
+                            provider_instance_id,
+                            model_id,
+                            protocol,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordAgentSpawned {
+                        studio_id,
+                        agent_id,
+                        thread_id,
+                        parent_agent_id,
+                        parent_thread_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_agent_spawned(
+                            studio_id,
+                            agent_id,
+                            thread_id,
+                            parent_agent_id,
+                            parent_thread_id,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordToolStarted {
+                        studio_id,
+                        agent_id,
+                        task_id,
+                        run_id,
+                        tool_name,
+                        call_id,
+                        timestamp,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_tool_started(
+                            studio_id, agent_id, task_id, run_id, tool_name, call_id, timestamp,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordToolCompleted {
+                        studio_id,
+                        agent_id,
+                        task_id,
+                        run_id,
+                        tool_name,
+                        call_id,
+                        duration_ms,
+                        timestamp,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_tool_completed(
+                            studio_id,
+                            agent_id,
+                            task_id,
+                            run_id,
+                            tool_name,
+                            call_id,
+                            duration_ms,
+                            timestamp,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordToolFailed {
+                        studio_id,
+                        agent_id,
+                        task_id,
+                        run_id,
+                        tool_name,
+                        call_id,
+                        error,
+                        duration_ms,
+                        timestamp,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_tool_failed(
+                            studio_id,
+                            agent_id,
+                            task_id,
+                            run_id,
+                            tool_name,
+                            call_id,
+                            error,
+                            duration_ms,
+                            timestamp,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordBudgetUsageUpdated {
+                        studio_id,
+                        agent_id,
+                        run_id,
+                        turns_used,
+                        tool_calls_used,
+                        wall_clock_secs,
+                        child_agents_used,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_budget_usage_updated(
+                            studio_id,
+                            agent_id,
+                            run_id,
+                            turns_used,
+                            tool_calls_used,
+                            wall_clock_secs,
+                            child_agents_used,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordBudgetExceeded {
+                        studio_id,
+                        agent_id,
+                        run_id,
+                        dimension,
+                        limit,
+                        actual,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_budget_exceeded(
+                            studio_id, agent_id, run_id, dimension, limit, actual,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::ScheduleTaskRetry {
+                        studio_id,
+                        task_id,
+                        attempt,
+                        max_attempts,
+                        reason,
+                        backoff_ms,
+                        next_retry_at,
+                        respond_to,
+                    } => {
+                        let res = control_plane.schedule_task_retry(
+                            studio_id,
+                            task_id,
+                            attempt,
+                            max_attempts,
+                            reason,
+                            backoff_ms,
+                            next_retry_at,
+                        );
+                        let _ = respond_to.send(res);
+                    }
                     ControlPlaneCommand::GetState { respond_to } => {
                         let state = control_plane.state().clone();
                         let _ = respond_to.send(state);
@@ -457,6 +1033,10 @@ impl ControlPlaneActor {
                         let task = control_plane.get_task(task_id).cloned();
                         let _ = respond_to.send(task);
                     }
+                }
+
+                for env in control_plane.drain_committed_events() {
+                    let _ = broadcast_sender.send(env);
                 }
             }
         });

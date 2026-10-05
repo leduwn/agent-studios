@@ -9,6 +9,7 @@ members = [
     "crates/runtime-transport",
     "crates/runtime-session",
     "crates/internal-agent",
+    "crates/orchestration",
 ]
 
 [workspace.package]
@@ -31,9 +32,9 @@ tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungsteni
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
 
 [profile.dev]
-debug = 1
+debug = 0
 
 [profile.test]
-debug = 1
+debug = 0
 
 

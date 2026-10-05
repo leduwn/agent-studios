@@ -17,6 +17,7 @@ agent-studios-codex-bridge = { path = "../codex-bridge" }
 codex-core-api = { path = "../../../codex-rs/core-api" }
 codex-core = { path = "../../../codex-rs/core" }
 codex-protocol = { path = "../../../codex-rs/protocol" }
+codex-config = { path = "../../../codex-rs/config" }
 tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
@@ -24,6 +25,7 @@ async-trait = "0.1"
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 uuid = { workspace = true }
 futures = "0.3"
 

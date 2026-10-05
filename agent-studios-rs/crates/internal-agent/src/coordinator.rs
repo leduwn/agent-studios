@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use agent_studios_protocol::id::{StudioId, TaskId};
+use agent_studios_protocol::task::BatchTaskSpec;
 use serde::{Deserialize, Serialize};
 
 use crate::control_plane_actor::ControlPlaneHandle;
@@ -18,6 +19,8 @@ pub struct PlannedTask {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub workspace_access: Option<WorkspaceAccessMode>,
+    #[serde(default)]
+    pub priority: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +29,21 @@ pub enum CoordinatorDecision {
     Plan { tasks: Vec<PlannedTask> },
     Complete { summary: String },
     Fail { reason: String },
+}
+
+/// Extracts JSON payload from possible markdown code fences (```json ... ``` or ``` ... ```).
+pub fn extract_json_payload(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(stripped) = trimmed.strip_prefix("```json")
+        && let Some(end) = stripped.rfind("```")
+    {
+        return stripped[..end].trim();
+    } else if let Some(stripped) = trimmed.strip_prefix("```")
+        && let Some(end) = stripped.rfind("```")
+    {
+        return stripped[..end].trim();
+    }
+    trimmed
 }
 
 pub struct CoordinatorPlanValidator;
@@ -132,7 +150,7 @@ impl CoordinatorPlanValidator {
         Ok(sorted)
     }
 
-    /// Atomically materializes a validated plan into the ControlPlane.
+    /// Atomically materializes a validated plan into the ControlPlane in a single transaction.
     pub async fn materialize(
         handle: &ControlPlaneHandle,
         studio_id: StudioId,
@@ -146,33 +164,30 @@ impl CoordinatorPlanValidator {
             task_map.insert(&task.task_key, task);
         }
 
-        let mut key_to_id: HashMap<String, TaskId> = HashMap::new();
-
-        // Create tasks in topological order so dependencies already exist
+        let mut batch_specs = Vec::with_capacity(sorted_keys.len());
         for key in &sorted_keys {
             let planned = task_map[key.as_str()];
             let agent_spec = team.get_agent(&planned.assigned_alias).ok_or_else(|| {
                 InternalAgentError::AgentAliasNotFound(planned.assigned_alias.clone())
             })?;
+            batch_specs.push(BatchTaskSpec {
+                key: key.clone(),
+                title: planned.title.clone(),
+                description: planned.description.clone().unwrap_or_default(),
+                assigned_agent_id: Some(agent_spec.agent_id),
+                parent_task_key: None,
+                parent_task_id: None,
+                dependency_keys: planned.depends_on.clone(),
+                dependency_task_ids: Vec::new(),
+            });
+        }
 
-            let dependencies: Vec<TaskId> = planned
-                .depends_on
-                .iter()
-                .map(|dep_key| key_to_id[dep_key])
-                .collect();
-
-            let created = handle
-                .create_task(
-                    studio_id,
-                    &planned.title,
-                    planned.description.clone().unwrap_or_default(),
-                    None,
-                    Some(agent_spec.agent_id),
-                    dependencies,
-                )
-                .await?;
-
-            key_to_id.insert(key.clone(), created.id);
+        let created_records = handle.create_task_batch(studio_id, batch_specs).await?;
+        let mut key_to_id = HashMap::with_capacity(sorted_keys.len());
+        for (idx, key) in sorted_keys.into_iter().enumerate() {
+            if let Some(record) = created_records.get(idx) {
+                key_to_id.insert(key, record.id);
+            }
         }
 
         Ok(key_to_id)

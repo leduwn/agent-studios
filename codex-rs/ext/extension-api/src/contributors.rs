@@ -383,6 +383,14 @@ pub trait ToolLifecycleContributor: Send + Sync {
     /// Excludes nested code-mode calls. Observers must return promptly.
     fn on_tool_dispatch(&self, _input: ToolDispatchInput<'_>) {}
 
+    /// Evaluates whether a tool call is authorized to proceed before execution.
+    ///
+    /// If this returns `Err(rejection)`, tool execution is stopped, `rejection`
+    /// is returned to the model as an error, and `ToolCallOutcome::Blocked` is emitted.
+    fn authorize_tool_call(&self, _input: &ToolStartInput<'_>) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Called after pre-tool hooks finalize an invocation and before execution.
     ///
     /// Calls blocked by hooks, or whose hook-provided input cannot be applied,
