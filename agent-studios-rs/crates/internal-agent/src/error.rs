@@ -46,6 +46,13 @@ pub enum InternalAgentError {
         actual: u32,
     },
 
+    #[error("Child agent budget exceeded for agent {agent_id}: limit {limit}, actual {actual}")]
+    ChildAgentBudgetExceeded {
+        agent_id: AgentId,
+        limit: u32,
+        actual: u32,
+    },
+
     #[error("Agent not found: {0}")]
     AgentNotFound(AgentId),
 

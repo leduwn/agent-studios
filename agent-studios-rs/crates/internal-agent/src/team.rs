@@ -31,17 +31,7 @@ pub struct InternalTeamSpec {
 }
 
 impl InternalTeamSpec {
-    pub fn new(team_id: impl Into<String>, coordinator: InternalAgentSpec) -> Self {
-        Self {
-            studio_id: StudioId::new(),
-            team_id: team_id.into(),
-            coordinator,
-            agents: HashMap::new(),
-            max_parallel_agents: None,
-        }
-    }
-
-    pub fn for_studio(
+    pub fn new(
         studio_id: StudioId,
         team_id: impl Into<String>,
         coordinator: InternalAgentSpec,
@@ -55,6 +45,14 @@ impl InternalTeamSpec {
         }
     }
 
+    pub fn for_studio(
+        studio_id: StudioId,
+        team_id: impl Into<String>,
+        coordinator: InternalAgentSpec,
+    ) -> Self {
+        Self::new(studio_id, team_id, coordinator)
+    }
+
     pub fn with_studio_id(mut self, studio_id: StudioId) -> Self {
         self.studio_id = studio_id;
         self
@@ -63,6 +61,41 @@ impl InternalTeamSpec {
     pub fn with_max_parallel_agents(mut self, max: usize) -> Self {
         self.max_parallel_agents = Some(max);
         self
+    }
+
+    pub fn validate(&self) -> Result<(), InternalAgentError> {
+        if self.max_parallel_agents == Some(0) {
+            return Err(InternalAgentError::InvalidPlan(
+                "max_parallel_agents cannot be 0".to_string(),
+            ));
+        }
+
+        let mut seen_ids = std::collections::HashSet::new();
+        seen_ids.insert(self.coordinator.agent_id);
+
+        for (alias, spec) in &self.agents {
+            validate_alias(alias)?;
+
+            if alias == COORDINATOR_ALIAS {
+                return Err(InternalAgentError::DuplicateAgentAlias(format!(
+                    "Alias '{COORDINATOR_ALIAS}' is reserved for the team coordinator"
+                )));
+            }
+
+            if spec.agent_id == self.coordinator.agent_id {
+                return Err(InternalAgentError::DuplicateAgentAlias(format!(
+                    "Worker agent '{alias}' shares AgentId with coordinator"
+                )));
+            }
+
+            if !seen_ids.insert(spec.agent_id) {
+                return Err(InternalAgentError::DuplicateAgentAlias(format!(
+                    "Duplicate AgentId across team members for alias '{alias}'"
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn add_agent(

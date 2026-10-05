@@ -1,13 +1,15 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use agent_studios_control_plane::engine::ControlPlaneState;
 use agent_studios_protocol::agent::{AgentExecutionBudget, AgentState};
 use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
-use agent_studios_protocol::id::{AgentId, RunId, StudioId};
+use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
 
-use crate::read_models::{AgentSummary, BudgetUsage, RunSummary, TaskGraphSnapshot};
+use crate::read_models::{
+    AgentOperationalState, AgentSummary, BudgetUsage, RunSummary, TaskGraphSnapshot,
+};
 
 /// Projects events into an AgentSummary.
 pub fn project_agent_summary(
@@ -16,8 +18,53 @@ pub fn project_agent_summary(
     budget: Option<AgentExecutionBudget>,
 ) -> Option<AgentSummary> {
     let mut summary: Option<AgentSummary> = None;
+    let mut parent_map: HashMap<AgentId, AgentId> = HashMap::new();
+    let mut runs: HashMap<RunId, (TaskId, AgentId, RunState)> = HashMap::new();
+    let mut tasks_for_agent: HashMap<TaskId, TaskState> = HashMap::new();
 
     for envelope in events {
+        // Collect parent hierarchy across all agent spawn events
+        if let ControlPlaneEvent::AgentSpawned {
+            agent_id: spawned_id,
+            parent_agent_id: Some(parent_id),
+            ..
+        } = &envelope.event
+        {
+            parent_map.insert(*spawned_id, *parent_id);
+        }
+
+        // Track run and task states relevant to the target agent
+        match &envelope.event {
+            ControlPlaneEvent::RunCreated { run } => {
+                runs.insert(run.id, (run.task_id, run.agent_id, run.state));
+            }
+            ControlPlaneEvent::RunStateChanged {
+                run_id, new_state, ..
+            } => {
+                if let Some(entry) = runs.get_mut(run_id) {
+                    entry.2 = *new_state;
+                }
+            }
+            ControlPlaneEvent::TaskCreated { task } => {
+                if task.assigned_agent_id == Some(agent_id) {
+                    tasks_for_agent.insert(task.id, task.state);
+                }
+            }
+            ControlPlaneEvent::TaskStateChanged {
+                task_id, new_state, ..
+            } => {
+                if let Some(entry) = tasks_for_agent.get_mut(task_id) {
+                    *entry = *new_state;
+                }
+            }
+            ControlPlaneEvent::TaskRetryScheduled { task_id, .. } => {
+                if let Some(entry) = tasks_for_agent.get_mut(task_id) {
+                    *entry = TaskState::Retrying;
+                }
+            }
+            _ => {}
+        }
+
         match &envelope.event {
             ControlPlaneEvent::AgentRegistered { agent } if agent.id == agent_id => {
                 summary = Some(AgentSummary {
@@ -26,14 +73,17 @@ pub fn project_agent_summary(
                     agent_name: agent.display_name.clone(),
                     role: agent.role.clone(),
                     state: AgentState::Registered,
+                    operational_state: AgentOperationalState::Idle,
                     runtime_bound: false,
                     runtime_kind: None,
                     provider: None,
                     model: None,
                     wire_protocol: None,
                     codex_thread_id: None,
+                    parent_thread_id: None,
                     parent_agent_id: None,
                     spawn_depth: 0,
+                    current_task_id: None,
                     tool_calls_total: 0,
                     tool_calls_active: 0,
                     budget: budget.clone().unwrap_or_default(),
@@ -75,12 +125,13 @@ pub fn project_agent_summary(
                 agent_id: ev_agent_id,
                 thread_id,
                 parent_agent_id,
+                parent_thread_id,
                 ..
             } if *ev_agent_id == agent_id => {
                 if let Some(s) = summary.as_mut() {
                     s.codex_thread_id = Some(thread_id.clone());
                     s.parent_agent_id = *parent_agent_id;
-                    s.spawn_depth = if parent_agent_id.is_some() { 1 } else { 0 };
+                    s.parent_thread_id = parent_thread_id.clone();
                     s.updated_at = envelope.timestamp;
                 }
             }
@@ -138,6 +189,54 @@ pub fn project_agent_summary(
             }
             _ => {}
         }
+
+        // Update operational state and current_task_id after each event for our agent
+        if let Some(s) = summary.as_mut() {
+            let active_run = runs.values().find(|(_, aid, state)| {
+                *aid == agent_id && matches!(state, RunState::Starting | RunState::Running)
+            });
+
+            if let Some((task_id, _, _)) = active_run {
+                s.current_task_id = Some(*task_id);
+                s.operational_state = AgentOperationalState::Running;
+            } else {
+                s.current_task_id = None;
+                if s.state == AgentState::Failed {
+                    s.operational_state = AgentOperationalState::Failed;
+                } else if s.state == AgentState::Stopped {
+                    s.operational_state = AgentOperationalState::Stopped;
+                } else if s.state == AgentState::Paused {
+                    s.operational_state = AgentOperationalState::Paused;
+                } else if tasks_for_agent
+                    .values()
+                    .any(|st| *st == TaskState::Retrying)
+                {
+                    s.operational_state = AgentOperationalState::Retrying;
+                } else if tasks_for_agent.values().any(|st| *st == TaskState::Blocked) {
+                    s.operational_state = AgentOperationalState::Blocked;
+                } else if tasks_for_agent.values().any(|st| *st == TaskState::Pending) {
+                    s.operational_state = AgentOperationalState::Waiting;
+                } else {
+                    s.operational_state = AgentOperationalState::Idle;
+                }
+            }
+        }
+    }
+
+    // Calculate recursive spawn depth with cycle detection
+    if let Some(s) = summary.as_mut() {
+        let mut depth = 0;
+        let mut curr = s.parent_agent_id;
+        let mut visited = HashSet::new();
+        visited.insert(agent_id);
+        while let Some(parent) = curr {
+            if !visited.insert(parent) {
+                break;
+            }
+            depth += 1;
+            curr = parent_map.get(&parent).copied();
+        }
+        s.spawn_depth = depth;
     }
 
     summary
@@ -178,6 +277,18 @@ pub fn build_task_graph_snapshot(
         }
     }
 
+    tasks.sort_by_key(|a| (a.created_at, a.id));
+    ready_tasks.sort();
+    running_tasks.sort();
+    blocked_tasks.sort();
+    retrying_tasks.sort();
+    succeeded_tasks.sort();
+    failed_tasks.sort();
+    cancelled_tasks.sort();
+    for deps in adjacency.values_mut() {
+        deps.sort();
+    }
+
     TaskGraphSnapshot {
         studio_id,
         tasks,
@@ -204,11 +315,14 @@ pub fn project_run_summary(run_id: RunId, events: &[EventEnvelope]) -> Option<Ru
                     task_id: run.task_id,
                     agent_id: run.agent_id,
                     state: RunState::Queued,
+                    attempt: run.attempt,
                     retry_count: 0,
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
                     error: None,
+                    failure_classification: None,
+                    safe_error_summary: None,
                 });
             }
             ControlPlaneEvent::RunStateChanged {
@@ -247,6 +361,20 @@ pub fn project_run_summary(run_id: RunId, events: &[EventEnvelope]) -> Option<Ru
                     && s.task_id == *task_id
                 {
                     s.retry_count = *attempt;
+                }
+            }
+            ControlPlaneEvent::RunOutcomeRecorded {
+                run_id: ev_run_id,
+                classification,
+                safe_error_summary,
+                ..
+            } if *ev_run_id == run_id => {
+                if let Some(s) = summary.as_mut() {
+                    s.failure_classification = Some(classification.clone());
+                    s.safe_error_summary = safe_error_summary.clone();
+                    if s.error.is_none() {
+                        s.error = safe_error_summary.clone();
+                    }
                 }
             }
             _ => {}

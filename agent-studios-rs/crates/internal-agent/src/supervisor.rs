@@ -26,6 +26,14 @@ pub enum FailurePolicy {
     RetryTask(u32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorReviewStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorExecutionSummary {
     pub studio_id: StudioId,
@@ -34,6 +42,7 @@ pub struct SupervisorExecutionSummary {
     pub failed_tasks: usize,
     pub cancelled_tasks: usize,
     pub coordinator_summary: Option<String>,
+    pub coordinator_review_status: CoordinatorReviewStatus,
 }
 
 struct TaskCompletion {
@@ -51,7 +60,6 @@ pub struct AgentStudiosSupervisor<E: AgentExecutor> {
     executor: Arc<E>,
     failure_policy: FailurePolicy,
     workspace_id: String,
-    max_parallel_agents: usize,
 }
 
 impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
@@ -59,9 +67,9 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
         control_plane: ControlPlaneHandle,
         team_spec: InternalTeamSpec,
         workspace_arbitrator: WorkspacePolicyArbitrator,
-        studio_id: StudioId,
         executor: E,
     ) -> Self {
+        let studio_id = team_spec.studio_id;
         Self {
             control_plane,
             team_spec,
@@ -70,7 +78,6 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             executor: Arc::new(executor),
             failure_policy: FailurePolicy::default(),
             workspace_id: format!("studio-{}", studio_id),
-            max_parallel_agents: 4,
         }
     }
 
@@ -81,11 +88,6 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
 
     pub fn with_workspace_id(mut self, workspace_id: impl Into<String>) -> Self {
         self.workspace_id = workspace_id.into();
-        self
-    }
-
-    pub fn with_max_parallel_agents(mut self, max: usize) -> Self {
-        self.max_parallel_agents = max.max(1);
         self
     }
 
@@ -105,33 +107,48 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
         self.studio_id
     }
 
-    pub fn max_parallel_agents(&self) -> usize {
-        self.max_parallel_agents
+    pub fn max_parallel_agents(&self) -> Option<usize> {
+        self.team_spec.max_parallel_agents
     }
 
     /// Step 1: Boot all agents into the ControlPlane
     pub async fn boot(&self) -> Result<(), InternalAgentError> {
-        self.control_plane
-            .register_agent_with_id(
-                self.studio_id,
-                self.team_spec.coordinator.agent_id,
-                &self.team_spec.coordinator.display_name,
-                AgentKind::Internal,
-                Some(self.team_spec.coordinator.role.clone()),
-            )
-            .await?;
+        self.team_spec.validate()?;
 
-        for spec in self.team_spec.agents.values() {
-            self.control_plane
-                .register_agent_with_id(
-                    self.studio_id,
-                    spec.agent_id,
-                    &spec.display_name,
-                    AgentKind::Internal,
-                    Some(spec.role.clone()),
-                )
-                .await?;
+        self.control_plane.get_studio(self.studio_id).await?;
+
+        self.executor
+            .validate_agent_spec(&self.team_spec.coordinator)?;
+
+        let mut sorted_aliases: Vec<&String> = self.team_spec.agents.keys().collect();
+        sorted_aliases.sort();
+
+        for alias in &sorted_aliases {
+            let spec = &self.team_spec.agents[*alias];
+            self.executor.validate_agent_spec(spec)?;
         }
+
+        let mut batch_specs = Vec::with_capacity(self.team_spec.agents.len() + 1);
+        batch_specs.push(agent_studios_protocol::agent::BatchAgentSpec {
+            id: self.team_spec.coordinator.agent_id,
+            display_name: self.team_spec.coordinator.display_name.clone(),
+            kind: AgentKind::Internal,
+            role: Some(self.team_spec.coordinator.role.clone()),
+        });
+
+        for alias in sorted_aliases {
+            let spec = &self.team_spec.agents[alias];
+            batch_specs.push(agent_studios_protocol::agent::BatchAgentSpec {
+                id: spec.agent_id,
+                display_name: spec.display_name.clone(),
+                kind: AgentKind::Internal,
+                role: Some(spec.role.clone()),
+            });
+        }
+
+        self.control_plane
+            .register_agent_batch(self.studio_id, batch_specs)
+            .await?;
 
         Ok(())
     }
@@ -145,6 +162,9 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             self.format_team_description()
         );
 
+        let schema = schemars::schema_for!(CoordinatorDecision);
+        let schema_value = serde_json::to_value(&schema).ok();
+
         let context = AgentExecutionContext {
             studio_id: self.studio_id,
             task_id: None,
@@ -153,6 +173,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             agent_spec: coordinator_spec.clone(),
             prompt,
             budget: coordinator_spec.budget.clone(),
+            output_schema: schema_value,
         };
 
         let result = self.executor.execute_agent(context).await?;
@@ -163,13 +184,16 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             });
         }
 
-        let json_text = crate::coordinator::extract_json_payload(&result.output);
-        match serde_json::from_str::<CoordinatorDecision>(json_text) {
+        let trimmed = result.output.trim();
+        match serde_json::from_str::<CoordinatorDecision>(trimmed) {
             Ok(decision) => Ok(decision),
-            Err(_) => Err(InternalAgentError::InvalidPlan(format!(
-                "Failed to parse CoordinatorDecision JSON from output: {}",
-                result.output
-            ))),
+            Err(_) => {
+                let total_len = result.output.len();
+                let preview: String = result.output.chars().take(512).collect();
+                Err(InternalAgentError::InvalidPlan(format!(
+                    "Failed to parse CoordinatorDecision JSON from output (total {total_len} bytes): {preview}"
+                )))
+            }
         }
     }
 
@@ -178,7 +202,10 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             "- coordinator: {} (Role: {})\n",
             self.team_spec.coordinator.display_name, self.team_spec.coordinator.role
         );
-        for (alias, spec) in &self.team_spec.agents {
+        let mut sorted_aliases: Vec<&String> = self.team_spec.agents.keys().collect();
+        sorted_aliases.sort();
+        for alias in sorted_aliases {
+            let spec = &self.team_spec.agents[alias];
             desc.push_str(&format!(
                 "- {}: {} (Role: {}, Access: {:?})\n",
                 alias, spec.display_name, spec.role, spec.workspace_access
@@ -206,6 +233,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                     failed_tasks: 0,
                     cancelled_tasks: 0,
                     coordinator_summary: Some(summary),
+                    coordinator_review_status: CoordinatorReviewStatus::Skipped,
                 });
             }
             CoordinatorDecision::Fail { reason } => {
@@ -259,8 +287,10 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             }
             delayed_retries = remaining_delayed;
 
+            let team_cap = self.team_spec.max_parallel_agents.unwrap_or(usize::MAX);
+
             // If not cancelled, schedule new ready tasks up to concurrency capacity
-            if !cancelled && join_set.len() < self.max_parallel_agents {
+            if !cancelled && join_set.len() < team_cap {
                 let mut ready_tasks = self.control_plane.get_ready_tasks(self.studio_id).await?;
 
                 // Sort candidates deterministically: (priority desc, created_at asc, id asc)
@@ -274,7 +304,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                 });
 
                 for task in ready_tasks {
-                    if join_set.len() >= self.max_parallel_agents {
+                    if join_set.len() >= team_cap {
                         break;
                     }
 
@@ -346,6 +376,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                         agent_spec: agent_spec.clone(),
                         prompt: task.title.clone(),
                         budget: agent_spec.budget.clone(),
+                        output_schema: None,
                     };
 
                     active_agents.insert(agent_id);
@@ -545,24 +576,21 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             agent_spec: coordinator_spec.clone(),
             prompt: review_prompt,
             budget: coordinator_spec.budget.clone(),
+            output_schema: None,
         };
 
         let review_result = self.executor.execute_agent(review_context).await;
-        let coordinator_summary = match review_result {
-            Ok(res) if !res.output.trim().is_empty() => Some(res.output),
-            _ => {
-                if failed_tasks == 0 && cancelled_tasks == 0 {
-                    Some(format!(
-                        "Successfully completed all {} tasks for studio {}",
-                        completed_tasks, self.studio_id
-                    ))
+        let (coordinator_summary, coordinator_review_status) = match review_result {
+            Ok(res) if res.success && !res.output.trim().is_empty() => {
+                let bounded_text = if res.output.len() > 4096 {
+                    let preview: String = res.output.chars().take(4096).collect();
+                    format!("{preview}... (truncated)")
                 } else {
-                    Some(format!(
-                        "Studio {} finished with {} succeeded, {} failed, {} cancelled",
-                        self.studio_id, completed_tasks, failed_tasks, cancelled_tasks
-                    ))
-                }
+                    res.output
+                };
+                (Some(bounded_text), CoordinatorReviewStatus::Succeeded)
             }
+            _ => (None, CoordinatorReviewStatus::Failed),
         };
 
         Ok(SupervisorExecutionSummary {
@@ -572,6 +600,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             failed_tasks,
             cancelled_tasks,
             coordinator_summary,
+            coordinator_review_status,
         })
     }
 }

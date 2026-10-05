@@ -39,7 +39,13 @@ async fn setup_parallel_test_env(
     let worker3 = InternalAgentSpec::new(AgentId::new(), "Worker3", "Worker", dummy_model)
         .with_workspace_access(WorkspaceAccessMode::Mutating);
 
-    let team = InternalTeamSpec::new("parallel-team", coord)
+    let arbitrator = WorkspacePolicyArbitrator::new();
+    let executor = MockAgentExecutor::new();
+
+    let studio = cp_handle.create_studio("Parallel Studio").await.unwrap();
+
+    let team = InternalTeamSpec::new(studio.id, "parallel-team", coord)
+        .with_max_parallel_agents(max_parallel)
         .add_agent("w1", worker1)
         .unwrap()
         .add_agent("w2", worker2)
@@ -47,19 +53,8 @@ async fn setup_parallel_test_env(
         .add_agent("w3", worker3)
         .unwrap();
 
-    let arbitrator = WorkspacePolicyArbitrator::new();
-    let executor = MockAgentExecutor::new();
-
-    let studio = cp_handle.create_studio("Parallel Studio").await.unwrap();
-
-    let supervisor = AgentStudiosSupervisor::new(
-        cp_handle.clone(),
-        team,
-        arbitrator,
-        studio.id,
-        executor.clone(),
-    )
-    .with_max_parallel_agents(max_parallel);
+    let supervisor =
+        AgentStudiosSupervisor::new(cp_handle.clone(), team, arbitrator, executor.clone());
 
     (supervisor, executor, cp_handle)
 }

@@ -1,6 +1,7 @@
 use agent_studios_protocol::id::AgentId;
 use agent_studios_provider::model::ModelRef;
 use codex_protocol::openai_models::ReasoningEffort;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +32,7 @@ pub struct AgentReasoningSelection {
     pub summary: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceAccessMode {
     ReadOnly,

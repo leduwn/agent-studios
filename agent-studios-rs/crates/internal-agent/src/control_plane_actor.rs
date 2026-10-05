@@ -23,6 +23,10 @@ pub enum ControlPlaneCommand {
         name: String,
         respond_to: oneshot::Sender<Result<Studio, ControlPlaneError>>,
     },
+    GetStudio {
+        studio_id: StudioId,
+        respond_to: oneshot::Sender<Result<Studio, ControlPlaneError>>,
+    },
     RegisterAgent {
         studio_id: StudioId,
         agent_id: Option<AgentId>,
@@ -207,6 +211,20 @@ impl ControlPlaneHandle {
         self.sender
             .send(ControlPlaneCommand::CreateStudio {
                 name: name.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn get_studio(&self, studio_id: StudioId) -> Result<Studio, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::GetStudio {
+                studio_id,
                 respond_to: tx,
             })
             .await
@@ -788,6 +806,16 @@ impl ControlPlaneActor {
                 match command {
                     ControlPlaneCommand::CreateStudio { name, respond_to } => {
                         let res = control_plane.create_studio(name);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::GetStudio {
+                        studio_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane
+                            .get_studio(studio_id)
+                            .cloned()
+                            .ok_or(ControlPlaneError::StudioNotFound(studio_id));
                         let _ = respond_to.send(res);
                     }
                     ControlPlaneCommand::RegisterAgent {

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use agent_studios_protocol::id::{StudioId, TaskId};
 use agent_studios_protocol::task::BatchTaskSpec;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::control_plane_actor::ControlPlaneHandle;
@@ -9,7 +10,7 @@ use crate::error::InternalAgentError;
 use crate::profile::WorkspaceAccessMode;
 use crate::team::InternalTeamSpec;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlannedTask {
     pub task_key: String,
     pub title: String,
@@ -23,7 +24,7 @@ pub struct PlannedTask {
     pub priority: Option<i32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CoordinatorDecision {
     Plan { tasks: Vec<PlannedTask> },

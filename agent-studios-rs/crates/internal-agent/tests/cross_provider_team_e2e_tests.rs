@@ -1,10 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_studios_control_plane::SystemClock;
+use agent_studios_control_plane::engine::ControlPlane;
+use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_internal_agent::{
     AgentExecutionBudget, AgentExecutionContext, AgentExecutor, AgentReasoningEffort,
-    AgentReasoningSelection, CodexAgentExecutor, InternalAgentSpec, InternalTeamSpec,
-    WorkspaceAccessMode,
+    AgentReasoningSelection, CodexAgentExecutor, ControlPlaneActor, ControlPlaneHandle,
+    InternalAgentSpec, InternalTeamSpec, WorkspaceAccessMode,
 };
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_provider::ProviderCatalog;
@@ -61,6 +64,13 @@ fn register_provider_and_instance(
 }
 
 use agent_studios_provider::ProviderDefinition;
+
+fn create_test_actor() -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
+    let clock = SystemClock;
+    let store = InMemoryStore::new();
+    let cp = ControlPlane::new(clock, store);
+    ControlPlaneActor::spawn(cp)
+}
 
 async fn create_test_thread_manager(codex_home: &std::path::Path) -> (ThreadManager, Config) {
     let mut config = ConfigBuilder::default()
@@ -392,7 +402,8 @@ fn test_cross_provider_team_execution_and_isolation() {
                 .with_tool_calls(10),
         );
 
-        let team = InternalTeamSpec::new("production-team", coord_spec.clone())
+        let studio_id = StudioId::new();
+        let team = InternalTeamSpec::new(studio_id, "production-team", coord_spec.clone())
             .add_agent("coder", coder_spec.clone())
             .unwrap()
             .add_agent("reviewer", reviewer_spec.clone())
@@ -484,7 +495,16 @@ fn test_cross_provider_team_execution_and_isolation() {
         );
 
         // 6. Verify CodexAgentExecutor integrates with the factory cleanly
-        let executor = CodexAgentExecutor::new(factory);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (tm, config) = create_test_thread_manager(temp_dir.path()).await;
+        let (cp_handle, _actor_task) = create_test_actor();
+        let executor = CodexAgentExecutor::try_new(
+            Arc::new(factory),
+            Arc::new(tm),
+            Arc::new(config),
+            cp_handle,
+        )
+        .unwrap();
         assert_eq!(
             executor.factory().transport_options().stream_idle_timeout,
             Duration::from_secs(300)
@@ -764,10 +784,15 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
 
         let temp_dir = tempfile::tempdir().unwrap();
         let (manager, base_config) = create_test_thread_manager(temp_dir.path()).await;
+        let (cp_handle, _actor_task) = create_test_actor();
 
-        let executor = CodexAgentExecutor::new(factory)
-            .with_thread_manager(Arc::new(manager))
-            .with_config(Arc::new(base_config));
+        let executor = CodexAgentExecutor::try_new(
+            Arc::new(factory),
+            Arc::new(manager),
+            Arc::new(base_config),
+            cp_handle,
+        )
+        .unwrap();
 
         let studio_id = StudioId::new();
         let run_id = RunId::new();
@@ -796,6 +821,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             run_id: Some(run_id),
             agent_spec: coord_spec,
             prompt: "Plan the project".to_string(),
+            output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: None,
         };
@@ -811,6 +837,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             run_id: Some(run_id),
             agent_spec: worker_spec.clone(),
             prompt: "Do task turn 1".to_string(),
+            output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
         };
@@ -826,6 +853,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             run_id: Some(run_id),
             agent_spec: worker_spec,
             prompt: "Do follow-up task turn 2".to_string(),
+            output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
         };

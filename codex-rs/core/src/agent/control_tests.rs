@@ -5142,7 +5142,6 @@ async fn spawn_agent_forwards_thread_extension_init_to_spawned_thread() {
         .expect("shutdown spawned agent");
 }
 
-
 #[tokio::test]
 async fn shutdown_agent_tree_closes_live_descendants() {
     let harness = AgentControlHarness::new().await;

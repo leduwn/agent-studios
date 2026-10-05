@@ -7,6 +7,22 @@ use agent_studios_protocol::task::TaskRecord;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Operational execution state of an agent (separate from persistent lifecycle state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentOperationalState {
+    #[default]
+    Idle,
+    Running,
+    Waiting,
+    Blocked,
+    Retrying,
+    Paused,
+    Failed,
+    Completed,
+    Stopped,
+}
+
 /// Observable usage across budget dimensions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BudgetUsage {
@@ -24,14 +40,17 @@ pub struct AgentSummary {
     pub agent_name: String,
     pub role: Option<String>,
     pub state: AgentState,
+    pub operational_state: AgentOperationalState,
     pub runtime_bound: bool,
     pub runtime_kind: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub wire_protocol: Option<String>,
     pub codex_thread_id: Option<String>,
+    pub parent_thread_id: Option<String>,
     pub parent_agent_id: Option<AgentId>,
     pub spawn_depth: u32,
+    pub current_task_id: Option<TaskId>,
     pub tool_calls_total: u64,
     pub tool_calls_active: u64,
     pub budget: AgentExecutionBudget,
@@ -65,11 +84,14 @@ pub struct RunSummary {
     pub task_id: TaskId,
     pub agent_id: AgentId,
     pub state: RunState,
+    pub attempt: u32,
     pub retry_count: u32,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u64>,
     pub error: Option<String>,
+    pub failure_classification: Option<String>,
+    pub safe_error_summary: Option<String>,
 }
 
 /// Final outcome of a completed run.

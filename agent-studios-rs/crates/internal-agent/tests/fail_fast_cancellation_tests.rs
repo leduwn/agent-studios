@@ -36,7 +36,13 @@ async fn test_fail_fast_cancels_active_turns_and_marks_non_terminal_tasks() {
     let worker1_id = worker1.agent_id;
     let worker2_id = worker2.agent_id;
 
-    let team = InternalTeamSpec::new("cancellation-team", coord)
+    let arbitrator = WorkspacePolicyArbitrator::new();
+    let executor = MockAgentExecutor::new();
+
+    let studio = cp_handle.create_studio("Cancel Studio").await.unwrap();
+
+    let team = InternalTeamSpec::new(studio.id, "cancellation-team", coord)
+        .with_max_parallel_agents(2)
         .add_agent("w1", worker1)
         .unwrap()
         .add_agent("w2", worker2)
@@ -44,22 +50,11 @@ async fn test_fail_fast_cancels_active_turns_and_marks_non_terminal_tasks() {
         .add_agent("w3", worker3)
         .unwrap();
 
-    let arbitrator = WorkspacePolicyArbitrator::new();
-    let executor = MockAgentExecutor::new();
-
-    let studio = cp_handle.create_studio("Cancel Studio").await.unwrap();
-
     let (historical, mut event_rx) = cp_handle.subscribe_events(studio.id, 1).await.unwrap();
 
-    let supervisor = AgentStudiosSupervisor::new(
-        cp_handle.clone(),
-        team,
-        arbitrator,
-        studio.id,
-        executor.clone(),
-    )
-    .with_max_parallel_agents(2)
-    .with_failure_policy(FailurePolicy::FailFast);
+    let supervisor =
+        AgentStudiosSupervisor::new(cp_handle.clone(), team, arbitrator, executor.clone())
+            .with_failure_policy(FailurePolicy::FailFast);
 
     let plan = CoordinatorDecision::Plan {
         tasks: vec![

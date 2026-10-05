@@ -30,25 +30,20 @@ async fn test_observable_retry_state_transition_and_events() {
     let coder = InternalAgentSpec::new(AgentId::new(), "Coder", "Developer", dummy_model)
         .with_workspace_access(WorkspaceAccessMode::Mutating);
 
-    let team = InternalTeamSpec::new("retry-team", coord)
-        .add_agent("coder", coder)
-        .unwrap();
-
     let arbitrator = WorkspacePolicyArbitrator::new();
     let executor = MockAgentExecutor::new();
 
     let studio = cp_handle.create_studio("Retry Studio").await.unwrap();
 
+    let team = InternalTeamSpec::new(studio.id, "retry-team", coord)
+        .add_agent("coder", coder)
+        .unwrap();
+
     let (historical, mut event_rx) = cp_handle.subscribe_events(studio.id, 1).await.unwrap();
 
-    let supervisor = AgentStudiosSupervisor::new(
-        cp_handle.clone(),
-        team,
-        arbitrator,
-        studio.id,
-        executor.clone(),
-    )
-    .with_failure_policy(FailurePolicy::RetryTask(2));
+    let supervisor =
+        AgentStudiosSupervisor::new(cp_handle.clone(), team, arbitrator, executor.clone())
+            .with_failure_policy(FailurePolicy::RetryTask(2));
 
     let plan = CoordinatorDecision::Plan {
         tasks: vec![PlannedTask {
@@ -157,23 +152,18 @@ async fn test_bounded_retry_count_exhaustion() {
     let coder = InternalAgentSpec::new(AgentId::new(), "Coder", "Developer", dummy_model)
         .with_workspace_access(WorkspaceAccessMode::Mutating);
 
-    let team = InternalTeamSpec::new("exhaustion-team", coord)
+    let studio = cp_handle.create_studio("Exhaustion Studio").await.unwrap();
+
+    let team = InternalTeamSpec::new(studio.id, "exhaustion-team", coord)
         .add_agent("coder", coder)
         .unwrap();
 
     let arbitrator = WorkspacePolicyArbitrator::new();
     let executor = MockAgentExecutor::new();
 
-    let studio = cp_handle.create_studio("Exhaustion Studio").await.unwrap();
-
-    let supervisor = AgentStudiosSupervisor::new(
-        cp_handle.clone(),
-        team,
-        arbitrator,
-        studio.id,
-        executor.clone(),
-    )
-    .with_failure_policy(FailurePolicy::RetryTask(2));
+    let supervisor =
+        AgentStudiosSupervisor::new(cp_handle.clone(), team, arbitrator, executor.clone())
+            .with_failure_policy(FailurePolicy::RetryTask(2));
 
     let plan = CoordinatorDecision::Plan {
         tasks: vec![PlannedTask {

@@ -5,7 +5,7 @@ use agent_studios_internal_agent::{
     ControlPlaneActor, CoordinatorPlanValidator, InternalAgentError, InternalAgentSpec,
     InternalTeamSpec, PlannedTask,
 };
-use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::id::{AgentId, StudioId};
 use agent_studios_provider::id::{ModelId, ProviderInstanceId};
 use agent_studios_provider::model::ModelRef;
 
@@ -18,7 +18,7 @@ fn create_test_team() -> InternalTeamSpec {
     let coder = InternalAgentSpec::new(AgentId::new(), "Coder", "Code", dummy_model.clone());
     let reviewer = InternalAgentSpec::new(AgentId::new(), "Reviewer", "Review", dummy_model);
 
-    InternalTeamSpec::new("team", coord)
+    InternalTeamSpec::new(StudioId::new(), "team", coord)
         .add_agent("coder", coder)
         .unwrap()
         .add_agent("reviewer", reviewer)

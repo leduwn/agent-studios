@@ -1481,7 +1481,9 @@ fn test_register_agent_batch_success_and_atomic_failure() {
         BatchAgentSpec::new(AgentId::new(), "New Worker", AgentKind::Internal, None),
         BatchAgentSpec::new(id1, "Worker 1 Conflict", AgentKind::Internal, None),
     ];
-    let err = cp.register_agent_batch(studio.id, existing_batch).unwrap_err();
+    let err = cp
+        .register_agent_batch(studio.id, existing_batch)
+        .unwrap_err();
     assert!(matches!(err, ControlPlaneError::DuplicateAgent(id) if id == id1));
 }
 
@@ -1501,12 +1503,17 @@ fn test_record_run_outcome_and_strict_replay() {
         .unwrap();
     let run = cp.create_run(task.id, agent.id).unwrap();
 
-    cp.record_run_outcome(run.id, "budget_exceeded", Some("Tool call limit reached".into()))
-        .unwrap();
+    cp.record_run_outcome(
+        run.id,
+        "budget_exceeded",
+        Some("Tool call limit reached".into()),
+    )
+    .unwrap();
 
     // Verify replay works
     let events = cp.events_for_studio(studio.id, 1).unwrap();
-    let replayed = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
+    let replayed =
+        ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
     assert_eq!(replayed.all_runs().count(), 1);
 }
 
@@ -1531,7 +1538,9 @@ fn test_replay_corrupted_strict_agent_and_run_checks() {
         },
     ));
     let res = ControlPlane::replay_events(&bad_events, FixedClock::new(now), InMemoryStore::new());
-    assert!(matches!(res, Err(ReplayError::AgentNotFound { agent_id }) if agent_id == unknown_agent));
+    assert!(
+        matches!(res, Err(ReplayError::AgentNotFound { agent_id }) if agent_id == unknown_agent)
+    );
 
     // 2. RunOutcomeRecorded with mismatched run agent fails
     let other_agent = AgentDescriptor::new(sid, "Other", AgentKind::Internal, None);
@@ -1539,7 +1548,9 @@ fn test_replay_corrupted_strict_agent_and_run_checks() {
         sid,
         4,
         now,
-        ControlPlaneEvent::AgentRegistered { agent: other_agent.clone() },
+        ControlPlaneEvent::AgentRegistered {
+            agent: other_agent.clone(),
+        },
     ));
     let run = RunRecord::new(tid, aid, 1);
     events.push(EventEnvelope::new(
@@ -1562,6 +1573,10 @@ fn test_replay_corrupted_strict_agent_and_run_checks() {
             safe_error_summary: None,
         },
     ));
-    let res = ControlPlane::replay_events(&mismatched_events, FixedClock::new(now), InMemoryStore::new());
+    let res = ControlPlane::replay_events(
+        &mismatched_events,
+        FixedClock::new(now),
+        InMemoryStore::new(),
+    );
     assert!(matches!(res, Err(ReplayError::DomainViolation(_))));
 }

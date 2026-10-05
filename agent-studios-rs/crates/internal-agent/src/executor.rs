@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_studios_protocol::agent::AgentState;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_runtime_session::AgentStudiosRuntimeSessionFactory;
 use async_trait::async_trait;
-use chrono::Utc;
 use codex_config::Constrained;
 use codex_core::config::{Config, Permissions};
 use codex_core::{
@@ -21,7 +21,8 @@ use codex_protocol::protocol::{
 use codex_protocol::user_input::UserInput;
 use tokio::sync::RwLock;
 
-use crate::budget::AgentBudgetTracker;
+use crate::budget::{AgentBudgetTracker, BudgetScopeId};
+use crate::contributor::AgentRuntimeExtensionContext;
 use crate::control_plane_actor::ControlPlaneHandle;
 use crate::error::InternalAgentError;
 use crate::profile::{AgentExecutionBudget, InternalAgentSpec};
@@ -35,6 +36,7 @@ pub struct AgentExecutionContext {
     pub agent_spec: InternalAgentSpec,
     pub prompt: String,
     pub budget: AgentExecutionBudget,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 impl AgentExecutionContext {
@@ -52,6 +54,7 @@ impl AgentExecutionContext {
             agent_spec,
             prompt: prompt.into(),
             budget,
+            output_schema: None,
         }
     }
 
@@ -67,6 +70,11 @@ impl AgentExecutionContext {
 
     pub fn with_parent_agent_id(mut self, parent_id: AgentId) -> Self {
         self.parent_agent_id = Some(parent_id);
+        self
+    }
+
+    pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
         self
     }
 }
@@ -88,6 +96,10 @@ pub trait AgentExecutor: Send + Sync {
     ) -> Result<AgentExecutionResult, InternalAgentError>;
 
     async fn cancel_agent(&self, _agent_id: AgentId) -> Result<(), InternalAgentError> {
+        Ok(())
+    }
+
+    fn validate_agent_spec(&self, _spec: &InternalAgentSpec) -> Result<(), InternalAgentError> {
         Ok(())
     }
 }
@@ -210,6 +222,8 @@ pub struct RunningAgentState {
     pub active_turn: Arc<AtomicBool>,
     pub current_run_id: Option<RunId>,
     pub parent_agent_id: Option<AgentId>,
+    pub extension_context: Arc<AgentRuntimeExtensionContext>,
+    pub budget_tracker: Arc<AgentBudgetTracker>,
 }
 
 impl std::fmt::Debug for RunningAgentState {
@@ -224,39 +238,36 @@ impl std::fmt::Debug for RunningAgentState {
 }
 
 pub struct CodexAgentExecutor {
-    thread_manager: Option<Arc<ThreadManager>>,
+    thread_manager: Arc<ThreadManager>,
     session_factory: Arc<AgentStudiosRuntimeSessionFactory>,
-    config: Option<Arc<Config>>,
-    control_plane: Option<ControlPlaneHandle>,
+    config: Arc<Config>,
+    control_plane: ControlPlaneHandle,
     running_agents: Arc<RwLock<HashMap<AgentId, RunningAgentState>>>,
     coordinator_agent_id: Arc<RwLock<Option<AgentId>>>,
 }
 
 impl CodexAgentExecutor {
-    pub fn new(session_factory: AgentStudiosRuntimeSessionFactory) -> Self {
-        Self {
-            thread_manager: None,
-            session_factory: Arc::new(session_factory),
-            config: None,
-            control_plane: None,
+    pub fn try_new(
+        session_factory: Arc<AgentStudiosRuntimeSessionFactory>,
+        thread_manager: Arc<ThreadManager>,
+        config: Arc<Config>,
+        control_plane: ControlPlaneHandle,
+    ) -> Result<Self, InternalAgentError> {
+        Ok(Self {
+            thread_manager,
+            session_factory,
+            config,
+            control_plane,
             running_agents: Arc::new(RwLock::new(HashMap::new())),
             coordinator_agent_id: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
-    pub fn with_thread_manager(mut self, thread_manager: Arc<ThreadManager>) -> Self {
-        self.thread_manager = Some(thread_manager);
-        self
-    }
-
-    pub fn with_config(mut self, config: Arc<Config>) -> Self {
-        self.config = Some(config);
-        self
-    }
-
-    pub fn with_control_plane(mut self, control_plane: ControlPlaneHandle) -> Self {
-        self.control_plane = Some(control_plane);
-        self
+    pub fn validate_agent_spec(&self, spec: &InternalAgentSpec) -> Result<(), InternalAgentError> {
+        self.session_factory
+            .prepare_runtime_session(&spec.model_ref)
+            .map_err(InternalAgentError::RuntimeSession)?;
+        Ok(())
     }
 
     pub fn running_agents(&self) -> Arc<RwLock<HashMap<AgentId, RunningAgentState>>> {
@@ -290,26 +301,45 @@ impl CodexAgentExecutor {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn drain_events(
         &self,
         thread: &Arc<CodexThread>,
         active_turn: &Arc<AtomicBool>,
-        tracker: &mut AgentBudgetTracker,
-        task_id: Option<TaskId>,
+        tracker: &AgentBudgetTracker,
         run_id: Option<RunId>,
         agent_id: AgentId,
         studio_id: StudioId,
     ) -> Result<(String, u32, u32, bool), InternalAgentError> {
         let mut output = String::new();
         let mut success = false;
-        let mut turns_used: u32 = 0;
-        let mut tool_calls_used: u32 = 0;
+        let max_wall_clock = tracker.budget().max_wall_clock_secs;
 
-        let timeout_duration = Duration::from_secs(60);
-        let deadline = tokio::time::Instant::now() + timeout_duration;
+        while active_turn.load(Ordering::SeqCst) {
+            if let Some(limit_secs) = max_wall_clock {
+                let total_elapsed = tracker.elapsed_secs();
+                if total_elapsed >= limit_secs {
+                    active_turn.store(false, Ordering::SeqCst);
+                    let _ = thread.submit(Op::Interrupt).await;
+                    let _ = self
+                        .control_plane
+                        .record_budget_exceeded(
+                            studio_id,
+                            agent_id,
+                            run_id,
+                            "wall_clock".to_string(),
+                            limit_secs,
+                            total_elapsed,
+                        )
+                        .await;
+                    return Err(InternalAgentError::BudgetExceeded {
+                        agent_id,
+                        reason: format!(
+                            "Wall-clock duration exceeded: limit {limit_secs}s, actual {total_elapsed}s"
+                        ),
+                    });
+                }
+            }
 
-        while active_turn.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
             let event_res =
                 match tokio::time::timeout(Duration::from_millis(500), thread.next_event()).await {
                     Ok(res) => res,
@@ -325,116 +355,9 @@ impl CodexAgentExecutor {
             };
 
             match event.msg {
-                EventMsg::TurnStarted(_) => {
-                    if let Err(e) = tracker.record_turn() {
-                        if let Some(ref cp) = self.control_plane {
-                            match e {
-                                InternalAgentError::TurnBudgetExceeded {
-                                    agent_id: aid,
-                                    limit,
-                                    actual,
-                                } => {
-                                    let _ = cp
-                                        .record_budget_exceeded(
-                                            studio_id,
-                                            aid,
-                                            run_id,
-                                            "turns".to_string(),
-                                            limit as u64,
-                                            actual as u64,
-                                        )
-                                        .await;
-                                }
-                                InternalAgentError::BudgetExceeded { agent_id: aid, .. } => {
-                                    let _ = cp
-                                        .record_budget_exceeded(
-                                            studio_id,
-                                            aid,
-                                            run_id,
-                                            "wall_clock".to_string(),
-                                            tracker.elapsed_secs(),
-                                            tracker.elapsed_secs(),
-                                        )
-                                        .await;
-                                }
-                                _ => {}
-                            }
-                        }
-                        return Err(e);
-                    }
-                    turns_used += 1;
-                }
+                EventMsg::TurnStarted(_) => {}
                 EventMsg::AgentMessage(msg) => {
                     output.push_str(&msg.message);
-                }
-                EventMsg::ExecCommandBegin(_) | EventMsg::McpToolCallBegin(_) => {
-                    if let Err(e) = tracker.record_tool_call() {
-                        if let Some(ref cp) = self.control_plane {
-                            match e {
-                                InternalAgentError::ToolCallBudgetExceeded {
-                                    agent_id: aid,
-                                    limit,
-                                    actual,
-                                } => {
-                                    let _ = cp
-                                        .record_budget_exceeded(
-                                            studio_id,
-                                            aid,
-                                            run_id,
-                                            "tool_calls".to_string(),
-                                            limit as u64,
-                                            actual as u64,
-                                        )
-                                        .await;
-                                }
-                                InternalAgentError::BudgetExceeded { agent_id: aid, .. } => {
-                                    let _ = cp
-                                        .record_budget_exceeded(
-                                            studio_id,
-                                            aid,
-                                            run_id,
-                                            "wall_clock".to_string(),
-                                            tracker.elapsed_secs(),
-                                            tracker.elapsed_secs(),
-                                        )
-                                        .await;
-                                }
-                                _ => {}
-                            }
-                        }
-                        return Err(e);
-                    }
-                    tool_calls_used += 1;
-                    if let Some(ref cp) = self.control_plane {
-                        let _ = cp
-                            .record_tool_started(
-                                studio_id,
-                                agent_id,
-                                task_id,
-                                run_id,
-                                "tool",
-                                event.id.clone(),
-                                Utc::now(),
-                            )
-                            .await;
-                    }
-                }
-                EventMsg::ExecCommandOutputDelta(_) => {}
-                EventMsg::ExecCommandEnd(_) | EventMsg::McpToolCallEnd(_) => {
-                    if let Some(ref cp) = self.control_plane {
-                        let _ = cp
-                            .record_tool_completed(
-                                studio_id,
-                                agent_id,
-                                task_id,
-                                run_id,
-                                "tool",
-                                event.id.clone(),
-                                10,
-                                Utc::now(),
-                            )
-                            .await;
-                    }
                 }
                 EventMsg::TurnComplete(_) => {
                     success = true;
@@ -456,32 +379,41 @@ impl CodexAgentExecutor {
 
         active_turn.store(false, Ordering::SeqCst);
 
-        if let Some(ref cp) = self.control_plane {
-            let _ = cp
-                .record_budget_usage_updated(
-                    studio_id,
-                    agent_id,
-                    run_id,
-                    tracker.turns_used(),
-                    tracker.tool_calls_used(),
-                    tracker.wall_clock_secs_used(),
-                    tracker.child_agents_used(),
-                )
-                .await;
-        }
+        let _ = self
+            .control_plane
+            .record_budget_usage_updated(
+                studio_id,
+                agent_id,
+                run_id,
+                tracker.turns_used(),
+                tracker.tool_calls_used(),
+                tracker.wall_clock_secs_used(),
+                tracker.child_agents_used(),
+            )
+            .await;
 
-        Ok((output, turns_used, tool_calls_used, success))
+        Ok((
+            output,
+            tracker.turns_used(),
+            tracker.tool_calls_used(),
+            success,
+        ))
     }
 }
 
 #[async_trait]
 impl AgentExecutor for CodexAgentExecutor {
+    fn validate_agent_spec(&self, spec: &InternalAgentSpec) -> Result<(), InternalAgentError> {
+        self.session_factory
+            .prepare_runtime_session(&spec.model_ref)
+            .map_err(InternalAgentError::RuntimeSession)?;
+        Ok(())
+    }
+
     async fn execute_agent(
         &self,
         context: AgentExecutionContext,
     ) -> Result<AgentExecutionResult, InternalAgentError> {
-        let mut tracker =
-            AgentBudgetTracker::new(context.agent_spec.agent_id, context.budget.clone());
         let start = Instant::now();
 
         let prepared_session = self
@@ -489,65 +421,79 @@ impl AgentExecutor for CodexAgentExecutor {
             .prepare_runtime_session(&context.agent_spec.model_ref)
             .map_err(InternalAgentError::RuntimeSession)?;
 
-        // If no ThreadManager configured, fall back to lightweight session preparation
-        let tm = match self.thread_manager {
-            Some(ref tm) => Arc::clone(tm),
-            None => {
-                tracing::info!(
-                    agent = %context.agent_spec.display_name,
-                    provider_id = %prepared_session.model_provider_id(),
-                    model = %prepared_session.selected_model(),
-                    "Prepared runtime session override for agent (simulated)"
-                );
-
-                tracker.record_turn()?;
-                tracker.check_all()?;
-                let elapsed = start.elapsed().as_secs();
-
-                return Ok(AgentExecutionResult {
-                    output: format!(
-                        "Prepared session for agent {} using model {}",
-                        context.agent_spec.display_name,
-                        prepared_session.selected_model()
-                    ),
-                    turns_used: tracker.turns_used(),
-                    tool_calls_used: tracker.tool_calls_used(),
-                    duration_secs: elapsed,
-                    success: true,
-                });
-            }
-        };
-
-        let base_config =
-            self.config
-                .as_ref()
-                .ok_or_else(|| InternalAgentError::ExecutionFailed {
-                    agent_id: context.agent_spec.agent_id,
-                    error: "Config is required when running with ThreadManager".to_string(),
-                })?;
-
-        if let Some(ref cp) = self.control_plane {
-            let _ = cp
-                .record_runtime_bound(
-                    context.studio_id,
-                    context.agent_spec.agent_id,
-                    "codex",
-                    prepared_session.model_provider_id(),
-                    prepared_session.selected_model(),
-                    prepared_session.protocol().to_string(),
-                )
-                .await;
-        }
+        let _ = self
+            .control_plane
+            .record_runtime_bound(
+                context.studio_id,
+                context.agent_spec.agent_id,
+                "codex",
+                prepared_session.model_provider_id(),
+                prepared_session.selected_model(),
+                prepared_session.protocol().to_string(),
+            )
+            .await;
 
         let existing = {
             let guard = self.running_agents.read().await;
             guard.get(&context.agent_spec.agent_id).cloned()
         };
 
-        if let Some(state) = existing {
+        if let Some(mut state) = existing {
+            let tracker = if state.parent_agent_id.is_none() {
+                Arc::clone(&state.budget_tracker)
+            } else {
+                let scope = context
+                    .run_id
+                    .map(BudgetScopeId::Run)
+                    .unwrap_or_else(|| BudgetScopeId::Coordinator(context.agent_spec.agent_id));
+                Arc::new(AgentBudgetTracker::new_with_scope(
+                    scope,
+                    context.agent_spec.agent_id,
+                    context.budget.clone(),
+                ))
+            };
+
+            state.extension_context.set_task_and_run(
+                context.task_id,
+                context.run_id,
+                Arc::clone(&tracker),
+            );
+            state.budget_tracker = Arc::clone(&tracker);
+            state.current_run_id = context.run_id;
             state.active_turn.store(true, Ordering::SeqCst);
 
-            let resume_cfg = (**base_config).clone();
+            {
+                let mut guard = self.running_agents.write().await;
+                guard.insert(context.agent_spec.agent_id, state.clone());
+            }
+
+            tracker.check_wall_clock()?;
+            if let Err(e) = tracker.reserve_turn() {
+                let _ = self
+                    .control_plane
+                    .record_budget_exceeded(
+                        context.studio_id,
+                        context.agent_spec.agent_id,
+                        context.run_id,
+                        "turns".to_string(),
+                        context.budget.max_turns.unwrap_or(0) as u64,
+                        tracker.turns_used() as u64 + 1,
+                    )
+                    .await;
+                return Err(e);
+            }
+
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Busy)
+                .await;
+
+            let mut start_options = TurnStartOptions::default();
+            if let Some(schema) = context.output_schema.clone() {
+                start_options.final_output_json_schema = Some(schema);
+            }
+
+            let resume_cfg = (*self.config).clone();
             let send_request = SendRequest {
                 caller: state.thread_id,
                 target: AgentTarget::Id(state.thread_id),
@@ -556,28 +502,39 @@ impl AgentExecutor for CodexAgentExecutor {
                     text: context.prompt.clone(),
                     text_elements: vec![],
                 }]),
-                start_options: TurnStartOptions::default(),
+                start_options,
             };
 
-            state.agent_control.send(send_request).await.map_err(|e| {
-                InternalAgentError::ExecutionFailed {
+            if let Err(e) = state.agent_control.send(send_request).await {
+                tracker.rollback_turn();
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
                     agent_id: context.agent_spec.agent_id,
                     error: format!("Failed to send input to agent: {e}"),
-                }
-            })?;
+                });
+            }
+            tracker.commit_turn();
 
-            let (output, turns, tools, success) = self
+            let drain_res = self
                 .drain_events(
                     &state.thread,
                     &state.active_turn,
-                    &mut tracker,
-                    context.task_id,
+                    &tracker,
                     context.run_id,
                     context.agent_spec.agent_id,
                     context.studio_id,
                 )
-                .await?;
+                .await;
 
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                .await;
+
+            let (output, turns, tools, success) = drain_res?;
             let elapsed = start.elapsed().as_secs();
             return Ok(AgentExecutionResult {
                 output,
@@ -590,7 +547,34 @@ impl AgentExecutor for CodexAgentExecutor {
 
         let is_coordinator = context.parent_agent_id.is_none();
         if is_coordinator {
-            let mut coordinator_config = (**base_config).clone();
+            let tracker = Arc::new(AgentBudgetTracker::new_with_scope(
+                BudgetScopeId::Coordinator(context.agent_spec.agent_id),
+                context.agent_spec.agent_id,
+                context.budget.clone(),
+            ));
+
+            tracker.check_wall_clock()?;
+            if let Err(e) = tracker.reserve_turn() {
+                let _ = self
+                    .control_plane
+                    .record_budget_exceeded(
+                        context.studio_id,
+                        context.agent_spec.agent_id,
+                        context.run_id,
+                        "turns".to_string(),
+                        context.budget.max_turns.unwrap_or(0) as u64,
+                        tracker.turns_used() as u64 + 1,
+                    )
+                    .await;
+                return Err(e);
+            }
+
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Starting)
+                .await;
+
+            let mut coordinator_config = (*self.config).clone();
             if context.agent_spec.workspace_access.is_read_only() {
                 coordinator_config
                     .set_legacy_sandbox_policy(SandboxPolicy::ReadOnly {
@@ -610,15 +594,35 @@ impl AgentExecutor for CodexAgentExecutor {
                 })?;
             }
 
+            let ext_ctx = Arc::new(AgentRuntimeExtensionContext::new(
+                context.studio_id,
+                context.agent_spec.agent_id,
+                Arc::clone(&tracker),
+                self.control_plane.clone(),
+            ));
+            ext_ctx.set_task_and_run(context.task_id, context.run_id, Arc::clone(&tracker));
+
+            let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
+            thread_extension_init.insert((*ext_ctx).clone());
+
             let mut start_options = StartThreadOptions::new(coordinator_config);
+            start_options.thread_extension_init = thread_extension_init;
             prepared_session.apply_to_start_thread_options(&mut start_options);
 
-            let new_thread = tm.start_thread(start_options).await.map_err(|e| {
-                InternalAgentError::ExecutionFailed {
-                    agent_id: context.agent_spec.agent_id,
-                    error: format!("Failed to start root thread: {e}"),
+            let new_thread = match self.thread_manager.start_thread(start_options).await {
+                Ok(nt) => nt,
+                Err(e) => {
+                    tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    return Err(InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: format!("Failed to start root thread: {e}"),
+                    });
                 }
-            })?;
+            };
 
             let thread_id = new_thread.thread_id;
             let thread = new_thread.thread;
@@ -632,6 +636,8 @@ impl AgentExecutor for CodexAgentExecutor {
                 active_turn: Arc::clone(&active_turn),
                 current_run_id: context.run_id,
                 parent_agent_id: None,
+                extension_context: Arc::clone(&ext_ctx),
+                budget_tracker: Arc::clone(&tracker),
             };
 
             {
@@ -643,41 +649,64 @@ impl AgentExecutor for CodexAgentExecutor {
                 *coord_guard = Some(context.agent_spec.agent_id);
             }
 
-            if let Some(ref cp) = self.control_plane {
-                let _ = cp
-                    .record_agent_spawned(
-                        context.studio_id,
-                        context.agent_spec.agent_id,
-                        thread_id.to_string(),
-                        None,
-                        None,
-                    )
-                    .await;
+            let _ = self
+                .control_plane
+                .record_agent_spawned(
+                    context.studio_id,
+                    context.agent_spec.agent_id,
+                    thread_id.to_string(),
+                    None,
+                    None,
+                )
+                .await;
+
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                .await;
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Busy)
+                .await;
+
+            let mut turn_input = TurnInputRequest::user_input(vec![UserInput::Text {
+                text: context.prompt.clone(),
+                text_elements: vec![],
+            }]);
+            if let Some(schema) = context.output_schema.clone() {
+                turn_input.start.final_output_json_schema = Some(schema);
             }
 
-            thread
-                .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                    text: context.prompt.clone(),
-                    text_elements: vec![],
-                }]))
-                .await
-                .map_err(|e| InternalAgentError::ExecutionFailed {
+            if let Err(e) = thread.start_or_steer_turn(turn_input).await {
+                tracker.rollback_turn();
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
                     agent_id: context.agent_spec.agent_id,
                     error: format!("Failed to submit turn input: {e}"),
-                })?;
+                });
+            }
+            tracker.commit_turn();
 
-            let (output, turns, tools, success) = self
+            let drain_res = self
                 .drain_events(
                     &thread,
                     &active_turn,
-                    &mut tracker,
-                    context.task_id,
+                    &tracker,
                     context.run_id,
                     context.agent_spec.agent_id,
                     context.studio_id,
                 )
-                .await?;
+                .await;
 
+            let _ = self
+                .control_plane
+                .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                .await;
+
+            let (output, turns, tools, success) = drain_res?;
             let elapsed = start.elapsed().as_secs();
             return Ok(AgentExecutionResult {
                 output,
@@ -688,6 +717,7 @@ impl AgentExecutor for CodexAgentExecutor {
             });
         }
 
+        // Child agent
         let parent_id = context.parent_agent_id.unwrap();
         let parent_state = {
             let guard = self.running_agents.read().await;
@@ -700,7 +730,49 @@ impl AgentExecutor for CodexAgentExecutor {
                 })?
         };
 
-        let mut child_config = (**base_config).clone();
+        if let Err(err) = parent_state.budget_tracker.reserve_child_agent() {
+            let limit = parent_state
+                .budget_tracker
+                .budget()
+                .max_child_agents
+                .unwrap_or(0);
+            let actual = parent_state.budget_tracker.child_agents_used() + 1;
+            let _ = self
+                .control_plane
+                .record_budget_exceeded(
+                    context.studio_id,
+                    parent_id,
+                    context.run_id,
+                    "child_agents".to_string(),
+                    limit as u64,
+                    actual as u64,
+                )
+                .await;
+            return Err(err);
+        }
+
+        let child_scope = context
+            .run_id
+            .map(BudgetScopeId::Run)
+            .unwrap_or_else(|| BudgetScopeId::Coordinator(context.agent_spec.agent_id));
+        let child_tracker = Arc::new(AgentBudgetTracker::new_with_scope(
+            child_scope,
+            context.agent_spec.agent_id,
+            context.budget.clone(),
+        ));
+
+        child_tracker.check_wall_clock()?;
+        if let Err(e) = child_tracker.reserve_turn() {
+            parent_state.budget_tracker.rollback_child_agent();
+            return Err(e);
+        }
+
+        let _ = self
+            .control_plane
+            .transition_agent_state(context.agent_spec.agent_id, AgentState::Starting)
+            .await;
+
+        let mut child_config = (*self.config).clone();
         child_config.model_provider_id = prepared_session.model_provider_id().to_string();
         child_config.model = Some(prepared_session.selected_model().to_string());
         if context.agent_spec.workspace_access.is_read_only() {
@@ -708,19 +780,38 @@ impl AgentExecutor for CodexAgentExecutor {
                 .set_legacy_sandbox_policy(SandboxPolicy::ReadOnly {
                     network_access: false,
                 })
-                .map_err(|e| InternalAgentError::ExecutionFailed {
-                    agent_id: context.agent_spec.agent_id,
-                    error: e.to_string(),
+                .map_err(|e| {
+                    parent_state.budget_tracker.rollback_child_agent();
+                    child_tracker.rollback_turn();
+                    InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: e.to_string(),
+                    }
                 })?;
             child_config.permissions = Permissions::from_approval_and_profile(
                 Constrained::allow_any(AskForApproval::Never),
                 Constrained::allow_any(PermissionProfile::read_only()),
             )
-            .map_err(|e| InternalAgentError::ExecutionFailed {
-                agent_id: context.agent_spec.agent_id,
-                error: e.to_string(),
+            .map_err(|e| {
+                parent_state.budget_tracker.rollback_child_agent();
+                child_tracker.rollback_turn();
+                InternalAgentError::ExecutionFailed {
+                    agent_id: context.agent_spec.agent_id,
+                    error: e.to_string(),
+                }
             })?;
         }
+
+        let child_ext_ctx = Arc::new(AgentRuntimeExtensionContext::new(
+            context.studio_id,
+            context.agent_spec.agent_id,
+            Arc::clone(&child_tracker),
+            self.control_plane.clone(),
+        ));
+        child_ext_ctx.set_task_and_run(context.task_id, context.run_id, Arc::clone(&child_tracker));
+
+        let mut child_init = codex_extension_api::ExtensionDataInit::new();
+        child_init.insert((*child_ext_ctx).clone());
 
         let worker_override = prepared_session.into_runtime_override();
         let spawn_req = SpawnRequest {
@@ -742,25 +833,54 @@ impl AgentExecutor for CodexAgentExecutor {
                 ..Default::default()
             },
             model_runtime_override: Some(worker_override),
-            thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+            thread_extension_init: child_init,
         };
 
-        let (live_agent, _snapshot) =
-            parent_state
-                .agent_control
-                .spawn(spawn_req)
-                .await
-                .map_err(|e| InternalAgentError::ExecutionFailed {
+        let (live_agent, _snapshot) = match parent_state.agent_control.spawn(spawn_req).await {
+            Ok(res) => {
+                parent_state.budget_tracker.commit_child_agent();
+                child_tracker.commit_turn();
+                let _ = self
+                    .control_plane
+                    .record_budget_usage_updated(
+                        context.studio_id,
+                        parent_id,
+                        None,
+                        parent_state.budget_tracker.turns_used(),
+                        parent_state.budget_tracker.tool_calls_used(),
+                        parent_state.budget_tracker.wall_clock_secs_used(),
+                        parent_state.budget_tracker.child_agents_used(),
+                    )
+                    .await;
+                res
+            }
+            Err(e) => {
+                parent_state.budget_tracker.rollback_child_agent();
+                child_tracker.rollback_turn();
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
                     agent_id: context.agent_spec.agent_id,
                     error: format!("Failed to spawn child worker: {e}"),
-                })?;
-
-        let child_thread = tm.get_thread(live_agent.thread_id).await.map_err(|e| {
-            InternalAgentError::ExecutionFailed {
-                agent_id: context.agent_spec.agent_id,
-                error: format!("Failed to get child thread from thread manager: {e}"),
+                });
             }
-        })?;
+        };
+
+        let child_thread = match self.thread_manager.get_thread(live_agent.thread_id).await {
+            Ok(th) => th,
+            Err(e) => {
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
+                    agent_id: context.agent_spec.agent_id,
+                    error: format!("Failed to get child thread from thread manager: {e}"),
+                });
+            }
+        };
 
         let child_control = child_thread.agent_control();
         let active_turn = Arc::new(AtomicBool::new(true));
@@ -772,6 +892,8 @@ impl AgentExecutor for CodexAgentExecutor {
             active_turn: Arc::clone(&active_turn),
             current_run_id: context.run_id,
             parent_agent_id: Some(parent_id),
+            extension_context: Arc::clone(&child_ext_ctx),
+            budget_tracker: Arc::clone(&child_tracker),
         };
 
         {
@@ -779,30 +901,43 @@ impl AgentExecutor for CodexAgentExecutor {
             guard.insert(context.agent_spec.agent_id, state);
         }
 
-        if let Some(ref cp) = self.control_plane {
-            let _ = cp
-                .record_agent_spawned(
-                    context.studio_id,
-                    context.agent_spec.agent_id,
-                    live_agent.thread_id.to_string(),
-                    Some(parent_id),
-                    Some(parent_state.thread_id.to_string()),
-                )
-                .await;
-        }
+        let _ = self
+            .control_plane
+            .record_agent_spawned(
+                context.studio_id,
+                context.agent_spec.agent_id,
+                live_agent.thread_id.to_string(),
+                Some(parent_id),
+                Some(parent_state.thread_id.to_string()),
+            )
+            .await;
 
-        let (output, turns, tools, success) = self
+        let _ = self
+            .control_plane
+            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+            .await;
+        let _ = self
+            .control_plane
+            .transition_agent_state(context.agent_spec.agent_id, AgentState::Busy)
+            .await;
+
+        let drain_res = self
             .drain_events(
                 &child_thread,
                 &active_turn,
-                &mut tracker,
-                context.task_id,
+                &child_tracker,
                 context.run_id,
                 context.agent_spec.agent_id,
                 context.studio_id,
             )
-            .await?;
+            .await;
 
+        let _ = self
+            .control_plane
+            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+            .await;
+
+        let (output, turns, tools, success) = drain_res?;
         let elapsed = start.elapsed().as_secs();
         Ok(AgentExecutionResult {
             output,

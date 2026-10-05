@@ -29,19 +29,18 @@ async fn setup_test_supervisor() -> (AgentStudiosSupervisor<MockAgentExecutor>, 
     let reviewer = InternalAgentSpec::new(AgentId::new(), "Reviewer", "Auditor", dummy_model)
         .with_workspace_access(WorkspaceAccessMode::ReadOnly);
 
-    let team = InternalTeamSpec::new("test-team", coord)
-        .add_agent("coder", coder)
-        .unwrap()
-        .add_agent("reviewer", reviewer)
-        .unwrap();
-
     let arbitrator = WorkspacePolicyArbitrator::new();
     let executor = MockAgentExecutor::new();
 
     let studio = cp_handle.create_studio("Test Studio").await.unwrap();
 
-    let supervisor =
-        AgentStudiosSupervisor::new(cp_handle, team, arbitrator, studio.id, executor.clone());
+    let team = InternalTeamSpec::new(studio.id, "test-team", coord)
+        .add_agent("coder", coder)
+        .unwrap()
+        .add_agent("reviewer", reviewer)
+        .unwrap();
+
+    let supervisor = AgentStudiosSupervisor::new(cp_handle, team, arbitrator, executor.clone());
 
     (supervisor, executor)
 }

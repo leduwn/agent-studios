@@ -312,3 +312,242 @@ fn test_sequence_tracker_monotonicity_and_gap_detection() {
         }
     );
 }
+
+#[test]
+fn test_recursive_spawn_depth_and_cycle_protection() {
+    let studio_id = StudioId::new();
+    let root_id = AgentId::new();
+    let child_id = AgentId::new();
+    let grandchild_id = AgentId::new();
+    let now = Utc::now();
+
+    let mut root_agent = AgentDescriptor::new(
+        studio_id,
+        "RootCoordinator",
+        AgentKind::Internal,
+        Some("Coordinator".to_string()),
+    );
+    root_agent.id = root_id;
+    let mut child_agent = AgentDescriptor::new(
+        studio_id,
+        "ChildCoder",
+        AgentKind::Internal,
+        Some("Coder".to_string()),
+    );
+    child_agent.id = child_id;
+    let mut grandchild_agent = AgentDescriptor::new(
+        studio_id,
+        "GrandchildReviewer",
+        AgentKind::Internal,
+        Some("Reviewer".to_string()),
+    );
+    grandchild_agent.id = grandchild_id;
+
+    let events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentRegistered { agent: root_agent },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentSpawned {
+                agent_id: root_id,
+                thread_id: "thread_root".to_string(),
+                parent_agent_id: None,
+                parent_thread_id: None,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 3,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentRegistered { agent: child_agent },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 4,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentSpawned {
+                agent_id: child_id,
+                thread_id: "thread_child".to_string(),
+                parent_agent_id: Some(root_id),
+                parent_thread_id: Some("thread_root".to_string()),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 5,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentRegistered {
+                agent: grandchild_agent,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 6,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentSpawned {
+                agent_id: grandchild_id,
+                thread_id: "thread_grandchild".to_string(),
+                parent_agent_id: Some(child_id),
+                parent_thread_id: Some("thread_child".to_string()),
+            },
+        },
+    ];
+
+    let root_summary = project_agent_summary(root_id, &events, None).unwrap();
+    assert_eq!(root_summary.spawn_depth, 0);
+
+    let child_summary = project_agent_summary(child_id, &events, None).unwrap();
+    assert_eq!(child_summary.spawn_depth, 1);
+    assert_eq!(child_summary.parent_agent_id, Some(root_id));
+    assert_eq!(
+        child_summary.parent_thread_id.as_deref(),
+        Some("thread_root")
+    );
+
+    let grandchild_summary = project_agent_summary(grandchild_id, &events, None).unwrap();
+    assert_eq!(grandchild_summary.spawn_depth, 2);
+    assert_eq!(grandchild_summary.parent_agent_id, Some(child_id));
+    assert_eq!(
+        grandchild_summary.parent_thread_id.as_deref(),
+        Some("thread_child")
+    );
+}
+
+#[test]
+fn test_agent_operational_state_and_current_task_id() {
+    use agent_studios_orchestration::AgentOperationalState;
+
+    let studio_id = StudioId::new();
+    let agent_id = AgentId::new();
+    let task_id = TaskId::new();
+    let run = RunRecord::new(task_id, agent_id, 1);
+    let run_id = run.id;
+    let now = Utc::now();
+
+    let mut agent = AgentDescriptor::new(studio_id, "Worker", AgentKind::Internal, None);
+    agent.id = agent_id;
+
+    let mut events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::AgentRegistered { agent },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::RunCreated { run },
+        },
+    ];
+
+    let s1 = project_agent_summary(agent_id, &events, None).unwrap();
+    assert_eq!(s1.operational_state, AgentOperationalState::Idle);
+    assert_eq!(s1.current_task_id, None);
+
+    // Run starts
+    events.push(EventEnvelope {
+        event_id: EventId::new(),
+        schema_version: 1,
+        sequence: 3,
+        studio_id,
+        timestamp: now,
+        event: ControlPlaneEvent::RunStateChanged {
+            run_id,
+            previous_state: RunState::Queued,
+            new_state: RunState::Running,
+        },
+    });
+
+    let s2 = project_agent_summary(agent_id, &events, None).unwrap();
+    assert_eq!(s2.operational_state, AgentOperationalState::Running);
+    assert_eq!(s2.current_task_id, Some(task_id));
+
+    // Run completes
+    events.push(EventEnvelope {
+        event_id: EventId::new(),
+        schema_version: 1,
+        sequence: 4,
+        studio_id,
+        timestamp: now,
+        event: ControlPlaneEvent::RunStateChanged {
+            run_id,
+            previous_state: RunState::Running,
+            new_state: RunState::Succeeded,
+        },
+    });
+
+    let s3 = project_agent_summary(agent_id, &events, None).unwrap();
+    assert_eq!(s3.operational_state, AgentOperationalState::Idle);
+    assert_eq!(s3.current_task_id, None);
+}
+
+#[test]
+fn test_run_summary_with_outcome_recorded() {
+    let studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let agent_id = AgentId::new();
+    let run = RunRecord::new(task_id, agent_id, 2);
+    let run_id = run.id;
+    let now = Utc::now();
+
+    let events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::RunCreated { run },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::RunOutcomeRecorded {
+                run_id,
+                task_id,
+                agent_id,
+                classification: "budget_exceeded".to_string(),
+                safe_error_summary: Some("tool_calls limit reached".to_string()),
+            },
+        },
+    ];
+
+    let summary = project_run_summary(run_id, &events).unwrap();
+    assert_eq!(summary.attempt, 2);
+    assert_eq!(
+        summary.failure_classification.as_deref(),
+        Some("budget_exceeded")
+    );
+    assert_eq!(
+        summary.safe_error_summary.as_deref(),
+        Some("tool_calls limit reached")
+    );
+    assert_eq!(summary.error.as_deref(), Some("tool_calls limit reached"));
+}

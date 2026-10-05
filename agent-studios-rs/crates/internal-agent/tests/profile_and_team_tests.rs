@@ -2,7 +2,7 @@ use agent_studios_internal_agent::{
     AgentExecutionBudget, AgentReasoningEffort, AgentReasoningSelection, COORDINATOR_ALIAS,
     InternalAgentError, InternalAgentSpec, InternalTeamSpec, WorkspaceAccessMode, validate_alias,
 };
-use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::id::{AgentId, StudioId};
 use agent_studios_provider::id::{ModelId, ProviderInstanceId};
 use agent_studios_provider::model::ModelRef;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -33,7 +33,8 @@ fn test_team_spec_construction_and_validation() {
         coord_model,
     );
 
-    let team = InternalTeamSpec::new("test-team", coord_spec.clone());
+    let studio_id = StudioId::new();
+    let team = InternalTeamSpec::new(studio_id, "test-team", coord_spec.clone());
     assert_eq!(team.len(), 1);
     assert!(!team.is_empty());
     assert_eq!(
@@ -100,7 +101,7 @@ fn test_duplicate_agent_id_rejected() {
         "Lead",
         ModelRef::new(ProviderInstanceId::new(), ModelId::new("m1").unwrap()),
     );
-    let team = InternalTeamSpec::new("team", coord_spec);
+    let team = InternalTeamSpec::new(StudioId::new(), "team", coord_spec);
 
     let worker_spec = InternalAgentSpec::new(
         shared_id,
@@ -148,4 +149,31 @@ fn test_budget_builder() {
     assert_eq!(unlimited.max_turns, None);
     assert_eq!(unlimited.max_tool_calls, None);
     assert_eq!(unlimited.max_wall_clock_secs, None);
+}
+
+#[test]
+fn test_team_max_parallel_agents_validation() {
+    let coord = InternalAgentSpec::new(
+        AgentId::new(),
+        "Coord",
+        "Lead",
+        ModelRef::new(ProviderInstanceId::new(), ModelId::new("m1").unwrap()),
+    );
+
+    // None accepted
+    let team_none = InternalTeamSpec::new(StudioId::new(), "team", coord.clone());
+    assert!(team_none.validate().is_ok());
+
+    // Some(N > 0) accepted
+    let team_two =
+        InternalTeamSpec::new(StudioId::new(), "team", coord.clone()).with_max_parallel_agents(2);
+    assert!(team_two.validate().is_ok());
+
+    // Some(0) rejected
+    let team_zero =
+        InternalTeamSpec::new(StudioId::new(), "team", coord).with_max_parallel_agents(0);
+    assert!(matches!(
+        team_zero.validate(),
+        Err(InternalAgentError::InvalidPlan(_))
+    ));
 }
