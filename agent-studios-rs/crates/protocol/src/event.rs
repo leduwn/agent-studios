@@ -127,6 +127,13 @@ pub enum ControlPlaneEvent {
         backoff_ms: u64,
         next_retry_at: Option<DateTime<Utc>>,
     },
+    RunOutcomeRecorded {
+        run_id: RunId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        classification: String,
+        safe_error_summary: Option<String>,
+    },
 }
 
 pub const CONTROL_PLANE_EVENT_SCHEMA_VERSION: u16 = 1;

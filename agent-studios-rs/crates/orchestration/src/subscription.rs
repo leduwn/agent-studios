@@ -11,6 +11,10 @@ impl SequenceTracker {
         Self::default()
     }
 
+    pub fn from_last_seen(last_seen_seq: Option<u64>) -> Self {
+        Self { last_seen_seq }
+    }
+
     pub fn last_seen_sequence(&self) -> Option<u64> {
         self.last_seen_seq
     }

@@ -147,6 +147,7 @@ dependencies = [
  "codex-thread-store",
  "codex-utils-absolute-path",
  "futures",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "tempfile",

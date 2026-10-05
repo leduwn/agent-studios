@@ -106,6 +106,42 @@ impl AgentDescriptor {
     }
 }
 
+/// Specification for batch registering an agent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchAgentSpec {
+    pub id: AgentId,
+    pub display_name: String,
+    pub kind: AgentKind,
+    pub role: Option<String>,
+}
+
+impl BatchAgentSpec {
+    pub fn new(
+        id: AgentId,
+        display_name: impl Into<String>,
+        kind: AgentKind,
+        role: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            display_name: display_name.into(),
+            kind,
+            role,
+        }
+    }
+}
+
+impl From<(AgentId, String, AgentKind, Option<String>)> for BatchAgentSpec {
+    fn from((id, display_name, kind, role): (AgentId, String, AgentKind, Option<String>)) -> Self {
+        Self {
+            id,
+            display_name,
+            kind,
+            role,
+        }
+    }
+}
+
 /// Execution budget limits for an agent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AgentExecutionBudget {

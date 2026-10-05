@@ -8,7 +8,7 @@ use agent_studios_control_plane::clock::FixedClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::error::{ControlPlaneError, ReplayError, StoreError};
 use agent_studios_control_plane::store::{EventStore, InMemoryStore};
-use agent_studios_protocol::agent::{AgentDescriptor, AgentKind};
+use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, BatchAgentSpec};
 use agent_studios_protocol::approval::{ApprovalKind, ApprovalRequest, ApprovalState};
 use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::cancellation::CancellationScope;
@@ -1444,4 +1444,124 @@ fn test_create_task_batch_duplicate_key_rejected() {
     let result = cp.create_task_batch(studio.id, batch);
     assert!(result.is_err());
     assert_eq!(cp.all_tasks().count(), 0);
+}
+
+#[test]
+fn test_register_agent_batch_success_and_atomic_failure() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Batch Agent Studio").unwrap();
+
+    let id1 = AgentId::new();
+    let id2 = AgentId::new();
+    let batch = vec![
+        BatchAgentSpec::new(id1, "Worker 1", AgentKind::Internal, Some("Role 1".into())),
+        BatchAgentSpec::new(id2, "Worker 2", AgentKind::Internal, Some("Role 2".into())),
+    ];
+
+    let registered = cp.register_agent_batch(studio.id, batch).unwrap();
+    assert_eq!(registered.len(), 2);
+    assert_eq!(registered[0].id, id1);
+    assert_eq!(registered[1].id, id2);
+
+    // Duplicate within batch should fail atomically
+    let id3 = AgentId::new();
+    let dup_batch = vec![
+        BatchAgentSpec::new(id3, "Worker 3", AgentKind::Internal, None),
+        BatchAgentSpec::new(id3, "Worker 3 duplicate", AgentKind::Internal, None),
+    ];
+    let err = cp.register_agent_batch(studio.id, dup_batch).unwrap_err();
+    assert!(matches!(err, ControlPlaneError::DuplicateAgent(id) if id == id3));
+
+    // Agent already registered should fail atomically
+    let existing_batch = vec![
+        BatchAgentSpec::new(AgentId::new(), "New Worker", AgentKind::Internal, None),
+        BatchAgentSpec::new(id1, "Worker 1 Conflict", AgentKind::Internal, None),
+    ];
+    let err = cp.register_agent_batch(studio.id, existing_batch).unwrap_err();
+    assert!(matches!(err, ControlPlaneError::DuplicateAgent(id) if id == id1));
+}
+
+#[test]
+fn test_record_run_outcome_and_strict_replay() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Outcome Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Agent", AgentKind::Internal, None)
+        .unwrap();
+    let task = cp
+        .create_task(studio.id, "Task", "", None, Some(agent.id), vec![])
+        .unwrap();
+    let run = cp.create_run(task.id, agent.id).unwrap();
+
+    cp.record_run_outcome(run.id, "budget_exceeded", Some("Tool call limit reached".into()))
+        .unwrap();
+
+    // Verify replay works
+    let events = cp.events_for_studio(studio.id, 1).unwrap();
+    let replayed = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
+    assert_eq!(replayed.all_runs().count(), 1);
+}
+
+#[test]
+fn test_replay_corrupted_strict_agent_and_run_checks() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let unknown_agent = AgentId::new();
+
+    // 1. ToolStarted with unknown agent fails
+    let mut bad_events = events.clone();
+    bad_events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::ToolStarted {
+            agent_id: unknown_agent,
+            task_id: Some(tid),
+            run_id: None,
+            tool_name: "test_tool".into(),
+            call_id: "c1".into(),
+            timestamp: now,
+        },
+    ));
+    let res = ControlPlane::replay_events(&bad_events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::AgentNotFound { agent_id }) if agent_id == unknown_agent));
+
+    // 2. RunOutcomeRecorded with mismatched run agent fails
+    let other_agent = AgentDescriptor::new(sid, "Other", AgentKind::Internal, None);
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::AgentRegistered { agent: other_agent.clone() },
+    ));
+    let run = RunRecord::new(tid, aid, 1);
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::RunCreated { run: run.clone() },
+    ));
+
+    let mut mismatched_events = events.clone();
+    mismatched_events.push(EventEnvelope::new(
+        sid,
+        6,
+        now,
+        ControlPlaneEvent::RunOutcomeRecorded {
+            run_id: run.id,
+            task_id: tid,
+            agent_id: other_agent.id, // Mismatched agent!
+            classification: "test".into(),
+            safe_error_summary: None,
+        },
+    ));
+    let res = ControlPlane::replay_events(&mismatched_events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::DomainViolation(_))));
 }

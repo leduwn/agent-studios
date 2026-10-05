@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use agent_studios_control_plane::ControlPlaneState;
 use agent_studios_control_plane::SystemClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::error::ControlPlaneError;
 use agent_studios_control_plane::store::InMemoryStore;
-use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState};
+use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState, BatchAgentSpec};
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
 use agent_studios_protocol::event::EventEnvelope;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
@@ -28,6 +30,11 @@ pub enum ControlPlaneCommand {
         kind: AgentKind,
         role: Option<String>,
         respond_to: oneshot::Sender<Result<AgentDescriptor, ControlPlaneError>>,
+    },
+    RegisterAgentBatch {
+        studio_id: StudioId,
+        agents: Vec<BatchAgentSpec>,
+        respond_to: oneshot::Sender<Result<Vec<AgentDescriptor>, ControlPlaneError>>,
     },
     TransitionAgentState {
         agent_id: AgentId,
@@ -66,6 +73,12 @@ pub enum ControlPlaneCommand {
     TransitionRunState {
         run_id: RunId,
         new_state: RunState,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordRunOutcome {
+        run_id: RunId,
+        classification: String,
+        safe_error_summary: Option<String>,
         respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
     },
     RequestCancellation {
@@ -251,6 +264,25 @@ impl ControlPlaneHandle {
             .map_err(InternalAgentError::ControlPlane)
     }
 
+    pub async fn register_agent_batch(
+        &self,
+        studio_id: StudioId,
+        agents: Vec<BatchAgentSpec>,
+    ) -> Result<Vec<AgentDescriptor>, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RegisterAgentBatch {
+                studio_id,
+                agents,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
     pub async fn create_task(
         &self,
         studio_id: StudioId,
@@ -345,6 +377,27 @@ impl ControlPlaneHandle {
             .send(ControlPlaneCommand::TransitionRunState {
                 run_id,
                 new_state,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_run_outcome(
+        &self,
+        run_id: RunId,
+        classification: impl Into<String>,
+        safe_error_summary: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordRunOutcome {
+                run_id,
+                classification: classification.into(),
+                safe_error_summary,
                 respond_to: tx,
             })
             .await
@@ -727,8 +780,8 @@ impl ControlPlaneActor {
         mut control_plane: ControlPlane<SystemClock, InMemoryStore>,
     ) -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::channel::<ControlPlaneCommand>(1024);
-        let (broadcast_tx, _) = broadcast::channel::<EventEnvelope>(4096);
-        let broadcast_sender = broadcast_tx.clone();
+        let mut studio_channels: HashMap<StudioId, broadcast::Sender<EventEnvelope>> =
+            HashMap::new();
 
         let handle = tokio::spawn(async move {
             while let Some(command) = rx.recv().await {
@@ -757,6 +810,14 @@ impl ControlPlaneActor {
                                 control_plane.register_agent(studio_id, display_name, kind, role)
                             }
                         };
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RegisterAgentBatch {
+                        studio_id,
+                        agents,
+                        respond_to,
+                    } => {
+                        let res = control_plane.register_agent_batch(studio_id, agents);
                         let _ = respond_to.send(res);
                     }
                     ControlPlaneCommand::TransitionAgentState {
@@ -826,6 +887,19 @@ impl ControlPlaneActor {
                         let res = control_plane.transition_run_state(run_id, new_state);
                         let _ = respond_to.send(res);
                     }
+                    ControlPlaneCommand::RecordRunOutcome {
+                        run_id,
+                        classification,
+                        safe_error_summary,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_run_outcome(
+                            run_id,
+                            classification,
+                            safe_error_summary,
+                        );
+                        let _ = respond_to.send(res);
+                    }
                     ControlPlaneCommand::RequestCancellation {
                         scope,
                         reason,
@@ -839,7 +913,11 @@ impl ControlPlaneActor {
                         from_sequence,
                         respond_to,
                     } => {
-                        let sub_rx = broadcast_sender.subscribe();
+                        let sender = studio_channels.entry(studio_id).or_insert_with(|| {
+                            let (tx, _) = broadcast::channel(4096);
+                            tx
+                        });
+                        let sub_rx = sender.subscribe();
                         let res = control_plane
                             .events_for_studio(studio_id, from_sequence)
                             .map(|events| (events, sub_rx));
@@ -1036,7 +1114,9 @@ impl ControlPlaneActor {
                 }
 
                 for env in control_plane.drain_committed_events() {
-                    let _ = broadcast_sender.send(env);
+                    if let Some(sender) = studio_channels.get(&env.studio_id) {
+                        let _ = sender.send(env);
+                    }
                 }
             }
         });

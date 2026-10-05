@@ -742,6 +742,7 @@ impl AgentExecutor for CodexAgentExecutor {
                 ..Default::default()
             },
             model_runtime_override: Some(worker_override),
+            thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         };
 
         let (live_agent, _snapshot) =

@@ -13,6 +13,9 @@ pub enum ControlPlaneError {
     #[error("Agent {0} not found")]
     AgentNotFound(AgentId),
 
+    #[error("Agent {0} already registered")]
+    DuplicateAgent(AgentId),
+
     #[error("Task {0} not found")]
     TaskNotFound(TaskId),
 

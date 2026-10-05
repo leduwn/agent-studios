@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState};
+use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState, BatchAgentSpec};
 use agent_studios_protocol::approval::{ApprovalKind, ApprovalRequest, ApprovalState};
 use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
@@ -590,9 +590,13 @@ impl ControlPlaneState {
             },
 
             ControlPlaneEvent::AgentRuntimeBound { agent_id, .. } => {
-                if let Some(agent) = self.agents.get(agent_id)
-                    && envelope.studio_id != agent.studio_id
-                {
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if envelope.studio_id != agent.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: agent.studio_id,
                         actual: envelope.studio_id,
@@ -605,37 +609,178 @@ impl ControlPlaneState {
                 parent_agent_id,
                 ..
             } => {
-                if let Some(agent) = self.agents.get(agent_id)
-                    && envelope.studio_id != agent.studio_id
-                {
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if envelope.studio_id != agent.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: agent.studio_id,
                         actual: envelope.studio_id,
                     });
                 }
-                if let Some(parent_id) = parent_agent_id
-                    && let Some(parent) = self.agents.get(parent_id)
-                    && envelope.studio_id != parent.studio_id
-                {
-                    return Err(ReplayError::StudioMismatch {
-                        expected: parent.studio_id,
-                        actual: envelope.studio_id,
-                    });
+                if let Some(parent_id) = parent_agent_id {
+                    let parent = self
+                        .agents
+                        .get(parent_id)
+                        .ok_or(ReplayError::AgentNotFound {
+                            agent_id: *parent_id,
+                        })?;
+                    if envelope.studio_id != parent.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: parent.studio_id,
+                            actual: envelope.studio_id,
+                        });
+                    }
                 }
             }
 
-            ControlPlaneEvent::ToolStarted { agent_id, .. }
-            | ControlPlaneEvent::ToolCompleted { agent_id, .. }
-            | ControlPlaneEvent::ToolFailed { agent_id, .. }
-            | ControlPlaneEvent::BudgetUsageUpdated { agent_id, .. }
-            | ControlPlaneEvent::BudgetExceeded { agent_id, .. } => {
-                if let Some(agent) = self.agents.get(agent_id)
-                    && envelope.studio_id != agent.studio_id
-                {
+            ControlPlaneEvent::ToolStarted {
+                agent_id,
+                task_id,
+                run_id,
+                ..
+            }
+            | ControlPlaneEvent::ToolCompleted {
+                agent_id,
+                task_id,
+                run_id,
+                ..
+            }
+            | ControlPlaneEvent::ToolFailed {
+                agent_id,
+                task_id,
+                run_id,
+                ..
+            } => {
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if envelope.studio_id != agent.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: agent.studio_id,
                         actual: envelope.studio_id,
                     });
+                }
+
+                if let Some(tid) = task_id {
+                    let task = self
+                        .task_graph
+                        .get_task(*tid)
+                        .ok_or(ReplayError::TaskNotFound { task_id: *tid })?;
+                    if envelope.studio_id != task.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: task.studio_id,
+                            actual: envelope.studio_id,
+                        });
+                    }
+                }
+
+                if let Some(rid) = run_id {
+                    let run = self
+                        .runs
+                        .get(rid)
+                        .ok_or(ReplayError::RunNotFound { run_id: *rid })?;
+                    if run.agent_id != *agent_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Tool event agent_id {agent_id} does not match Run.agent_id {}",
+                            run.agent_id
+                        )));
+                    }
+                    if let Some(tid) = task_id
+                        && run.task_id != *tid
+                    {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Tool event task_id {tid} does not match Run.task_id {}",
+                            run.task_id
+                        )));
+                    }
+                }
+            }
+
+            ControlPlaneEvent::BudgetUsageUpdated {
+                agent_id, run_id, ..
+            }
+            | ControlPlaneEvent::BudgetExceeded {
+                agent_id, run_id, ..
+            } => {
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if envelope.studio_id != agent.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if let Some(rid) = run_id {
+                    let run = self
+                        .runs
+                        .get(rid)
+                        .ok_or(ReplayError::RunNotFound { run_id: *rid })?;
+                    if run.agent_id != *agent_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Budget event agent_id {agent_id} does not match Run.agent_id {}",
+                            run.agent_id
+                        )));
+                    }
+                }
+            }
+
+            ControlPlaneEvent::RunOutcomeRecorded {
+                run_id,
+                task_id,
+                agent_id,
+                ..
+            } => {
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if envelope.studio_id != agent.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: agent.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                let task = self
+                    .task_graph
+                    .get_task(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+                if envelope.studio_id != task.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: task.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                let run = self
+                    .runs
+                    .get(run_id)
+                    .ok_or(ReplayError::RunNotFound { run_id: *run_id })?;
+                if run.task_id != *task_id {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "RunOutcomeRecorded task_id {task_id} does not match Run.task_id {}",
+                        run.task_id
+                    )));
+                }
+                if run.agent_id != *agent_id {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "RunOutcomeRecorded agent_id {agent_id} does not match Run.agent_id {}",
+                        run.agent_id
+                    )));
                 }
             }
 
@@ -823,6 +968,47 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
         self.commit_transaction(studio_id, vec![event])?;
         Ok(agent)
+    }
+
+    pub fn register_agent_batch(
+        &mut self,
+        studio_id: StudioId,
+        specs: Vec<BatchAgentSpec>,
+    ) -> Result<Vec<AgentDescriptor>, ControlPlaneError> {
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        let mut seen = HashSet::with_capacity(specs.len());
+        for spec in &specs {
+            if !seen.insert(spec.id) {
+                return Err(ControlPlaneError::DuplicateAgent(spec.id));
+            }
+            if self.state.agents.contains_key(&spec.id) {
+                return Err(ControlPlaneError::DuplicateAgent(spec.id));
+            }
+        }
+
+        let mut descriptors = Vec::with_capacity(specs.len());
+        let mut events = Vec::with_capacity(specs.len());
+
+        for spec in specs {
+            let descriptor = AgentDescriptor {
+                id: spec.id,
+                studio_id,
+                display_name: spec.display_name,
+                kind: spec.kind,
+                state: AgentState::Registered,
+                role: spec.role,
+            };
+            events.push(ControlPlaneEvent::AgentRegistered {
+                agent: descriptor.clone(),
+            });
+            descriptors.push(descriptor);
+        }
+
+        self.commit_transaction(studio_id, events)?;
+        Ok(descriptors)
     }
 
     pub fn update_agent_state(
@@ -1398,6 +1584,37 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             run_id,
             previous_state,
             new_state,
+        };
+
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_run_outcome(
+        &mut self,
+        run_id: RunId,
+        classification: impl Into<String>,
+        safe_error_summary: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let run = self
+            .state
+            .runs
+            .get(&run_id)
+            .ok_or(ControlPlaneError::RunNotFound(run_id))?;
+
+        let task = self
+            .state
+            .task_graph
+            .get_task(run.task_id)
+            .ok_or(ControlPlaneError::TaskNotFound(run.task_id))?;
+        let studio_id = task.studio_id;
+
+        let event = ControlPlaneEvent::RunOutcomeRecorded {
+            run_id,
+            task_id: run.task_id,
+            agent_id: run.agent_id,
+            classification: classification.into(),
+            safe_error_summary,
         };
 
         self.commit_transaction(studio_id, vec![event])?;
