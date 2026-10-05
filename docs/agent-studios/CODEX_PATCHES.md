@@ -90,3 +90,31 @@ This document catalogs all intentional, minimal patches maintained inside the `c
   - `codex-rs/core/tests/spawn_runtime_override_tests.rs`: Tests explicit override precedence over
     parent inheritance, `None` fallback inheritance from parent session, and
     `CodexThread::agent_control` façade functionality.
+
+### Patch 004: Host Extension Context Seam for Spawned Sub-Agents (Milestone M08.1.1)
+
+- **Seam Commit**: (Commit A, branch: `feat/internal-multi-agent-runtime-hardening`)
+- **Purpose**: Enables host orchestrators and parent threads to supply an explicit
+  `thread_extension_init: codex_extension_api::ExtensionDataInit` in `SpawnRequest` when launching
+  sub-agents via `AgentControl::spawn`. This allows external runtimes (such as Agent Studios) to
+  seed thread-scoped context (such as runtime execution context, tool lifecycle contributors, and
+  pre-execution budget trackers) into dynamically spawned agents before initial turn execution,
+  without leaking host or vendor logic into `codex-rs`. When omitted or defaulted,
+  `ExtensionDataInit::default()` maintains identical baseline Codex behavior.
+- **Files Modified**:
+  - `codex-rs/core/src/agent/api.rs`: Adds `pub thread_extension_init: codex_extension_api::ExtensionDataInit`
+    to `SpawnRequest`.
+  - `codex-rs/core/src/agent/control/api.rs`: Forwards `request.thread_extension_init` to
+    `spawn_agent_internal`.
+  - `codex-rs/core/src/agent/control/spawn.rs`: Passes `thread_extension_init` into
+    `spawn_new_thread_with_source` and `spawn_forked_thread`. In the fork path, retains Core-owned
+    capability roots authority while allowing host data seeding.
+  - `codex-rs/core/src/thread_manager.rs`: Updates `spawn_new_thread_with_source` to accept
+    `thread_extension_init` and forward it into `StartThreadOptions.thread_extension_init`.
+  - `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs` &
+    `codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`: Default `thread_extension_init`
+    in tool handlers.
+- **Targeted Verification Tests**:
+  - `codex-rs/core/src/agent/control_tests.rs::spawn_agent_forwards_thread_extension_init_to_spawned_thread`:
+    Verifies that host extension data injected via `SpawnRequest.thread_extension_init` is
+    accessible in the spawned agent's `session.services.thread_extension_data`.

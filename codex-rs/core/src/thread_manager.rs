@@ -1930,6 +1930,7 @@ impl ThreadManagerState {
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
             /*model_runtime_override*/ None,
+            /*thread_extension_init*/ codex_extension_api::ExtensionDataInit::default(),
         ))
         .await
     }
@@ -1950,6 +1951,7 @@ impl ThreadManagerState {
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
         model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
+        thread_extension_init: codex_extension_api::ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let model_runtime_override = match model_runtime_override {
@@ -1968,6 +1970,7 @@ impl ThreadManagerState {
             client_mcp_extensions,
             dynamic_tools,
             model_runtime_override,
+            thread_extension_init,
             ..StartThreadOptions::new(config)
         };
         let mut request =

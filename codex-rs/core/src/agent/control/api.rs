@@ -67,6 +67,7 @@ impl AgentControl for LocalAgentControl {
                 source,
                 options,
                 model_runtime_override,
+                thread_extension_init,
             } = request;
             let input = match input {
                 AgentInput::UserInput(input) => SpawnInitialInput::UserInput(input),
@@ -100,6 +101,7 @@ impl AgentControl for LocalAgentControl {
                 Some(source),
                 options,
                 model_runtime_override,
+                thread_extension_init,
             ))
             .await
         })

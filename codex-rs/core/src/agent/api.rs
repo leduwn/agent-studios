@@ -213,6 +213,7 @@ pub struct SpawnRequest {
     pub source: SessionSource,
     pub options: SpawnAgentOptions,
     pub model_runtime_override: Option<ModelRuntimeOverride>,
+    pub thread_extension_init: codex_extension_api::ExtensionDataInit,
 }
 
 pub struct SendRequest {

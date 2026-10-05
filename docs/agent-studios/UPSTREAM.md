@@ -63,17 +63,19 @@ git fetch upstream
 
 Agent Studios-specific functionality is implemented preferentially as additive crates/modules outside `codex-rs/` (in `agent-studios-rs/crates/`).
 
-Starting in Milestones M07.5, M07.6, and M08, `codex-rs/` is no longer byte-identical to the
+Starting in Milestones M07.5, M07.6, M08, and M08.1.1, `codex-rs/` is no longer byte-identical to the
 upstream snapshot. To allow Agent Studios to supply custom model inference backends (such as
 Chat Completions, Anthropic Messages, and Gemini generateContent), thread-scoped model runtime
-overrides, and multi-agent child spawn runtime overrides while fully preserving Codex's native
-agent loop, tool router, and execution engine, three minimal, provider-neutral, default-off
-seams are maintained:
+overrides, multi-agent child spawn runtime overrides, and host extension contexts for dynamically
+spawned sub-agents while fully preserving Codex's native agent loop, tool router, and execution
+engine, four minimal, provider-neutral, default-off seams are maintained:
 1. `ModelInferenceBackend` seam in `codex-rs/model-provider` and `codex-rs/core` (Patch 001).
 2. `ModelRuntimeOverride` thread injection seam in `codex-rs/core`, `codex-rs/core-api`, and
    `codex-rs/model-provider` (Patch 002).
 3. `SpawnRequest` model runtime override and `CodexThread::agent_control` façade in
    `codex-rs/core` (Patch 003).
+4. `SpawnRequest.thread_extension_init` host extension seam for spawned sub-agents in
+   `codex-rs/core` (Patch 004).
 
 All intentional modifications to `codex-rs/` are strictly registered and audited in
 `docs/agent-studios/CODEX_PATCHES.md`. During upstream synchronization, these minimal patches

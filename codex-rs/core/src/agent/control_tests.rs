@@ -124,6 +124,7 @@ impl LocalAgentControl {
             source,
             options,
             model_runtime_override: None,
+            thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         })
         .await
         .map(|(agent, _)| agent)
@@ -5085,6 +5086,62 @@ async fn list_agent_subtree_thread_ids_finds_live_descendants_of_unloaded_root()
 
     assert_eq!(subtree_thread_ids, expected_subtree_thread_ids);
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestSpawnExtensionTag(String);
+
+#[tokio::test]
+async fn spawn_agent_forwards_thread_extension_init_to_spawned_thread() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(TestSpawnExtensionTag("spawn-init-payload".to_string()));
+
+    let (spawned_agent, _) = harness
+        .control
+        .spawn(SpawnRequest {
+            caller: parent_thread_id,
+            config: harness.config.clone(),
+            input: AgentInput::UserInput(text_input("hello child")),
+            source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            }),
+            options: SpawnAgentOptions::default(),
+            model_runtime_override: None,
+            thread_extension_init,
+        })
+        .await
+        .expect("child spawn with thread_extension_init should succeed");
+
+    let child_thread = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("spawned thread should exist");
+
+    let retrieved = child_thread
+        .session
+        .services
+        .thread_extension_data
+        .get::<TestSpawnExtensionTag>();
+    assert_eq!(
+        retrieved.as_deref(),
+        Some(&TestSpawnExtensionTag("spawn-init-payload".to_string())),
+        "spawned thread should receive host extension init data"
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(spawned_agent.thread_id)
+        .await
+        .expect("shutdown spawned agent");
+}
+
 
 #[tokio::test]
 async fn shutdown_agent_tree_closes_live_descendants() {

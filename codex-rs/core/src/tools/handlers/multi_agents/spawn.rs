@@ -136,6 +136,7 @@ async fn handle_spawn_agent(
                 cyber_access_program: turn.cyber_access_program,
             },
             model_runtime_override: None,
+            thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         })
         .await
         .map_err(|err| {

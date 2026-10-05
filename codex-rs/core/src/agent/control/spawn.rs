@@ -24,7 +24,6 @@ use crate::context::world_state::PersistentModeState;
 use crate::session::multi_agents::resolve_usage_hints;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
-use codex_extension_api::ExtensionDataInit;
 use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
 use codex_prompts::ResolvedModelMessages;
@@ -287,6 +286,7 @@ impl LocalAgentControl {
             session_source,
             SpawnAgentOptions::default(),
             /*model_runtime_override*/ None,
+            /*thread_extension_init*/ codex_extension_api::ExtensionDataInit::default(),
         ))
         .await?;
         Ok(spawned_agent.thread_id)
@@ -641,6 +641,7 @@ impl LocalAgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
         model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
+        thread_extension_init: codex_extension_api::ExtensionDataInit,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
         let membership = self.runtime.admit_start()?;
         let spawn_started_at = Instant::now();
@@ -739,6 +740,7 @@ impl LocalAgentControl {
                     inheritance,
                     multi_agent_version,
                     model_runtime_override,
+                    thread_extension_init,
                 ))
                 .await?
             }
@@ -782,6 +784,7 @@ impl LocalAgentControl {
                     inheritance.exec_policy,
                     environments,
                     model_runtime_override,
+                    thread_extension_init,
                 ))
                 .await?;
                 SpawnedThreadResult {
@@ -950,6 +953,7 @@ impl LocalAgentControl {
         inheritance: SpawnAgentThreadInheritance,
         multi_agent_version: MultiAgentVersion,
         model_runtime_override: Option<crate::model_runtime::ModelRuntimeOverride>,
+        host_thread_extension_init: codex_extension_api::ExtensionDataInit,
     ) -> CodexResult<SpawnedThreadResult> {
         let SpawnAgentThreadInheritance {
             environments: inherited_environments,
@@ -1249,7 +1253,7 @@ impl LocalAgentControl {
                 subagent_usage_hint_message.into(),
             ));
         }
-        let mut thread_extension_init = ExtensionDataInit::new();
+        let mut thread_extension_init = host_thread_extension_init;
         thread_extension_init.insert(selected_capability_roots);
 
         let fork_context = fork_context_started_at.elapsed();
