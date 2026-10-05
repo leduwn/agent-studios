@@ -20,7 +20,6 @@ use codex_core::{
     StartThreadOptions, ThreadManager, TurnInputRequest, init_state_db, passthrough_image_store,
     resolve_installation_id, thread_store_from_config,
 };
-use codex_extension_api::empty_extension_registry;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::{AuthManager, CodexAuth};
 use codex_protocol::protocol::{EventMsg, InternalSessionSource, SessionSource};
@@ -79,7 +78,8 @@ async fn create_test_thread_manager(codex_home: &std::path::Path) -> (ThreadMana
     );
     let models_manager = codex_core::build_models_manager(&config, auth_manager.clone());
     let environment_manager = Arc::new(codex_exec_server::EnvironmentManager::default_for_tests());
-    let extensions = empty_extension_registry();
+    let extensions =
+        Arc::new(agent_studios_internal_agent::build_agent_studios_extension_registry());
     let image_store = passthrough_image_store();
 
     let manager = ThreadManager::new(

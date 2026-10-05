@@ -44,3 +44,4 @@ codex-thread-store = { path = "../../../codex-rs/thread-store" }
 codex-attachment-store = { path = "../../../codex-rs/attachment-store" }
 codex-config = { path = "../../../codex-rs/config" }
 codex-utils-absolute-path = { path = "../../../codex-rs/utils/absolute-path" }
+agent-studios-internal-agent = { path = "../internal-agent" }

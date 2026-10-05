@@ -15,6 +15,7 @@ pub mod coordinator;
 pub mod error;
 pub mod executor;
 pub mod profile;
+pub mod runtime_factory;
 pub mod supervisor;
 pub mod team;
 pub mod workspace_policy;
@@ -23,7 +24,7 @@ pub use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 pub use budget::{AgentBudgetTracker, BudgetScope, BudgetScopeId};
 pub use contributor::{
     AgentRuntimeExtensionContext, AgentStudiosToolLifecycleContributor,
-    build_agent_studios_extension_registry,
+    build_agent_studios_extension_builder, build_agent_studios_extension_registry,
 };
 pub use control_plane_actor::{ControlPlaneActor, ControlPlaneCommand, ControlPlaneHandle};
 pub use coordinator::{CoordinatorDecision, CoordinatorPlanValidator, PlannedTask};
@@ -36,6 +37,7 @@ pub use profile::{
     AgentExecutionBudget, AgentReasoningEffort, AgentReasoningSelection, InternalAgentSpec,
     WorkspaceAccessMode,
 };
+pub use runtime_factory::{AgentStudiosCodexRuntimeFactory, build_agent_studios_thread_manager};
 pub use supervisor::{
     AgentStudiosSupervisor, CoordinatorReviewStatus, FailurePolicy, SupervisorExecutionSummary,
 };

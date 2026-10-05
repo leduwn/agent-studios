@@ -19,6 +19,12 @@ codex-core = { path = "../../../codex-rs/core" }
 codex-protocol = { path = "../../../codex-rs/protocol" }
 codex-config = { path = "../../../codex-rs/config" }
 codex-extension-api = { path = "../../../codex-rs/ext/extension-api" }
+codex-login = { path = "../../../codex-rs/login" }
+codex-exec-server = { path = "../../../codex-rs/exec-server" }
+codex-home = { path = "../../../codex-rs/codex-home" }
+codex-thread-store = { path = "../../../codex-rs/thread-store" }
+codex-attachment-store = { path = "../../../codex-rs/attachment-store" }
+codex-utils-absolute-path = { path = "../../../codex-rs/utils/absolute-path" }
 schemars = "0.8.22"
 tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
 tokio-util = { version = "0.7" }
@@ -35,11 +41,5 @@ futures = "0.3"
 tokio = { version = "1.40", features = ["sync", "time", "rt-multi-thread", "macros"] }
 wiremock = "0.6"
 tempfile = "3"
-codex-login = { path = "../../../codex-rs/login" }
-codex-exec-server = { path = "../../../codex-rs/exec-server" }
-codex-extension-api = { path = "../../../codex-rs/ext/extension-api" }
-codex-home = { path = "../../../codex-rs/codex-home" }
-codex-thread-store = { path = "../../../codex-rs/thread-store" }
-codex-attachment-store = { path = "../../../codex-rs/attachment-store" }
-codex-config = { path = "../../../codex-rs/config" }
-codex-utils-absolute-path = { path = "../../../codex-rs/utils/absolute-path" }
+codex-tools = { path = "../../../codex-rs/tools" }
+agent-studios-orchestration = { path = "../orchestration" }

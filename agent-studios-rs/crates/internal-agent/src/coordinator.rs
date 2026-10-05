@@ -32,21 +32,6 @@ pub enum CoordinatorDecision {
     Fail { reason: String },
 }
 
-/// Extracts JSON payload from possible markdown code fences (```json ... ``` or ``` ... ```).
-pub fn extract_json_payload(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if let Some(stripped) = trimmed.strip_prefix("```json")
-        && let Some(end) = stripped.rfind("```")
-    {
-        return stripped[..end].trim();
-    } else if let Some(stripped) = trimmed.strip_prefix("```")
-        && let Some(end) = stripped.rfind("```")
-    {
-        return stripped[..end].trim();
-    }
-    trimmed
-}
-
 pub struct CoordinatorPlanValidator;
 
 impl CoordinatorPlanValidator {

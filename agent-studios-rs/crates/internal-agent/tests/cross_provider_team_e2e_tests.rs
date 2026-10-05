@@ -6,11 +6,13 @@ use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_internal_agent::{
     AgentExecutionBudget, AgentExecutionContext, AgentExecutor, AgentReasoningEffort,
-    AgentReasoningSelection, CodexAgentExecutor, ControlPlaneActor, ControlPlaneHandle,
-    InternalAgentSpec, InternalTeamSpec, WorkspaceAccessMode,
+    AgentReasoningSelection, AgentStudiosCodexRuntimeFactory, CodexAgentExecutor,
+    ControlPlaneActor, ControlPlaneHandle, InternalAgentSpec, InternalTeamSpec,
+    WorkspaceAccessMode,
 };
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_provider::ProviderCatalog;
+use agent_studios_provider::ProviderDefinition;
 use agent_studios_provider::auth::AuthenticationScheme;
 use agent_studios_provider::capabilities::ModelCapabilities;
 use agent_studios_provider::id::{ModelId, ProviderId, ProviderInstanceId};
@@ -22,18 +24,11 @@ use agent_studios_runtime_session::AgentStudiosRuntimeSessionFactory;
 use agent_studios_runtime_transport::{
     ContinuationManager, InMemorySecretResolver, RuntimeTransportOptions,
 };
-use codex_config::LoaderOverrides;
-use codex_core::config::{Config, ConfigBuilder};
-use codex_core::{
-    StartThreadOptions, ThreadManager, TurnInputRequest, init_state_db, passthrough_image_store,
-    resolve_installation_id, thread_store_from_config,
-};
-use codex_extension_api::empty_extension_registry;
-use codex_home::CodexHomeUserInstructionsProvider;
+use codex_core::config::Config;
+use codex_core::{StartThreadOptions, ThreadManager, TurnInputRequest};
 use codex_login::{AuthManager, CodexAuth};
 use codex_protocol::protocol::{EventMsg, SessionSource};
 use codex_protocol::user_input::UserInput;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -63,8 +58,6 @@ fn register_provider_and_instance(
     instance_id
 }
 
-use agent_studios_provider::ProviderDefinition;
-
 fn create_test_actor() -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
     let clock = SystemClock;
     let store = InMemoryStore::new();
@@ -73,64 +66,24 @@ fn create_test_actor() -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
 }
 
 async fn create_test_thread_manager(codex_home: &std::path::Path) -> (ThreadManager, Config) {
-    let mut config = ConfigBuilder::default()
-        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
-        .codex_home(codex_home.to_path_buf())
-        .build()
+    let config = AgentStudiosCodexRuntimeFactory::create_test_config(codex_home)
         .await
         .expect("load default test config");
-
-    config.cwd = AbsolutePathBuf::from_absolute_path(codex_home).expect("cwd path");
-
-    let state_db = init_state_db(&config).await;
-    let thread_store = thread_store_from_config(&config, state_db);
-    let installation_id = resolve_installation_id(&config.codex_home)
-        .await
-        .unwrap_or_else(|_| "test-installation-id".to_string());
-    let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
-        config.codex_home.clone(),
-    ));
     let auth_manager = AuthManager::from_auth_for_testing_with_home(
         CodexAuth::from_api_key("dummy"),
         config.codex_home.to_path_buf(),
     );
-    let models_manager = codex_core::build_models_manager(&config, auth_manager.clone());
-    let environment_manager = Arc::new(codex_exec_server::EnvironmentManager::default_for_tests());
-    let extensions = empty_extension_registry();
-    let image_store = passthrough_image_store();
-
-    let manager = ThreadManager::new(
+    let manager = AgentStudiosCodexRuntimeFactory::build_thread_manager(
         &config,
         auth_manager,
-        models_manager,
-        codex_core::CodexAppsToolsCache::default(),
-        SessionSource::Exec,
-        environment_manager,
-        extensions,
-        user_instructions_provider,
-        None,
-        image_store,
-        thread_store,
-        None,
-        installation_id,
-        None,
-        None,
-    );
+        Some(SessionSource::Exec),
+    )
+    .await
+    .expect("build agent studios thread manager");
     (manager, config)
 }
 
-async fn run_turn_to_completion(
-    thread: &codex_core::CodexThread,
-    prompt: &str,
-) -> (bool, Option<String>, Vec<String>) {
-    thread
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: prompt.to_string(),
-            text_elements: Vec::new(),
-        }]))
-        .await
-        .expect("turn input accepted");
-
+async fn wait_for_turn(thread: &codex_core::CodexThread) -> (bool, Option<String>, Vec<String>) {
     let mut got_turn_complete = false;
     let mut got_error = None;
     let mut messages = Vec::new();
@@ -146,6 +99,10 @@ async fn run_turn_to_completion(
                     got_turn_complete = true;
                     break;
                 }
+                EventMsg::TurnAborted(_) => {
+                    got_error = Some("TurnAborted".to_string());
+                    break;
+                }
                 EventMsg::Error(err) => {
                     got_error = Some(err.message);
                     break;
@@ -157,8 +114,29 @@ async fn run_turn_to_completion(
         }
     }
 
-    let _ = thread.shutdown_and_wait().await;
     (got_turn_complete, got_error, messages)
+}
+
+async fn wait_for_thread_completion(
+    thread: &codex_core::CodexThread,
+) -> (bool, Option<String>, Vec<String>) {
+    let res = wait_for_turn(thread).await;
+    let _ = thread.shutdown_and_wait().await;
+    res
+}
+
+async fn run_turn_to_completion(
+    thread: &codex_core::CodexThread,
+    prompt: &str,
+) -> (bool, Option<String>, Vec<String>) {
+    thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("turn input accepted");
+    wait_for_thread_completion(thread).await
 }
 
 fn run_with_large_stack<F, T>(fut: F) -> T

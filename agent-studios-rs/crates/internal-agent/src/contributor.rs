@@ -265,9 +265,14 @@ impl ToolLifecycleContributor for AgentStudiosToolLifecycleContributor {
     }
 }
 
-/// Helper to build an `ExtensionRegistry` with `AgentStudiosToolLifecycleContributor` registered.
-pub fn build_agent_studios_extension_registry<C: Sync>() -> ExtensionRegistry<C> {
+/// Helper to build an `ExtensionRegistryBuilder` with `AgentStudiosToolLifecycleContributor` registered.
+pub fn build_agent_studios_extension_builder<C: Sync>() -> ExtensionRegistryBuilder<C> {
     let mut builder = ExtensionRegistryBuilder::new();
     builder.tool_lifecycle_contributor(Arc::new(AgentStudiosToolLifecycleContributor::new()));
-    builder.build()
+    builder
+}
+
+/// Helper to build an `ExtensionRegistry` with `AgentStudiosToolLifecycleContributor` registered.
+pub fn build_agent_studios_extension_registry<C: Sync>() -> ExtensionRegistry<C> {
+    build_agent_studios_extension_builder().build()
 }
