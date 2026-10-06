@@ -153,6 +153,7 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
                             depends_on: vec![],
                             workspace_access: Some(WorkspaceAccessMode::Mutating),
                             priority: None,
+                            ..Default::default()
                         },
                         PlannedTask {
                             task_key: "t2".to_string(),
@@ -162,6 +163,7 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
                             depends_on: vec![],
                             workspace_access: Some(WorkspaceAccessMode::Mutating),
                             priority: None,
+                            ..Default::default()
                         },
                     ],
                 };
@@ -202,7 +204,7 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
             }
         }
 
-        let ws = ctx.workspace_path.expect("worker must have workspace_path");
+        let ws = ctx.execution_workspace.cwd().to_path_buf();
         if ctx.agent_spec.display_name == "Worker1" {
             fs::write(
                 ws.join("feature_one.rs"),
@@ -304,6 +306,7 @@ async fn test_dirty_worktree_retained_on_failure() {
                     depends_on: vec![],
                     workspace_access: Some(WorkspaceAccessMode::Mutating),
                     priority: None,
+                    ..Default::default()
                 }],
             };
             return Ok(AgentExecutionResult {
@@ -315,7 +318,7 @@ async fn test_dirty_worktree_retained_on_failure() {
             });
         }
 
-        let ws = ctx.workspace_path.expect("workspace path");
+        let ws = ctx.execution_workspace.cwd().to_path_buf();
         *wt_clone.lock().unwrap() = Some(ws.clone());
 
         // Worker leaves dirty file in worktree then fails
@@ -393,6 +396,7 @@ async fn test_reconciliation_conflict_does_not_fail_task() {
                         depends_on: vec![],
                         workspace_access: Some(WorkspaceAccessMode::Mutating),
                         priority: Some(10),
+                        ..Default::default()
                     },
                     PlannedTask {
                         task_key: "t2".to_string(),
@@ -402,6 +406,7 @@ async fn test_reconciliation_conflict_does_not_fail_task() {
                         depends_on: vec!["t1".to_string()],
                         workspace_access: Some(WorkspaceAccessMode::Mutating),
                         priority: Some(5),
+                        ..Default::default()
                     },
                 ],
             };
@@ -414,7 +419,7 @@ async fn test_reconciliation_conflict_does_not_fail_task() {
             });
         }
 
-        let ws = ctx.workspace_path.expect("workspace path");
+        let ws = ctx.execution_workspace.cwd().to_path_buf();
         let readme = ws.join("README.md");
         if ctx.agent_spec.display_name == "Worker1" {
             fs::write(&readme, "# Header Alpha\nLine from worker 1\n").expect("write readme 1");
@@ -918,8 +923,12 @@ fn test_real_codex_worktree_orchestration_e2e() {
         assert_eq!(recons[0].state, ReconciliationState::Applied);
 
         let worktrees: Vec<_> = cp_state.worktrees.values().collect();
-        assert_eq!(worktrees.len(), 1);
-        let patch_id = worktrees[0]
+        assert_eq!(worktrees.len(), 2);
+        let task_worktree = worktrees
+            .iter()
+            .find(|w| w.name != "integration-worktree")
+            .expect("Task worktree must exist");
+        let patch_id = task_worktree
             .patch_artifact_id
             .expect("Patch artifact ID must be recorded");
         let patch_artifact = cp_state

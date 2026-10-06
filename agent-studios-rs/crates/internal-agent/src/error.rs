@@ -82,6 +82,17 @@ pub enum InternalAgentError {
     #[error("Execution failed for agent {agent_id}: {error}")]
     ExecutionFailed { agent_id: AgentId, error: String },
 
+    #[error("Worker retirement timed out for agent {agent_id}")]
+    WorkerRetirementTimeout { agent_id: AgentId },
+
+    #[error(
+        "Workspace affinity conflict for agent {agent_id}: worker is currently executing an active turn"
+    )]
+    WorkspaceAffinityConflict { agent_id: AgentId },
+
+    #[error("Workspace post-processing error: {0}")]
+    WorkspacePostprocessError(String),
+
     #[error("Workflow execution aborted: {0}")]
     Aborted(String),
 

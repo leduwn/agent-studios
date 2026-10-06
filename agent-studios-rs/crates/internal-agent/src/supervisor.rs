@@ -6,9 +6,9 @@ use std::time::Duration;
 use agent_studios_protocol::agent::AgentKind;
 use agent_studios_protocol::cancellation::CancellationScope;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
-use agent_studios_protocol::reconciliation::ReconciliationState;
 use agent_studios_protocol::run::RunState;
-use agent_studios_protocol::task::TaskState;
+use agent_studios_protocol::task::{DependencyOutputPolicy, TaskState};
+use agent_studios_protocol::worktree::{ExecutionWorkspace, IntegrationWorkspace, WorktreeState};
 use agent_studios_workspace::{ReconciliationOutcome, WorkspaceOrchestrator};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -49,17 +49,11 @@ pub struct SupervisorExecutionSummary {
     pub coordinator_review_status: CoordinatorReviewStatus,
 }
 
-#[derive(Clone, Debug)]
-struct WorktreeContext {
-    worktree_id: WorktreeId,
-    root: PathBuf,
-}
-
 struct TaskCompletion {
     task_id: TaskId,
     run_id: RunId,
     agent_id: AgentId,
-    worktree: Option<WorktreeContext>,
+    workspace: ExecutionWorkspace,
     result: Result<AgentExecutionResult, InternalAgentError>,
 }
 
@@ -74,7 +68,7 @@ pub struct AgentStudiosSupervisor<E: AgentExecutor> {
     workspace_orchestrator: Option<Arc<WorkspaceOrchestrator>>,
     repo_path: Option<PathBuf>,
     base_commit: Option<String>,
-    integration_worktree_path: Option<PathBuf>,
+    integration_workspace: Option<IntegrationWorkspace>,
 }
 
 impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
@@ -96,7 +90,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             workspace_orchestrator: None,
             repo_path: None,
             base_commit: None,
-            integration_worktree_path: None,
+            integration_workspace: None,
         }
     }
 
@@ -122,8 +116,19 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
         self
     }
 
+    pub fn with_integration_workspace(mut self, workspace: IntegrationWorkspace) -> Self {
+        self.integration_workspace = Some(workspace);
+        self
+    }
+
     pub fn with_integration_worktree(mut self, path: impl Into<PathBuf>) -> Self {
-        self.integration_worktree_path = Some(path.into());
+        let p = path.into();
+        self.integration_workspace = Some(IntegrationWorkspace::new(
+            WorktreeId::new(),
+            p.clone(),
+            p,
+            self.base_commit.clone().unwrap_or_default(),
+        ));
         self
     }
 
@@ -214,8 +219,9 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             prompt,
             budget: coordinator_spec.budget.clone(),
             output_schema: schema_value,
-            worktree_id: None,
-            workspace_path: self.repo_path.clone(),
+            execution_workspace: ExecutionWorkspace::shared_source(
+                self.repo_path.clone().unwrap_or_default(),
+            ),
         };
 
         let result = self.executor.execute_agent(context).await?;
@@ -314,6 +320,38 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
         let mut active_task_ids: HashSet<TaskId> = HashSet::new();
         let mut cancelled = false;
 
+        let mut integration_workspace = self.integration_workspace.clone();
+        if let Some(ref mut int_ws) = integration_workspace {
+            let exists = self
+                .control_plane
+                .get_worktree(int_ws.worktree_id)
+                .await
+                .unwrap_or(None)
+                .is_some();
+            if !exists {
+                let repo = self
+                    .repo_path
+                    .clone()
+                    .unwrap_or_else(|| int_ws.root.clone());
+                let wt = self
+                    .control_plane
+                    .create_worktree_with_cwds(
+                        self.studio_id,
+                        "integration-worktree",
+                        repo.clone(),
+                        repo,
+                        int_ws.root.clone(),
+                        int_ws.cwd.clone(),
+                        int_ws.base_sha.clone(),
+                    )
+                    .await?;
+                self.control_plane
+                    .transition_worktree_state(wt.id, WorktreeState::Ready)
+                    .await?;
+                int_ws.worktree_id = wt.id;
+            }
+        }
+
         loop {
             // Re-queue expired delayed retries
             let now = tokio::time::Instant::now();
@@ -383,7 +421,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                     };
 
                     let access_mode = agent_spec.workspace_access;
-                    let (worktree_ctx, lease_workspace_id, execution_workspace_path) = match (
+                    let (workspace, lease_workspace_id) = match (
                         access_mode,
                         &self.workspace_orchestrator,
                         &self.repo_path,
@@ -395,8 +433,31 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                             Some(repo_path),
                             Some(base_commit),
                         ) => {
+                            let base_commit_to_use = if task.dependency_output_policy
+                                == DependencyOutputPolicy::ReconciledOutput
+                            {
+                                if let Some(ref int_ws) = integration_workspace {
+                                    orchestrator
+                                        .resolve_head_commit_async(int_ws.root.clone())
+                                        .await
+                                        .map_err(|e| InternalAgentError::ExecutionFailed {
+                                            agent_id,
+                                            error: format!(
+                                                "Failed to resolve integration workspace HEAD SHA: {e}"
+                                            ),
+                                        })?
+                                } else {
+                                    base_commit.clone()
+                                }
+                            } else {
+                                base_commit.clone()
+                            };
+
                             let managed = orchestrator
-                                .create_worktree_async(repo_path.clone(), Some(base_commit.clone()))
+                                .create_worktree_async(
+                                    repo_path.clone(),
+                                    Some(base_commit_to_use.clone()),
+                                )
                                 .await
                                 .map_err(|e| InternalAgentError::ExecutionFailed {
                                     agent_id,
@@ -405,27 +466,38 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
 
                             let wt_rec = self
                                 .control_plane
-                                .create_worktree(
+                                .create_worktree_with_cwds(
                                     self.studio_id,
                                     format!("wt-task-{}", task.id),
                                     repo_path.clone(),
+                                    repo_path.clone(),
                                     managed.root.clone(),
-                                    base_commit.clone(),
+                                    managed.cwd.clone(),
+                                    base_commit_to_use.clone(),
                                 )
                                 .await?;
 
-                            let wt_ctx = WorktreeContext {
-                                worktree_id: wt_rec.id,
-                                root: managed.root.clone(),
-                            };
+                            self.control_plane
+                                .transition_worktree_state(wt_rec.id, WorktreeState::Ready)
+                                .await?;
 
-                            (
-                                Some(wt_ctx),
-                                format!("worktree-{}", wt_rec.id),
-                                Some(managed.root),
-                            )
+                            let execution_ws = ExecutionWorkspace::managed(
+                                wt_rec.id,
+                                managed.root.clone(),
+                                managed.cwd.clone(),
+                                repo_path.clone(),
+                                repo_path.clone(),
+                                base_commit_to_use,
+                            );
+
+                            (execution_ws, format!("worktree-{}", wt_rec.id))
                         }
-                        _ => (None, self.workspace_id.clone(), self.repo_path.clone()),
+                        _ => (
+                            ExecutionWorkspace::shared_source(
+                                self.repo_path.clone().unwrap_or_default(),
+                            ),
+                            self.workspace_id.clone(),
+                        ),
                     };
 
                     // Acquire workspace lease
@@ -439,21 +511,23 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                         Ok(l) => l,
                         Err(InternalAgentError::WorkspaceConflict { .. }) => {
                             // Workspace busy, clean up newly created worktree if any
-                            if let Some(ref wt_ctx) = worktree_ctx {
-                                if let (Some(orchestrator), Some(repo_path)) =
-                                    (&self.workspace_orchestrator, &self.repo_path)
-                                {
+                            if let Some(wt_id) = workspace.worktree_id() {
+                                if let (Some(orchestrator), Some(repo_path), Some(root)) = (
+                                    &self.workspace_orchestrator,
+                                    &self.repo_path,
+                                    workspace.root(),
+                                ) {
                                     let _ = orchestrator
                                         .release_worktree_async(
                                             repo_path.clone(),
-                                            wt_ctx.root.clone(),
+                                            root.to_path_buf(),
                                             false,
                                             None,
                                         )
                                         .await;
                                     let _ = self
                                         .control_plane
-                                        .release_worktree(wt_ctx.worktree_id, false, None)
+                                        .complete_worktree_removal(wt_id, None)
                                         .await;
                                 }
                             }
@@ -464,11 +538,13 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
 
                     // Create run and transition state
                     let run = self.control_plane.create_run(task.id, agent_id).await?;
-                    if let Some(ref wt_ctx) = worktree_ctx {
-                        let _ = self
-                            .control_plane
-                            .assign_worktree(wt_ctx.worktree_id, task.id, agent_id, Some(run.id))
-                            .await;
+                    if let Some(wt_id) = workspace.worktree_id() {
+                        self.control_plane
+                            .assign_worktree(wt_id, task.id, agent_id, Some(run.id))
+                            .await?;
+                        self.control_plane
+                            .transition_worktree_state(wt_id, WorktreeState::InUse)
+                            .await?;
                     }
 
                     self.control_plane
@@ -491,8 +567,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                         prompt: task.title.clone(),
                         budget: agent_spec.budget.clone(),
                         output_schema: None,
-                        worktree_id: worktree_ctx.as_ref().map(|w| w.worktree_id),
-                        workspace_path: execution_workspace_path,
+                        execution_workspace: workspace.clone(),
                     };
 
                     active_agents.insert(agent_id);
@@ -505,7 +580,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                             task_id: task.id,
                             run_id: run.id,
                             agent_id,
-                            worktree: worktree_ctx,
+                            workspace,
                             result,
                         }
                     });
@@ -556,260 +631,509 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                             active_task_ids.remove(&completion.task_id);
 
                             if cancelled {
-                                if let Some(wt_ctx) = completion.worktree {
-                                    if let (Some(orchestrator), Some(repo_path)) =
-                                        (&self.workspace_orchestrator, &self.repo_path)
-                                    {
+                                if let Some(wt_id) = completion.workspace.worktree_id() {
+                                    if let (Some(orchestrator), Some(repo_path), Some(root)) = (
+                                        &self.workspace_orchestrator,
+                                        &self.repo_path,
+                                        completion.workspace.root(),
+                                    ) {
                                         let reason = "Retained on task cancellation".to_string();
-                                        let _ = orchestrator
+                                        orchestrator
                                             .release_worktree_async(
                                                 repo_path.clone(),
-                                                wt_ctx.root.clone(),
+                                                root.to_path_buf(),
                                                 true,
                                                 Some(reason.clone()),
                                             )
-                                            .await;
-                                        let _ = self
-                                            .control_plane
-                                            .record_worktree_retained(
-                                                wt_ctx.worktree_id,
-                                                Some(reason),
-                                            )
-                                            .await;
+                                            .await
+                                            .map_err(|e| {
+                                                InternalAgentError::WorkspacePostprocessError(
+                                                    e.to_string(),
+                                                )
+                                            })?;
+                                        self.control_plane
+                                            .record_worktree_retained(wt_id, Some(reason))
+                                            .await
+                                            .map_err(|e| {
+                                                InternalAgentError::WorkspacePostprocessError(
+                                                    e.to_string(),
+                                                )
+                                            })?;
                                     }
                                 }
-                                let _ = self
-                                    .control_plane
+                                self.control_plane
                                     .transition_run_state(completion.run_id, RunState::Cancelled)
-                                    .await;
-                                let _ = self
-                                    .control_plane
+                                    .await
+                                    .map_err(|e| {
+                                        InternalAgentError::WorkspacePostprocessError(e.to_string())
+                                    })?;
+                                self.control_plane
                                     .transition_task_state(completion.task_id, TaskState::Cancelled)
-                                    .await;
+                                    .await
+                                    .map_err(|e| {
+                                        InternalAgentError::WorkspacePostprocessError(e.to_string())
+                                    })?;
                             } else {
                                 match completion.result {
                                     Ok(res) if res.success => {
-                                        if let Some(wt_ctx) = completion.worktree {
-                                            if let (Some(orchestrator), Some(repo_path), Some(base_commit)) =
-                                                (&self.workspace_orchestrator, &self.repo_path, &self.base_commit)
-                                            {
-                                                match orchestrator
-                                                    .capture_changes_async(wt_ctx.root.clone(), base_commit.clone())
-                                                    .await
-                                                {
-                                                    Ok(captured) => {
-                                                        if captured.files_changed > 0 {
-                                                            match orchestrator.store_patch_artifact(
+                                        if let Some(wt_id) = completion.workspace.worktree_id() {
+                                            let orchestrator = self
+                                                .workspace_orchestrator
+                                                .as_ref()
+                                                .ok_or_else(|| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        "Missing workspace orchestrator for managed workspace"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            let repo_path = self
+                                                .repo_path
+                                                .as_ref()
+                                                .ok_or_else(|| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        "Missing repo path for managed workspace"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            let base_sha = completion
+                                                .workspace
+                                                .base_sha()
+                                                .ok_or_else(|| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        "Missing base SHA for managed workspace"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            let root = completion
+                                                .workspace
+                                                .root()
+                                                .ok_or_else(|| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        "Missing root for managed workspace"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+
+                                            let capture_res = orchestrator
+                                                .capture_changes_async(
+                                                    root.to_path_buf(),
+                                                    base_sha.to_string(),
+                                                )
+                                                .await;
+
+                                            match capture_res {
+                                                Ok(captured) => {
+                                                    if captured.files_changed > 0 {
+                                                        let patch_record = orchestrator
+                                                            .store_patch_artifact(
                                                                 self.studio_id,
                                                                 completion.task_id,
                                                                 completion.agent_id,
                                                                 Some(completion.run_id),
-                                                                Some(wt_ctx.worktree_id),
+                                                                Some(wt_id),
                                                                 &captured,
-                                                            ) {
-                                                                Ok(patch_record) => {
-                                                                    let _ = self
-                                                                        .control_plane
-                                                                        .register_artifact_record(patch_record.clone())
-                                                                        .await;
-                                                                    let _ = self
-                                                                        .control_plane
-                                                                        .record_worktree_change_captured(
-                                                                            wt_ctx.worktree_id,
-                                                                            Some(completion.run_id),
-                                                                            base_commit.clone(),
-                                                                            None,
-                                                                            patch_record.id,
-                                                                            None,
-                                                                            captured.files_changed,
-                                                                        )
-                                                                        .await;
+                                                            )
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to store patch artifact: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
 
-                                                                    if let Some(integration_path) =
-                                                                        &self.integration_worktree_path
-                                                                    {
-                                                                        match self
-                                                                            .control_plane
-                                                                            .create_reconciliation(
-                                                                                self.studio_id,
-                                                                                wt_ctx.worktree_id,
-                                                                                completion.task_id,
-                                                                                Some(completion.run_id),
-                                                                                patch_record.id,
-                                                                                integration_path.clone(),
-                                                                                base_commit.clone(),
+                                                        self.control_plane
+                                                            .register_artifact_record(
+                                                                patch_record.clone(),
+                                                            )
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to register patch artifact: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
+
+                                                        self.control_plane
+                                                            .record_worktree_change_captured(
+                                                                wt_id,
+                                                                Some(completion.run_id),
+                                                                base_sha.to_string(),
+                                                                None,
+                                                                patch_record.id,
+                                                                None,
+                                                                captured.files_changed,
+                                                            )
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to record change captured: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
+
+                                                        if let Some(ref int_ws) =
+                                                            integration_workspace
+                                                        {
+                                                            let recon = self
+                                                                .control_plane
+                                                                .create_reconciliation_with_target(
+                                                                    self.studio_id,
+                                                                    wt_id,
+                                                                    int_ws.worktree_id,
+                                                                    completion.task_id,
+                                                                    Some(completion.run_id),
+                                                                    patch_record.id,
+                                                                    int_ws.root.clone(),
+                                                                    base_sha.to_string(),
+                                                                )
+                                                                .await
+                                                                .map_err(|e| {
+                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                        format!(
+                                                                            "Failed to create reconciliation: {e}"
+                                                                        ),
+                                                                    )
+                                                                })?;
+
+                                                            self.control_plane
+                                                                .start_reconciliation(recon.id)
+                                                                .await
+                                                                .map_err(|e| {
+                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                        format!(
+                                                                            "Failed to start reconciliation checking: {e}"
+                                                                        ),
+                                                                    )
+                                                                })?;
+
+                                                            let check_res = orchestrator
+                                                                .check_patch_async(
+                                                                    int_ws.root.clone(),
+                                                                    captured
+                                                                        .patch_bytes
+                                                                        .clone(),
+                                                                )
+                                                                .await
+                                                                .map_err(|e| {
+                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                        format!(
+                                                                            "Patch check execution error: {e}"
+                                                                        ),
+                                                                    )
+                                                                })?;
+
+                                                            match check_res {
+                                                                Some(
+                                                                    ReconciliationOutcome::Conflicted {
+                                                                        conflicted_files,
+                                                                        reason,
+                                                                    },
+                                                                ) => {
+                                                                    self.control_plane
+                                                                        .record_reconciliation_conflict(
+                                                                            recon.id,
+                                                                            conflicted_files,
+                                                                            reason,
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| {
+                                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                                format!(
+                                                                                    "Failed to record reconciliation conflict: {e}"
+                                                                                ),
                                                                             )
-                                                                            .await
-                                                                        {
-                                                                            Ok(recon) => {
-                                                                                let _ = self
-                                                                                    .control_plane
-                                                                                    .transition_reconciliation_state(
-                                                                                        recon.id,
-                                                                                        ReconciliationState::Applying,
+                                                                        })?;
+                                                                }
+                                                                Some(
+                                                                    ReconciliationOutcome::Failed {
+                                                                        error,
+                                                                    },
+                                                                ) => {
+                                                                    self.control_plane
+                                                                        .record_reconciliation_failed(
+                                                                            recon.id,
+                                                                            error,
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| {
+                                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                                format!(
+                                                                                    "Failed to record reconciliation failure: {e}"
+                                                                                ),
+                                                                            )
+                                                                        })?;
+                                                                }
+                                                                Some(
+                                                                    ReconciliationOutcome::Applied {
+                                                                        ..
+                                                                    },
+                                                                ) => {
+                                                                    self.control_plane
+                                                                        .record_reconciliation_failed(
+                                                                            recon.id,
+                                                                            "Unexpected applied outcome during patch dry-run check".to_string(),
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| {
+                                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                                format!(
+                                                                                    "Failed to record reconciliation failure: {e}"
+                                                                                ),
+                                                                            )
+                                                                        })?;
+                                                                }
+                                                                None => {
+                                                                    self.control_plane
+                                                                        .mark_reconciliation_applying(
+                                                                            recon.id,
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| {
+                                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                                format!(
+                                                                                    "Failed to mark reconciliation applying: {e}"
+                                                                                ),
+                                                                            )
+                                                                        })?;
+
+                                                                    let commit_msg = format!(
+                                                                        "Reconcile task {}",
+                                                                        completion.task_id
+                                                                    );
+                                                                    let apply_res = orchestrator
+                                                                        .apply_patch_async(
+                                                                            int_ws.root.clone(),
+                                                                            captured
+                                                                                .patch_bytes
+                                                                                .clone(),
+                                                                            Some(commit_msg),
+                                                                        )
+                                                                        .await
+                                                                        .map_err(|e| {
+                                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                                format!(
+                                                                                    "Patch apply execution error: {e}"
+                                                                                ),
+                                                                            )
+                                                                        })?;
+
+                                                                    match apply_res {
+                                                                        ReconciliationOutcome::Applied {
+                                                                            merge_commit,
+                                                                        } => {
+                                                                            self.control_plane
+                                                                                .record_reconciliation_applied(
+                                                                                    recon.id,
+                                                                                    merge_commit,
+                                                                                )
+                                                                                .await
+                                                                                .map_err(|e| {
+                                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                                        format!(
+                                                                                            "Failed to record reconciliation applied: {e}"
+                                                                                        ),
                                                                                     )
-                                                                                    .await;
-                                                                                let commit_msg = format!(
-                                                                                    "Reconcile task {}",
-                                                                                    completion.task_id
-                                                                                );
-                                                                                match orchestrator
-                                                                                    .reconcile_patch_async(
-                                                                                        integration_path.clone(),
-                                                                                        captured.patch_bytes.clone(),
-                                                                                        Some(commit_msg),
+                                                                                })?;
+                                                                        }
+                                                                        ReconciliationOutcome::Conflicted {
+                                                                            conflicted_files,
+                                                                            reason,
+                                                                        } => {
+                                                                            self.control_plane
+                                                                                .record_reconciliation_conflict(
+                                                                                    recon.id,
+                                                                                    conflicted_files,
+                                                                                    reason,
+                                                                                )
+                                                                                .await
+                                                                                .map_err(|e| {
+                                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                                        format!(
+                                                                                            "Failed to record reconciliation conflict: {e}"
+                                                                                        ),
                                                                                     )
-                                                                                    .await
-                                                                                {
-                                                                                    Ok(ReconciliationOutcome::Applied {
-                                                                                        merge_commit,
-                                                                                    }) => {
-                                                                                        let _ = self
-                                                                                            .control_plane
-                                                                                            .record_reconciliation_applied(
-                                                                                                recon.id,
-                                                                                                merge_commit,
-                                                                                            )
-                                                                                            .await;
-                                                                                    }
-                                                                                    Ok(ReconciliationOutcome::Conflicted {
-                                                                                        conflicted_files,
-                                                                                        reason,
-                                                                                    }) => {
-                                                                                        let _ = self
-                                                                                            .control_plane
-                                                                                            .record_reconciliation_conflict(
-                                                                                                recon.id,
-                                                                                                conflicted_files,
-                                                                                                reason,
-                                                                                            )
-                                                                                            .await;
-                                                                                    }
-                                                                                    Ok(ReconciliationOutcome::Failed { error }) => {
-                                                                                        let _ = self
-                                                                                            .control_plane
-                                                                                            .record_reconciliation_conflict(
-                                                                                                recon.id,
-                                                                                                vec![],
-                                                                                                error,
-                                                                                            )
-                                                                                            .await;
-                                                                                    }
-                                                                                    Err(e) => {
-                                                                                        let _ = self
-                                                                                            .control_plane
-                                                                                            .record_reconciliation_conflict(
-                                                                                                recon.id,
-                                                                                                vec![],
-                                                                                                e.to_string(),
-                                                                                            )
-                                                                                            .await;
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                            Err(e) => {
-                                                                                tracing::warn!(
-                                                                                    "Failed to create reconciliation: {e}"
-                                                                                );
-                                                                            }
+                                                                                })?;
+                                                                        }
+                                                                        ReconciliationOutcome::Failed {
+                                                                            error,
+                                                                        } => {
+                                                                            self.control_plane
+                                                                                .record_reconciliation_failed(
+                                                                                    recon.id,
+                                                                                    error,
+                                                                                )
+                                                                                .await
+                                                                                .map_err(|e| {
+                                                                                    InternalAgentError::WorkspacePostprocessError(
+                                                                                        format!(
+                                                                                            "Failed to record reconciliation failure: {e}"
+                                                                                        ),
+                                                                                    )
+                                                                                })?;
                                                                         }
                                                                     }
                                                                 }
-                                                                Err(e) => {
-                                                                    tracing::warn!(
-                                                                        "Failed to store patch artifact: {e}"
-                                                                    );
-                                                                }
                                                             }
-                                                        } else {
-                                                            let _ = self
-                                                                .control_plane
-                                                                .record_worktree_no_changes(
-                                                                    wt_ctx.worktree_id,
-                                                                    Some(completion.run_id),
-                                                                    base_commit.clone(),
-                                                                )
-                                                                .await;
                                                         }
 
-                                                        let _ = orchestrator
+                                                        orchestrator
                                                             .release_worktree_async(
                                                                 repo_path.clone(),
-                                                                wt_ctx.root.clone(),
+                                                                root.to_path_buf(),
                                                                 false,
                                                                 None,
                                                             )
-                                                            .await;
-                                                        let _ = self
-                                                            .control_plane
-                                                            .release_worktree(
-                                                                wt_ctx.worktree_id,
-                                                                false,
-                                                                None,
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to release worktree directory: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
+                                                        self.control_plane
+                                                            .complete_worktree_removal(wt_id, None)
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to complete worktree removal: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
+                                                    } else {
+                                                        self.control_plane
+                                                            .record_worktree_no_changes(
+                                                                wt_id,
+                                                                Some(completion.run_id),
+                                                                base_sha.to_string(),
                                                             )
-                                                            .await;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(
-                                                            "Failed to capture changes: {e}"
-                                                        );
-                                                        let reason = e.to_string();
-                                                        let _ = orchestrator
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to record no changes: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
+                                                        orchestrator
                                                             .release_worktree_async(
                                                                 repo_path.clone(),
-                                                                wt_ctx.root.clone(),
+                                                                root.to_path_buf(),
                                                                 true,
-                                                                Some(reason.clone()),
+                                                                Some(
+                                                                    "no changes captured"
+                                                                        .to_string(),
+                                                                ),
                                                             )
-                                                            .await;
-                                                        let _ = self
-                                                            .control_plane
-                                                            .record_worktree_retained(
-                                                                wt_ctx.worktree_id,
-                                                                Some(reason),
-                                                            )
-                                                            .await;
+                                                            .await
+                                                            .map_err(|e| {
+                                                                InternalAgentError::WorkspacePostprocessError(
+                                                                    format!(
+                                                                        "Failed to retain unchanged worktree: {e}"
+                                                                    ),
+                                                                )
+                                                            })?;
                                                     }
+                                                }
+                                                Err(e) => {
+                                                    let reason =
+                                                        format!("Failed to capture changes: {e}");
+                                                    orchestrator
+                                                        .release_worktree_async(
+                                                            repo_path.clone(),
+                                                            root.to_path_buf(),
+                                                            true,
+                                                            Some(reason.clone()),
+                                                        )
+                                                        .await
+                                                        .map_err(|err| {
+                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                err.to_string(),
+                                                            )
+                                                        })?;
+                                                    self.control_plane
+                                                        .record_worktree_retained(
+                                                            wt_id,
+                                                            Some(reason),
+                                                        )
+                                                        .await
+                                                        .map_err(|err| {
+                                                            InternalAgentError::WorkspacePostprocessError(
+                                                                err.to_string(),
+                                                            )
+                                                        })?;
+                                                    return Err(
+                                                        InternalAgentError::WorkspacePostprocessError(
+                                                            e.to_string(),
+                                                        ),
+                                                    );
                                                 }
                                             }
                                         }
 
-                                        let _ = self
-                                            .control_plane
-                                            .transition_run_state(completion.run_id, RunState::Succeeded)
-                                            .await;
-                                        let _ = self
-                                            .control_plane
-                                            .transition_task_state(completion.task_id, TaskState::Succeeded)
-                                            .await;
+                                        self.control_plane
+                                            .transition_run_state(
+                                                completion.run_id,
+                                                RunState::Succeeded,
+                                            )
+                                            .await
+                                            .map_err(|e| {
+                                                InternalAgentError::WorkspacePostprocessError(
+                                                    e.to_string(),
+                                                )
+                                            })?;
+                                        self.control_plane
+                                            .transition_task_state(
+                                                completion.task_id,
+                                                TaskState::Succeeded,
+                                            )
+                                            .await
+                                            .map_err(|e| {
+                                                InternalAgentError::WorkspacePostprocessError(
+                                                    e.to_string(),
+                                                )
+                                            })?;
                                     }
                                     _ => {
-                                        if let Some(wt_ctx) = completion.worktree {
-                                            if let (Some(orchestrator), Some(repo_path)) =
-                                                (&self.workspace_orchestrator, &self.repo_path)
-                                            {
+                                        if let Some(wt_id) = completion.workspace.worktree_id() {
+                                            if let (Some(orchestrator), Some(repo_path), Some(root)) = (
+                                                &self.workspace_orchestrator,
+                                                &self.repo_path,
+                                                completion.workspace.root(),
+                                            ) {
                                                 let reason = "Retained on task failure".to_string();
-                                                let _ = orchestrator
+                                                orchestrator
                                                     .release_worktree_async(
                                                         repo_path.clone(),
-                                                        wt_ctx.root.clone(),
+                                                        root.to_path_buf(),
                                                         true,
                                                         Some(reason.clone()),
                                                     )
-                                                    .await;
-                                                let _ = self
-                                                    .control_plane
-                                                    .record_worktree_retained(
-                                                        wt_ctx.worktree_id,
-                                                        Some(reason),
-                                                    )
-                                                    .await;
+                                                    .await
+                                                    .map_err(|e| {
+                                                        InternalAgentError::WorkspacePostprocessError(
+                                                            e.to_string(),
+                                                        )
+                                                    })?;
+                                                self.control_plane
+                                                    .record_worktree_retained(wt_id, Some(reason))
+                                                    .await
+                                                    .map_err(|e| {
+                                                        InternalAgentError::WorkspacePostprocessError(
+                                                            e.to_string(),
+                                                        )
+                                                    })?;
                                             }
                                         }
 
                                         let should_retry = match self.failure_policy {
                                             FailurePolicy::RetryTask(max_retries) => {
-                                                let current = retries_by_task.entry(completion.task_id).or_insert(0);
+                                                let current = retries_by_task
+                                                    .entry(completion.task_id)
+                                                    .or_insert(0);
                                                 if *current < max_retries {
                                                     *current += 1;
                                                     true
@@ -826,18 +1150,33 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                 FailurePolicy::RetryTask(m) => m,
                                                 _ => 1,
                                             };
-                                            let backoff_ms = (50u64 * (1 << (attempt.saturating_sub(1)))).min(2000);
+                                            let backoff_ms = (50u64
+                                                * (1 << (attempt.saturating_sub(1))))
+                                            .min(2000);
 
-                                            let _ = self
-                                                .control_plane
-                                                .transition_run_state(completion.run_id, RunState::Failed)
-                                                .await;
-                                            let _ = self
-                                                .control_plane
-                                                .transition_task_state(completion.task_id, TaskState::Retrying)
-                                                .await;
-                                            let _ = self
-                                                .control_plane
+                                            self.control_plane
+                                                .transition_run_state(
+                                                    completion.run_id,
+                                                    RunState::Failed,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        e.to_string(),
+                                                    )
+                                                })?;
+                                            self.control_plane
+                                                .transition_task_state(
+                                                    completion.task_id,
+                                                    TaskState::Retrying,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        e.to_string(),
+                                                    )
+                                                })?;
+                                            self.control_plane
                                                 .schedule_task_retry(
                                                     self.studio_id,
                                                     completion.task_id,
@@ -847,29 +1186,54 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                     backoff_ms,
                                                     None,
                                                 )
-                                                .await;
+                                                .await
+                                                .map_err(|e| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        e.to_string(),
+                                                    )
+                                                })?;
 
                                             delayed_retries.push((
                                                 completion.task_id,
-                                                tokio::time::Instant::now() + Duration::from_millis(backoff_ms),
+                                                tokio::time::Instant::now()
+                                                    + Duration::from_millis(backoff_ms),
                                             ));
                                         } else {
-                                            let _ = self
-                                                .control_plane
-                                                .transition_run_state(completion.run_id, RunState::Failed)
-                                                .await;
-                                            let _ = self
-                                                .control_plane
-                                                .transition_task_state(completion.task_id, TaskState::Failed)
-                                                .await;
+                                            self.control_plane
+                                                .transition_run_state(
+                                                    completion.run_id,
+                                                    RunState::Failed,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        e.to_string(),
+                                                    )
+                                                })?;
+                                            self.control_plane
+                                                .transition_task_state(
+                                                    completion.task_id,
+                                                    TaskState::Failed,
+                                                )
+                                                .await
+                                                .map_err(|e| {
+                                                    InternalAgentError::WorkspacePostprocessError(
+                                                        e.to_string(),
+                                                    )
+                                                })?;
 
-                                            if self.failure_policy == FailurePolicy::FailFast && !cancelled {
+                                            if self.failure_policy == FailurePolicy::FailFast
+                                                && !cancelled
+                                            {
                                                 cancelled = true;
                                                 let _ = self
                                                     .control_plane
                                                     .request_cancellation(
                                                         CancellationScope::Studio(self.studio_id),
-                                                        Some("Task failed under FailFast policy".to_string()),
+                                                        Some(
+                                                            "Task failed under FailFast policy"
+                                                                .to_string(),
+                                                        ),
                                                     )
                                                     .await;
 
@@ -923,8 +1287,9 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             prompt: review_prompt,
             budget: coordinator_spec.budget.clone(),
             output_schema: None,
-            worktree_id: None,
-            workspace_path: self.repo_path.clone(),
+            execution_workspace: ExecutionWorkspace::shared_source(
+                self.repo_path.clone().unwrap_or_default(),
+            ),
         };
 
         let review_result = self.executor.execute_agent(review_context).await;

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use agent_studios_protocol::id::{StudioId, TaskId};
-use agent_studios_protocol::task::BatchTaskSpec;
+use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use crate::error::InternalAgentError;
 use crate::profile::WorkspaceAccessMode;
 use crate::team::InternalTeamSpec;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub struct PlannedTask {
     pub task_key: String,
     pub title: String,
@@ -22,6 +22,8 @@ pub struct PlannedTask {
     pub workspace_access: Option<WorkspaceAccessMode>,
     #[serde(default)]
     pub priority: Option<i32>,
+    #[serde(default)]
+    pub dependency_output_policy: DependencyOutputPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -165,6 +167,7 @@ impl CoordinatorPlanValidator {
                 parent_task_id: None,
                 dependency_keys: planned.depends_on.clone(),
                 dependency_task_ids: Vec::new(),
+                dependency_output_policy: planned.dependency_output_policy,
             });
         }
 

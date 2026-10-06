@@ -204,6 +204,16 @@ pub enum ControlPlaneCommand {
         base_commit: String,
         respond_to: oneshot::Sender<Result<WorktreeRecord, ControlPlaneError>>,
     },
+    CreateWorktreeWithCwds {
+        studio_id: StudioId,
+        name: String,
+        source_root: std::path::PathBuf,
+        source_cwd: std::path::PathBuf,
+        worktree_root: std::path::PathBuf,
+        worktree_cwd: std::path::PathBuf,
+        base_commit: String,
+        respond_to: oneshot::Sender<Result<WorktreeRecord, ControlPlaneError>>,
+    },
     AssignWorktree {
         worktree_id: WorktreeId,
         task_id: TaskId,
@@ -237,6 +247,11 @@ pub enum ControlPlaneCommand {
         reason: Option<String>,
         respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
     },
+    CompleteWorktreeRemoval {
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
     GetWorktree {
         worktree_id: WorktreeId,
         respond_to: oneshot::Sender<Option<WorktreeRecord>>,
@@ -244,6 +259,10 @@ pub enum ControlPlaneCommand {
     RegisterArtifactRecord {
         artifact: ArtifactRecord,
         respond_to: oneshot::Sender<Result<ArtifactRecord, ControlPlaneError>>,
+    },
+    GetArtifactLineage {
+        artifact_id: ArtifactId,
+        respond_to: oneshot::Sender<Result<Vec<ArtifactRecord>, ControlPlaneError>>,
     },
     CreateReconciliation {
         studio_id: StudioId,
@@ -930,6 +949,36 @@ impl ControlPlaneHandle {
             .map_err(InternalAgentError::ControlPlane)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_worktree_with_cwds(
+        &self,
+        studio_id: StudioId,
+        name: impl Into<String>,
+        source_root: impl Into<std::path::PathBuf>,
+        source_cwd: impl Into<std::path::PathBuf>,
+        worktree_root: impl Into<std::path::PathBuf>,
+        worktree_cwd: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<WorktreeRecord, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CreateWorktreeWithCwds {
+                studio_id,
+                name: name.into(),
+                source_root: source_root.into(),
+                source_cwd: source_cwd.into(),
+                worktree_root: worktree_root.into(),
+                worktree_cwd: worktree_cwd.into(),
+                base_commit: base_commit.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
     pub async fn assign_worktree(
         &self,
         worktree_id: WorktreeId,
@@ -1042,6 +1091,25 @@ impl ControlPlaneHandle {
             .map_err(InternalAgentError::ControlPlane)
     }
 
+    pub async fn complete_worktree_removal(
+        &self,
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CompleteWorktreeRemoval {
+                worktree_id,
+                reason,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
     pub async fn get_worktree(
         &self,
         worktree_id: WorktreeId,
@@ -1065,6 +1133,23 @@ impl ControlPlaneHandle {
         self.sender
             .send(ControlPlaneCommand::RegisterArtifactRecord {
                 artifact,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn get_artifact_lineage(
+        &self,
+        artifact_id: ArtifactId,
+    ) -> Result<Vec<ArtifactRecord>, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::GetArtifactLineage {
+                artifact_id,
                 respond_to: tx,
             })
             .await
@@ -1654,6 +1739,27 @@ impl ControlPlaneActor {
                         );
                         let _ = respond_to.send(res);
                     }
+                    ControlPlaneCommand::CreateWorktreeWithCwds {
+                        studio_id,
+                        name,
+                        source_root,
+                        source_cwd,
+                        worktree_root,
+                        worktree_cwd,
+                        base_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane.create_worktree_with_cwds(
+                            studio_id,
+                            name,
+                            source_root,
+                            source_cwd,
+                            worktree_root,
+                            worktree_cwd,
+                            base_commit,
+                        );
+                        let _ = respond_to.send(res);
+                    }
                     ControlPlaneCommand::AssignWorktree {
                         worktree_id,
                         task_id,
@@ -1711,6 +1817,14 @@ impl ControlPlaneActor {
                         let res = control_plane.release_worktree(worktree_id, retained, reason);
                         let _ = respond_to.send(res);
                     }
+                    ControlPlaneCommand::CompleteWorktreeRemoval {
+                        worktree_id,
+                        reason,
+                        respond_to,
+                    } => {
+                        let res = control_plane.complete_worktree_removal(worktree_id, reason);
+                        let _ = respond_to.send(res);
+                    }
                     ControlPlaneCommand::GetWorktree {
                         worktree_id,
                         respond_to,
@@ -1723,6 +1837,13 @@ impl ControlPlaneActor {
                         respond_to,
                     } => {
                         let res = control_plane.register_artifact_record(artifact);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::GetArtifactLineage {
+                        artifact_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane.get_artifact_lineage(artifact_id);
                         let _ = respond_to.send(res);
                     }
                     ControlPlaneCommand::CreateReconciliation {

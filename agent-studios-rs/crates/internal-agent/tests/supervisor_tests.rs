@@ -60,6 +60,7 @@ async fn test_supervisor_full_success_workflow() {
                 depends_on: vec![],
                 workspace_access: None,
                 priority: None,
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "review".to_string(),
@@ -69,6 +70,7 @@ async fn test_supervisor_full_success_workflow() {
                 depends_on: vec!["code".to_string()],
                 workspace_access: None,
                 priority: None,
+                ..Default::default()
             },
         ],
     };
@@ -110,6 +112,7 @@ async fn test_supervisor_retry_policy() {
             depends_on: vec![],
             workspace_access: None,
             priority: None,
+            ..Default::default()
         }],
     };
 
@@ -182,6 +185,7 @@ async fn test_supervisor_fail_fast_policy() {
                 depends_on: vec![],
                 workspace_access: None,
                 priority: None,
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "dependent".to_string(),
@@ -191,6 +195,7 @@ async fn test_supervisor_fail_fast_policy() {
                 depends_on: vec!["broken".to_string()],
                 workspace_access: None,
                 priority: None,
+                ..Default::default()
             },
         ],
     };

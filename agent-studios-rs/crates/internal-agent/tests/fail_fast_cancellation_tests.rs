@@ -66,6 +66,7 @@ async fn test_fail_fast_cancels_active_turns_and_marks_non_terminal_tasks() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(20),
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "slow_concurrent_task".to_string(),
@@ -75,6 +76,7 @@ async fn test_fail_fast_cancels_active_turns_and_marks_non_terminal_tasks() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(10),
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "queued_dependent_task".to_string(),
@@ -84,6 +86,7 @@ async fn test_fail_fast_cancels_active_turns_and_marks_non_terminal_tasks() {
                 depends_on: vec!["failing_task".to_string()],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(5),
+                ..Default::default()
             },
         ],
     };

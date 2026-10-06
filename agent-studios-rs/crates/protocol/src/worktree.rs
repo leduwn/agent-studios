@@ -61,7 +61,15 @@ impl WorktreeState {
                 Self::InUse | Self::ChangeCaptured | Self::Ready | Self::Retained | Self::Failed
             ) | (
                 Self::ChangeCaptured,
-                Self::ReconcilePending | Self::Retained | Self::InUse | Self::Ready | Self::Failed
+                Self::ReconcilePending
+                    | Self::Reconciled
+                    | Self::Conflicted
+                    | Self::Retained
+                    | Self::InUse
+                    | Self::Ready
+                    | Self::Removing
+                    | Self::Removed
+                    | Self::Failed
             ) | (
                 Self::ReconcilePending,
                 Self::Reconciled | Self::Conflicted | Self::Retained | Self::Failed
@@ -70,7 +78,12 @@ impl WorktreeState {
                 Self::Ready | Self::Retained | Self::Removing | Self::Removed | Self::Failed
             ) | (
                 Self::Conflicted,
-                Self::Retained | Self::InUse | Self::Ready | Self::Failed
+                Self::Retained
+                    | Self::InUse
+                    | Self::Ready
+                    | Self::Removing
+                    | Self::Removed
+                    | Self::Failed
             ) | (
                 Self::Retained,
                 Self::Ready | Self::InUse | Self::Removing | Self::Removed | Self::Failed
@@ -112,7 +125,41 @@ pub enum ExecutionWorkspace {
     },
 }
 
+impl Default for ExecutionWorkspace {
+    fn default() -> Self {
+        Self::SharedSource {
+            cwd: PathBuf::new(),
+        }
+    }
+}
+
 impl ExecutionWorkspace {
+    pub fn shared_source(cwd: impl Into<PathBuf>) -> Self {
+        Self::SharedSource { cwd: cwd.into() }
+    }
+
+    pub fn managed(
+        worktree_id: WorktreeId,
+        root: impl Into<PathBuf>,
+        cwd: impl Into<PathBuf>,
+        source_root: impl Into<PathBuf>,
+        source_cwd: impl Into<PathBuf>,
+        base_sha: impl Into<String>,
+    ) -> Self {
+        Self::Managed {
+            worktree_id,
+            root: root.into(),
+            cwd: cwd.into(),
+            source_root: source_root.into(),
+            source_cwd: source_cwd.into(),
+            base_sha: base_sha.into(),
+        }
+    }
+
+    pub fn is_managed(&self) -> bool {
+        matches!(self, Self::Managed { .. })
+    }
+
     pub fn cwd(&self) -> &std::path::Path {
         match self {
             Self::SharedSource { cwd } => cwd,
@@ -152,6 +199,31 @@ impl ExecutionWorkspace {
         match self {
             Self::SharedSource { .. } => None,
             Self::Managed { base_sha, .. } => Some(base_sha),
+        }
+    }
+}
+
+/// Typed integration workspace for durable studio reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationWorkspace {
+    pub worktree_id: WorktreeId,
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub base_sha: String,
+}
+
+impl IntegrationWorkspace {
+    pub fn new(
+        worktree_id: WorktreeId,
+        root: impl Into<PathBuf>,
+        cwd: impl Into<PathBuf>,
+        base_sha: impl Into<String>,
+    ) -> Self {
+        Self {
+            worktree_id,
+            root: root.into(),
+            cwd: cwd.into(),
+            base_sha: base_sha.into(),
         }
     }
 }

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use agent_studios_internal_agent::{
     WorkspaceAccessMode,
 };
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::worktree::ExecutionWorkspace;
 use agent_studios_provider::ProviderCatalog;
 use agent_studios_provider::ProviderDefinition;
 use agent_studios_provider::auth::AuthenticationScheme;
@@ -802,8 +804,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: None,
-            worktree_id: None,
-            workspace_path: None,
+            execution_workspace: ExecutionWorkspace::shared_source(PathBuf::new()),
         };
 
         let coord_res = executor.execute_agent(coord_ctx).await.unwrap();
@@ -820,8 +821,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
-            worktree_id: None,
-            workspace_path: None,
+            execution_workspace: ExecutionWorkspace::shared_source(PathBuf::new()),
         };
 
         let worker1_res = executor.execute_agent(worker_turn1_ctx).await.unwrap();
@@ -838,8 +838,7 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
-            worktree_id: None,
-            workspace_path: None,
+            execution_workspace: ExecutionWorkspace::shared_source(PathBuf::new()),
         };
 
         let worker2_res = executor.execute_agent(worker_turn2_ctx).await.unwrap();

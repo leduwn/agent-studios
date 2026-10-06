@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,6 +22,7 @@ use agent_studios_protocol::event::ControlPlaneEvent;
 use agent_studios_protocol::id::AgentId;
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
+use agent_studios_protocol::worktree::ExecutionWorkspace;
 use agent_studios_provider::ProviderCatalog;
 use agent_studios_provider::ProviderDefinition;
 use agent_studios_provider::auth::AuthenticationScheme;
@@ -1651,8 +1653,7 @@ fn real_failfast_interrupts_slow_codex_worker() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: None,
-            worktree_id: None,
-            workspace_path: None,
+            execution_workspace: ExecutionWorkspace::shared_source(PathBuf::new()),
         };
 
         // Spawn agent execution in background task

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TransitionError;
@@ -79,7 +80,7 @@ impl TaskState {
 }
 
 /// Policy governing whether a dependent task requires predecessor reconciliations to be applied.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyOutputPolicy {
     #[default]
@@ -183,4 +184,6 @@ pub struct BatchTaskSpec {
     pub dependency_keys: Vec<String>,
     #[serde(default)]
     pub dependency_task_ids: Vec<TaskId>,
+    #[serde(default)]
+    pub dependency_output_policy: DependencyOutputPolicy,
 }

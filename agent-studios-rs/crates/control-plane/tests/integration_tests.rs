@@ -22,7 +22,7 @@ use agent_studios_protocol::id::{
 use agent_studios_protocol::reconciliation::{ReconciliationRecord, ReconciliationState};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy, TaskRecord, TaskState};
 use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 
 // ============================================================================
@@ -1306,6 +1306,7 @@ fn test_create_task_batch_success() {
             parent_task_id: None,
             dependency_keys: vec![],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "task_b".to_string(),
@@ -1316,6 +1317,7 @@ fn test_create_task_batch_success() {
             parent_task_id: None,
             dependency_keys: vec!["task_a".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "task_c".to_string(),
@@ -1326,6 +1328,7 @@ fn test_create_task_batch_success() {
             parent_task_id: None,
             dependency_keys: vec!["task_b".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
     ];
 
@@ -1370,6 +1373,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             parent_task_id: None,
             dependency_keys: vec![],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "t2".to_string(),
@@ -1380,6 +1384,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             parent_task_id: None,
             dependency_keys: vec!["t1".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "t3".to_string(),
@@ -1390,6 +1395,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             parent_task_id: None,
             dependency_keys: vec!["t2".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "t4".to_string(),
@@ -1400,6 +1406,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             parent_task_id: None,
             dependency_keys: vec!["non_existent_key".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
     ];
 
@@ -1432,6 +1439,7 @@ fn test_create_task_batch_duplicate_key_rejected() {
             parent_task_id: None,
             dependency_keys: vec![],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "same_key".to_string(),
@@ -1442,6 +1450,7 @@ fn test_create_task_batch_duplicate_key_rejected() {
             parent_task_id: None,
             dependency_keys: vec![],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
     ];
 

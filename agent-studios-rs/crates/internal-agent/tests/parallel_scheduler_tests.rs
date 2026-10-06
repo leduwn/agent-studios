@@ -74,6 +74,7 @@ async fn test_max_parallel_agents_concurrency_limit() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: None,
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "t2".to_string(),
@@ -83,6 +84,7 @@ async fn test_max_parallel_agents_concurrency_limit() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: None,
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "t3".to_string(),
@@ -92,6 +94,7 @@ async fn test_max_parallel_agents_concurrency_limit() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: None,
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "t4".to_string(),
@@ -101,6 +104,7 @@ async fn test_max_parallel_agents_concurrency_limit() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: None,
+                ..Default::default()
             },
         ],
     };
@@ -171,6 +175,7 @@ async fn test_deterministic_candidate_sorting_by_priority() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(10),
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "high_pri".to_string(),
@@ -180,6 +185,7 @@ async fn test_deterministic_candidate_sorting_by_priority() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(100),
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "default_pri".to_string(),
@@ -189,6 +195,7 @@ async fn test_deterministic_candidate_sorting_by_priority() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: None, // defaults to 0
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "mid_pri".to_string(),
@@ -198,6 +205,7 @@ async fn test_deterministic_candidate_sorting_by_priority() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::ReadOnly),
                 priority: Some(50),
+                ..Default::default()
             },
         ],
     };
@@ -257,6 +265,7 @@ async fn test_workspace_policy_isolation_single_writer_exclusivity() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::Mutating),
                 priority: Some(10),
+                ..Default::default()
             },
             PlannedTask {
                 task_key: "mutator_2".to_string(),
@@ -266,6 +275,7 @@ async fn test_workspace_policy_isolation_single_writer_exclusivity() {
                 depends_on: vec![],
                 workspace_access: Some(WorkspaceAccessMode::Mutating),
                 priority: Some(10),
+                ..Default::default()
             },
         ],
     };

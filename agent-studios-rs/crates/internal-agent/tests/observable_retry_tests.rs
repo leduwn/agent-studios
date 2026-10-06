@@ -54,6 +54,7 @@ async fn test_observable_retry_state_transition_and_events() {
             depends_on: vec![],
             workspace_access: Some(WorkspaceAccessMode::Mutating),
             priority: Some(10),
+            ..Default::default()
         }],
     };
 
@@ -174,6 +175,7 @@ async fn test_bounded_retry_count_exhaustion() {
             depends_on: vec![],
             workspace_access: Some(WorkspaceAccessMode::Mutating),
             priority: Some(10),
+            ..Default::default()
         }],
     };
 

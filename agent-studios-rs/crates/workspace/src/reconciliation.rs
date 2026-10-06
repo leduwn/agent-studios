@@ -19,17 +19,13 @@ pub enum ReconciliationOutcome {
     },
 }
 
-/// Safely reconciles a patch against a dedicated integration worktree.
-///
-/// Steps:
-/// 1. Run `git apply --check --binary -` to verify patch applicability without modifying files.
-/// 2. If check fails: return `Conflicted` with extracted conflicted files and unmodified worktree.
-/// 3. If check succeeds: run `git apply --binary -` and optionally commit changes.
-pub fn reconcile_patch(
+/// Checks whether a patch applies cleanly against a target integration worktree.
+/// Returns `Ok(None)` if check succeeds (clean apply possible).
+/// Returns `Ok(Some(ReconciliationOutcome::Conflicted { .. }))` if check fails.
+pub fn check_patch(
     target_worktree: &Path,
     patch_data: &[u8],
-    commit_message: Option<&str>,
-) -> Result<ReconciliationOutcome, WorkspaceError> {
+) -> Result<Option<ReconciliationOutcome>, WorkspaceError> {
     if !target_worktree.is_dir() {
         return Err(WorkspaceError::InvalidOperation(format!(
             "target worktree {} is not a directory",
@@ -57,22 +53,8 @@ pub fn reconcile_patch(
         )));
     }
 
-    // Snapshot pre-HEAD commit
-    let rev_out = Command::new("git")
-        .current_dir(target_worktree)
-        .args(["rev-parse", "HEAD"])
-        .output()?;
-    if !rev_out.status.success() {
-        return Err(WorkspaceError::GitError(format!(
-            "git rev-parse HEAD failed in target worktree: {}",
-            String::from_utf8_lossy(&rev_out.stderr)
-        )));
-    }
-    let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
-
-    // Empty patch has nothing to apply.
     if patch_data.is_empty() {
-        return Ok(ReconciliationOutcome::Applied { merge_commit: None });
+        return Ok(None);
     }
 
     // 1. Dry-run check: git apply --check --binary -
@@ -92,13 +74,45 @@ pub fn reconcile_patch(
     if !check_output.status.success() {
         let stderr_str = String::from_utf8_lossy(&check_output.stderr).to_string();
         let conflicted_files = extract_conflicted_files(&stderr_str);
-        return Ok(ReconciliationOutcome::Conflicted {
+        return Ok(Some(ReconciliationOutcome::Conflicted {
             conflicted_files,
             reason: stderr_str,
-        });
+        }));
     }
 
-    // Helper closure to rollback on failure
+    Ok(None)
+}
+
+/// Applies a previously checked patch to a target integration worktree and creates an optional commit.
+pub fn apply_patch(
+    target_worktree: &Path,
+    patch_data: &[u8],
+    commit_message: Option<&str>,
+) -> Result<ReconciliationOutcome, WorkspaceError> {
+    if !target_worktree.is_dir() {
+        return Err(WorkspaceError::InvalidOperation(format!(
+            "target worktree {} is not a directory",
+            target_worktree.display()
+        )));
+    }
+
+    if patch_data.is_empty() {
+        return Ok(ReconciliationOutcome::Applied { merge_commit: None });
+    }
+
+    // Snapshot pre-HEAD commit
+    let rev_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !rev_out.status.success() {
+        return Err(WorkspaceError::GitError(format!(
+            "git rev-parse HEAD failed in target worktree: {}",
+            String::from_utf8_lossy(&rev_out.stderr)
+        )));
+    }
+    let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
     let rollback = || -> Result<(), WorkspaceError> {
         let reset_out = Command::new("git")
             .current_dir(target_worktree)
@@ -123,7 +137,6 @@ pub fn reconcile_patch(
         Ok(())
     };
 
-    // 2. Real application: git apply --binary -
     let mut apply_child = Command::new("git")
         .current_dir(target_worktree)
         .args(["apply", "--binary", "-"])
@@ -147,7 +160,6 @@ pub fn reconcile_patch(
         });
     }
 
-    // 3. Optional commit if message is provided
     let merge_commit = if let Some(msg) = commit_message {
         let add_out = Command::new("git")
             .current_dir(target_worktree)
@@ -188,6 +200,23 @@ pub fn reconcile_patch(
     };
 
     Ok(ReconciliationOutcome::Applied { merge_commit })
+}
+
+/// Safely reconciles a patch against a dedicated integration worktree.
+///
+/// Steps:
+/// 1. Run `git apply --check --binary -` to verify patch applicability without modifying files.
+/// 2. If check fails: return `Conflicted` with extracted conflicted files and unmodified worktree.
+/// 3. If check succeeds: run `git apply --binary -` and optionally commit changes.
+pub fn reconcile_patch(
+    target_worktree: &Path,
+    patch_data: &[u8],
+    commit_message: Option<&str>,
+) -> Result<ReconciliationOutcome, WorkspaceError> {
+    if let Some(conflict) = check_patch(target_worktree, patch_data)? {
+        return Ok(conflict);
+    }
+    apply_patch(target_worktree, patch_data, commit_message)
 }
 
 /// Parses git apply error messages to discover which files conflicted.

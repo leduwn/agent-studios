@@ -179,9 +179,35 @@ impl WorkspaceOrchestrator {
             return Ok(());
         }
 
-        self.worktree_manager
-            .remove(source_cwd, root)
-            .map_err(|e| WorkspaceError::WorktreeRemovalFailed(e.to_string()))
+        // Clean uncommitted or untracked changes in the worktree before removal
+        if root.exists() {
+            let _ = std::process::Command::new("git")
+                .current_dir(root)
+                .args(["reset", "--hard", "HEAD"])
+                .output();
+            let _ = std::process::Command::new("git")
+                .current_dir(root)
+                .args(["clean", "-fdx"])
+                .output();
+        }
+
+        match self.worktree_manager.remove(source_cwd, root) {
+            Ok(()) => Ok(()),
+            Err(remove_err) => {
+                // Fall back to git worktree remove --force if standard remove failed
+                let force_output = std::process::Command::new("git")
+                    .current_dir(source_cwd)
+                    .args(["worktree", "remove", "--force", &root.to_string_lossy()])
+                    .output();
+
+                match force_output {
+                    Ok(output) if output.status.success() => Ok(()),
+                    _ => Err(WorkspaceError::WorktreeRemovalFailed(
+                        remove_err.to_string(),
+                    )),
+                }
+            }
+        }
     }
 
     /// Asynchronous wrapper for `release_worktree`.
@@ -246,6 +272,56 @@ impl WorkspaceOrchestrator {
                 options,
             )
             .map_err(WorkspaceError::from)
+    }
+
+    /// Checks whether a patch applies cleanly against an integration worktree without mutating files.
+    pub async fn check_patch_async(
+        &self,
+        target_worktree: PathBuf,
+        patch_data: Vec<u8>,
+    ) -> Result<Option<ReconciliationOutcome>, WorkspaceError> {
+        tokio::task::spawn_blocking(move || {
+            reconciliation::check_patch(&target_worktree, &patch_data)
+        })
+        .await
+        .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
+    }
+
+    /// Applies a previously checked patch to an integration worktree.
+    pub async fn apply_patch_async(
+        &self,
+        target_worktree: PathBuf,
+        patch_data: Vec<u8>,
+        commit_message: Option<String>,
+    ) -> Result<ReconciliationOutcome, WorkspaceError> {
+        tokio::task::spawn_blocking(move || {
+            reconciliation::apply_patch(&target_worktree, &patch_data, commit_message.as_deref())
+        })
+        .await
+        .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
+    }
+
+    /// Resolves the current HEAD commit hash of a worktree via `git rev-parse HEAD`.
+    pub async fn resolve_head_commit_async(
+        &self,
+        target_worktree: PathBuf,
+    ) -> Result<String, WorkspaceError> {
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("git")
+                .current_dir(&target_worktree)
+                .args(["rev-parse", "HEAD"])
+                .output()?;
+            if !output.status.success() {
+                return Err(WorkspaceError::GitError(format!(
+                    "git rev-parse HEAD failed in {}: {}",
+                    target_worktree.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .await
+        .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
     }
 
     /// Safely reconciles a patch against an integration worktree.

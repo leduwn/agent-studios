@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_studios_protocol::agent::AgentState;
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::worktree::ExecutionWorkspace;
 use agent_studios_runtime_session::AgentStudiosRuntimeSessionFactory;
 use agent_studios_workspace::WorkspaceOrchestrator;
 use async_trait::async_trait;
@@ -40,8 +40,7 @@ pub struct AgentExecutionContext {
     pub prompt: String,
     pub budget: AgentExecutionBudget,
     pub output_schema: Option<serde_json::Value>,
-    pub worktree_id: Option<WorktreeId>,
-    pub workspace_path: Option<PathBuf>,
+    pub execution_workspace: ExecutionWorkspace,
 }
 
 impl AgentExecutionContext {
@@ -60,8 +59,7 @@ impl AgentExecutionContext {
             prompt: prompt.into(),
             budget,
             output_schema: None,
-            worktree_id: None,
-            workspace_path: None,
+            execution_workspace: ExecutionWorkspace::default(),
         }
     }
 
@@ -85,13 +83,8 @@ impl AgentExecutionContext {
         self
     }
 
-    pub fn with_worktree_id(mut self, worktree_id: Option<WorktreeId>) -> Self {
-        self.worktree_id = worktree_id;
-        self
-    }
-
-    pub fn with_workspace_path(mut self, workspace_path: Option<PathBuf>) -> Self {
-        self.workspace_path = workspace_path;
+    pub fn with_execution_workspace(mut self, workspace: ExecutionWorkspace) -> Self {
+        self.execution_workspace = workspace;
         self
     }
 }
@@ -242,8 +235,7 @@ pub struct RunningAgentState {
     pub parent_agent_id: Option<AgentId>,
     pub extension_context: Arc<AgentRuntimeExtensionContext>,
     pub budget_tracker: Arc<AgentBudgetTracker>,
-    pub bound_workspace: Option<PathBuf>,
-    pub bound_worktree_id: Option<WorktreeId>,
+    pub bound_workspace: ExecutionWorkspace,
 }
 
 impl std::fmt::Debug for RunningAgentState {
@@ -254,7 +246,6 @@ impl std::fmt::Debug for RunningAgentState {
             .field("current_run_id", &self.current_run_id)
             .field("parent_agent_id", &self.parent_agent_id)
             .field("bound_workspace", &self.bound_workspace)
-            .field("bound_worktree_id", &self.bound_worktree_id)
             .finish()
     }
 }
@@ -333,6 +324,28 @@ impl CodexAgentExecutor {
         }
 
         Ok(())
+    }
+
+    pub async fn retire_worker(
+        &self,
+        agent_id: AgentId,
+        state: &RunningAgentState,
+    ) -> Result<(), InternalAgentError> {
+        if state.active_turn.load(Ordering::SeqCst) {
+            return Err(InternalAgentError::WorkspaceAffinityConflict { agent_id });
+        }
+        let _ = state.thread.submit(Op::Shutdown).await;
+        let shutdown_timeout = Duration::from_secs(5);
+        tokio::select! {
+            _ = state.thread.wait_until_terminated() => {
+                let mut guard = self.running_agents.write().await;
+                guard.remove(&agent_id);
+                Ok(())
+            }
+            _ = tokio::time::sleep(shutdown_timeout) => {
+                Err(InternalAgentError::WorkerRetirementTimeout { agent_id })
+            }
+        }
     }
 
     async fn drain_events(
@@ -474,7 +487,7 @@ impl AgentExecutor for CodexAgentExecutor {
         };
 
         if let Some(mut state) = existing {
-            if state.bound_workspace == context.workspace_path {
+            if state.bound_workspace == context.execution_workspace {
                 let tracker = if state.parent_agent_id.is_none() {
                     Arc::clone(&state.budget_tracker)
                 } else {
@@ -583,20 +596,11 @@ impl AgentExecutor for CodexAgentExecutor {
                 tracing::info!(
                     agent_id = %context.agent_spec.agent_id,
                     old_ws = ?state.bound_workspace,
-                    new_ws = ?context.workspace_path,
+                    new_ws = ?context.execution_workspace,
                     "Retiring worker due to workspace change (non-teleporting invariant)"
                 );
-                let _ = state.thread.submit(Op::Shutdown).await;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                while tokio::time::Instant::now() < deadline {
-                    let status = state.thread.agent_status().await;
-                    if !matches!(status, codex_protocol::protocol::AgentStatus::Running) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                let mut guard = self.running_agents.write().await;
-                guard.remove(&context.agent_spec.agent_id);
+                self.retire_worker(context.agent_spec.agent_id, &state)
+                    .await?;
             }
         }
 
@@ -630,10 +634,12 @@ impl AgentExecutor for CodexAgentExecutor {
                 .await;
 
             let mut coordinator_config = (*self.config).clone();
-            if let Some(ref ws) = context.workspace_path {
-                coordinator_config.cwd = AbsolutePathBuf::from_absolute_path(ws).map_err(|e| {
-                    InternalAgentError::Other(format!("invalid workspace path: {e}"))
-                })?;
+            let cwd_path = context.execution_workspace.cwd();
+            if !cwd_path.as_os_str().is_empty() {
+                coordinator_config.cwd =
+                    AbsolutePathBuf::from_absolute_path(cwd_path).map_err(|e| {
+                        InternalAgentError::Other(format!("invalid workspace path: {e}"))
+                    })?;
             }
             if context.agent_spec.workspace_access.is_read_only() {
                 coordinator_config
@@ -689,35 +695,35 @@ impl AgentExecutor for CodexAgentExecutor {
             let agent_control = thread.agent_control();
             let active_turn = Arc::new(AtomicBool::new(true));
 
-            if let (Some(orchestrator), Some(ws), Some(wt_id)) = (
-                &self.workspace_orchestrator,
-                &context.workspace_path,
-                context.worktree_id,
-            ) {
-                if let Err(e) = orchestrator
-                    .bind_thread_async(ws.clone(), thread_id.to_string())
-                    .await
-                {
-                    let _ = thread.submit(Op::Shutdown).await;
-                    tracker.rollback_turn();
-                    let _ = self
-                        .control_plane
-                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
-                        .await;
-                    let _ = self
-                        .control_plane
-                        .record_worktree_retained(
-                            wt_id,
-                            Some(format!("Failed upstream thread binding: {e}")),
-                        )
-                        .await;
-                    return Err(InternalAgentError::ExecutionFailed {
-                        agent_id: context.agent_spec.agent_id,
-                        error: format!("Failed to bind thread to workspace: {e}"),
-                    });
+            if let Some(orchestrator) = &self.workspace_orchestrator {
+                if let Some(root) = context.execution_workspace.root() {
+                    if let Err(e) = orchestrator
+                        .bind_thread_async(root.to_path_buf(), thread_id.to_string())
+                        .await
+                    {
+                        let _ = thread.submit(Op::Shutdown).await;
+                        tracker.rollback_turn();
+                        let _ = self
+                            .control_plane
+                            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                            .await;
+                        if let Some(wt_id) = context.execution_workspace.worktree_id() {
+                            let _ = self
+                                .control_plane
+                                .record_worktree_retained(
+                                    wt_id,
+                                    Some(format!("Failed upstream thread binding: {e}")),
+                                )
+                                .await;
+                        }
+                        return Err(InternalAgentError::ExecutionFailed {
+                            agent_id: context.agent_spec.agent_id,
+                            error: format!("Failed to bind thread to workspace: {e}"),
+                        });
+                    }
                 }
             }
-            if let Some(wt_id) = context.worktree_id {
+            if let Some(wt_id) = context.execution_workspace.worktree_id() {
                 if let Err(e) = self
                     .control_plane
                     .bind_worktree_thread(wt_id, thread_id.to_string())
@@ -752,8 +758,7 @@ impl AgentExecutor for CodexAgentExecutor {
                 parent_agent_id: None,
                 extension_context: Arc::clone(&ext_ctx),
                 budget_tracker: Arc::clone(&tracker),
-                bound_workspace: context.workspace_path.clone(),
-                bound_worktree_id: context.worktree_id,
+                bound_workspace: context.execution_workspace.clone(),
             };
 
             {
@@ -891,8 +896,9 @@ impl AgentExecutor for CodexAgentExecutor {
         let mut child_config = (*self.config).clone();
         child_config.model_provider_id = prepared_session.model_provider_id().to_string();
         child_config.model = Some(prepared_session.selected_model().to_string());
-        if let Some(ref ws) = context.workspace_path {
-            child_config.cwd = AbsolutePathBuf::from_absolute_path(ws)
+        let child_cwd = context.execution_workspace.cwd();
+        if !child_cwd.as_os_str().is_empty() {
+            child_config.cwd = AbsolutePathBuf::from_absolute_path(child_cwd)
                 .map_err(|e| InternalAgentError::Other(format!("invalid workspace path: {e}")))?;
         }
         if context.agent_spec.workspace_access.is_read_only() {
@@ -1005,36 +1011,36 @@ impl AgentExecutor for CodexAgentExecutor {
         let child_control = child_thread.agent_control();
         let active_turn = Arc::new(AtomicBool::new(true));
 
-        if let (Some(orchestrator), Some(ws), Some(wt_id)) = (
-            &self.workspace_orchestrator,
-            &context.workspace_path,
-            context.worktree_id,
-        ) {
-            if let Err(e) = orchestrator
-                .bind_thread_async(ws.clone(), live_agent.thread_id.to_string())
-                .await
-            {
-                let _ = child_thread.submit(Op::Shutdown).await;
-                parent_state.budget_tracker.rollback_child_agent();
-                child_tracker.rollback_turn();
-                let _ = self
-                    .control_plane
-                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
-                    .await;
-                let _ = self
-                    .control_plane
-                    .record_worktree_retained(
-                        wt_id,
-                        Some(format!("Failed upstream thread binding: {e}")),
-                    )
-                    .await;
-                return Err(InternalAgentError::ExecutionFailed {
-                    agent_id: context.agent_spec.agent_id,
-                    error: format!("Failed to bind child thread to workspace: {e}"),
-                });
+        if let Some(orchestrator) = &self.workspace_orchestrator {
+            if let Some(root) = context.execution_workspace.root() {
+                if let Err(e) = orchestrator
+                    .bind_thread_async(root.to_path_buf(), live_agent.thread_id.to_string())
+                    .await
+                {
+                    let _ = child_thread.submit(Op::Shutdown).await;
+                    parent_state.budget_tracker.rollback_child_agent();
+                    child_tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    if let Some(wt_id) = context.execution_workspace.worktree_id() {
+                        let _ = self
+                            .control_plane
+                            .record_worktree_retained(
+                                wt_id,
+                                Some(format!("Failed upstream thread binding: {e}")),
+                            )
+                            .await;
+                    }
+                    return Err(InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: format!("Failed to bind child thread to workspace: {e}"),
+                    });
+                }
             }
         }
-        if let Some(wt_id) = context.worktree_id {
+        if let Some(wt_id) = context.execution_workspace.worktree_id() {
             if let Err(e) = self
                 .control_plane
                 .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
@@ -1070,8 +1076,7 @@ impl AgentExecutor for CodexAgentExecutor {
             parent_agent_id: Some(parent_id),
             extension_context: Arc::clone(&child_ext_ctx),
             budget_tracker: Arc::clone(&child_tracker),
-            bound_workspace: context.workspace_path.clone(),
-            bound_worktree_id: context.worktree_id,
+            bound_workspace: context.execution_workspace.clone(),
         };
 
         {

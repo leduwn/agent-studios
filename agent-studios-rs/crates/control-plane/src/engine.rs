@@ -514,7 +514,19 @@ impl ControlPlaneState {
                     ));
                 }
 
-                if let Some(supersedes_id) = artifact.supersedes {
+                if artifact.version == 1 {
+                    if artifact.supersedes.is_some() {
+                        return Err(ReplayError::DomainViolation(
+                            "Artifact version 1 cannot supersede another artifact".to_string(),
+                        ));
+                    }
+                } else {
+                    let supersedes_id = artifact.supersedes.ok_or_else(|| {
+                        ReplayError::DomainViolation(format!(
+                            "Artifact version {} must supersede a predecessor artifact",
+                            artifact.version
+                        ))
+                    })?;
                     let superseded = self.artifacts.get(&supersedes_id).ok_or_else(|| {
                         ReplayError::DomainViolation(format!(
                             "Superseded artifact {supersedes_id} not found"
@@ -544,10 +556,20 @@ impl ControlPlaneState {
                             superseded.logical_name, artifact.logical_name
                         )));
                     }
-                    if superseded.version >= artifact.version {
+                    if superseded.version != artifact.version - 1 {
                         return Err(ReplayError::DomainViolation(format!(
-                            "Superseded artifact version {} must be strictly smaller than {}",
-                            superseded.version, artifact.version
+                            "Artifact version continuity violation: superseded artifact version {} must be exactly {}",
+                            superseded.version,
+                            artifact.version - 1
+                        )));
+                    }
+                    let is_fork = self
+                        .artifacts
+                        .values()
+                        .any(|a| a.supersedes == Some(supersedes_id) && a.id != artifact.id);
+                    if is_fork {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Fork branch rejected: artifact {supersedes_id} is already superseded by another artifact"
                         )));
                     }
                 }
@@ -1158,6 +1180,12 @@ impl ControlPlaneState {
                     });
                 }
 
+                if worktree.state == WorktreeState::InUse {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Cannot release worktree {worktree_id} while in InUse state"
+                    )));
+                }
+
                 worktree.retained = *retained;
                 worktree.retained_reason = reason.clone();
                 worktree.released_at = Some(now);
@@ -1222,14 +1250,24 @@ impl ControlPlaneState {
                     });
                 }
 
-                if let Some(target_worktree) =
-                    self.worktrees.get(&reconciliation.target_worktree_id)
-                    && target_worktree.studio_id != reconciliation.studio_id
-                {
+                let target_worktree = self
+                    .worktrees
+                    .get(&reconciliation.target_worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: reconciliation.target_worktree_id,
+                    })?;
+                if target_worktree.studio_id != reconciliation.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: reconciliation.studio_id,
                         actual: target_worktree.studio_id,
                     });
+                }
+
+                if source_worktree.source_root != target_worktree.source_root {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Source worktree repository {:?} does not match target worktree repository {:?}",
+                        source_worktree.source_root, target_worktree.source_root
+                    )));
                 }
 
                 let task = self.task_graph.get_task(reconciliation.task_id).ok_or(
@@ -1254,15 +1292,31 @@ impl ControlPlaneState {
                 let patch_artifact = self
                     .artifacts
                     .get(&reconciliation.patch_artifact_id)
-                    .ok_or(ReplayError::DomainViolation(format!(
-                        "Patch artifact {} not found",
-                        reconciliation.patch_artifact_id
-                    )))?;
+                    .ok_or_else(|| {
+                        ReplayError::DomainViolation(format!(
+                            "Patch artifact {} not found",
+                            reconciliation.patch_artifact_id
+                        ))
+                    })?;
                 if patch_artifact.studio_id != reconciliation.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: reconciliation.studio_id,
                         actual: patch_artifact.studio_id,
                     });
+                }
+                if patch_artifact.task_id != reconciliation.task_id {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Patch artifact task {} does not match reconciliation task {}",
+                        patch_artifact.task_id, reconciliation.task_id
+                    )));
+                }
+                if let Some(wt_id) = patch_artifact.worktree_id
+                    && wt_id != reconciliation.source_worktree_id
+                {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Patch artifact worktree {} does not match reconciliation source worktree {}",
+                        wt_id, reconciliation.source_worktree_id
+                    )));
                 }
 
                 self.reconciliations_by_studio
@@ -1329,6 +1383,15 @@ impl ControlPlaneState {
                     });
                 }
 
+                if rec.state != ReconciliationState::Checking {
+                    return Err(ReplayError::InvalidTransition {
+                        reason: format!(
+                            "ReconciliationConflictDetected is only valid from Checking state, current state is {:?}",
+                            rec.state
+                        ),
+                    });
+                }
+
                 rec.conflicted_files = conflicted_files.clone();
                 rec.error_message = Some(reason.clone());
                 rec.state = ReconciliationState::Conflicted;
@@ -1355,6 +1418,15 @@ impl ControlPlaneState {
                     });
                 }
 
+                if rec.state != ReconciliationState::Applying {
+                    return Err(ReplayError::InvalidTransition {
+                        reason: format!(
+                            "ReconciliationApplied is only valid from Applying state, current state is {:?}",
+                            rec.state
+                        ),
+                    });
+                }
+
                 rec.merge_commit = merge_commit.clone();
                 rec.state = ReconciliationState::Applied;
                 rec.updated_at = now;
@@ -1377,6 +1449,15 @@ impl ControlPlaneState {
                     return Err(ReplayError::StudioMismatch {
                         expected: rec.studio_id,
                         actual: envelope.studio_id,
+                    });
+                }
+
+                if rec.state.is_terminal() {
+                    return Err(ReplayError::InvalidTransition {
+                        reason: format!(
+                            "ReconciliationFailed is only valid from non-terminal state, current state is {:?}",
+                            rec.state
+                        ),
                     });
                 }
 
@@ -1882,7 +1963,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                     .unwrap_or(false)
             });
 
-            let initial_state = if dependencies.is_empty() || all_deps_succeeded {
+            let initial_state = if dependencies.is_empty()
+                || (spec.dependency_output_policy == DependencyOutputPolicy::TaskSuccess
+                    && all_deps_succeeded)
+            {
                 TaskState::Ready
             } else {
                 TaskState::Blocked
@@ -1900,7 +1984,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                 created_at: now,
                 updated_at: now,
                 retry_count: 0,
-                dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+                dependency_output_policy: spec.dependency_output_policy,
             };
 
             candidate_events.push(ControlPlaneEvent::TaskCreated { task: task.clone() });
@@ -1910,6 +1994,72 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         self.commit_transaction(studio_id, candidate_events)?;
 
         Ok(created_tasks)
+    }
+
+    fn are_task_dependencies_satisfied(
+        &self,
+        task: &TaskRecord,
+        succeeding_task_id: Option<TaskId>,
+        newly_applied_recon_id: Option<ReconciliationId>,
+    ) -> bool {
+        let all_deps_succeeded = task.dependencies.iter().all(|&d_id| {
+            if Some(d_id) == succeeding_task_id {
+                true
+            } else {
+                self.state
+                    .task_graph
+                    .get_task(d_id)
+                    .map(|t| t.state == TaskState::Succeeded)
+                    .unwrap_or(false)
+            }
+        });
+
+        if !all_deps_succeeded {
+            return false;
+        }
+
+        match task.dependency_output_policy {
+            DependencyOutputPolicy::TaskSuccess => true,
+            DependencyOutputPolicy::ReconciledOutput => {
+                for &d_id in &task.dependencies {
+                    let reconciliations: Vec<&ReconciliationRecord> = self
+                        .state
+                        .reconciliations
+                        .values()
+                        .filter(|r| r.task_id == d_id)
+                        .collect();
+
+                    for rec in reconciliations {
+                        let is_applied = if Some(rec.id) == newly_applied_recon_id {
+                            true
+                        } else {
+                            rec.state == ReconciliationState::Applied
+                        };
+                        if !is_applied {
+                            return false;
+                        }
+                    }
+
+                    let active_wts: Vec<&WorktreeRecord> = self
+                        .state
+                        .worktrees
+                        .values()
+                        .filter(|w| w.assigned_task_id == Some(d_id))
+                        .collect();
+                    for wt in active_wts {
+                        if matches!(
+                            wt.state,
+                            WorktreeState::InUse
+                                | WorktreeState::ChangeCaptured
+                                | WorktreeState::ReconcilePending
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+        }
     }
 
     pub fn transition_task_state(
@@ -1938,33 +2088,20 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             new_state,
         }];
 
-        // If transitioning to Succeeded, unblock dependents whose prerequisites are now all Succeeded
+        // If transitioning to Succeeded, unblock dependents whose prerequisites are now all satisfied
         if new_state == TaskState::Succeeded
             && let Ok(dependents) = self.state.task_graph.dependents_of(task_id)
         {
             for dep_id in dependents {
                 if let Some(dep_task) = self.state.task_graph.get_task(dep_id)
                     && dep_task.state == TaskState::Blocked
+                    && self.are_task_dependencies_satisfied(dep_task, Some(task_id), None)
                 {
-                    let all_deps_succeeded = dep_task.dependencies.iter().all(|&d_id| {
-                        if d_id == task_id {
-                            true
-                        } else {
-                            self.state
-                                .task_graph
-                                .get_task(d_id)
-                                .map(|t| t.state == TaskState::Succeeded)
-                                .unwrap_or(false)
-                        }
+                    candidate_events.push(ControlPlaneEvent::TaskStateChanged {
+                        task_id: dep_id,
+                        previous_state: TaskState::Blocked,
+                        new_state: TaskState::Ready,
                     });
-
-                    if all_deps_succeeded {
-                        candidate_events.push(ControlPlaneEvent::TaskStateChanged {
-                            task_id: dep_id,
-                            previous_state: TaskState::Blocked,
-                            new_state: TaskState::Ready,
-                        });
-                    }
                 }
             }
         }
@@ -2437,6 +2574,40 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Ok(artifact)
     }
 
+    pub fn get_artifact_lineage(
+        &self,
+        artifact_id: ArtifactId,
+    ) -> Result<Vec<ArtifactRecord>, ControlPlaneError> {
+        let initial = self
+            .state
+            .artifacts
+            .get(&artifact_id)
+            .ok_or(ControlPlaneError::ArtifactNotFound(artifact_id))?;
+
+        let mut chain = vec![initial.clone()];
+        let mut current = initial;
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(initial.id);
+
+        while let Some(parent_id) = current.supersedes {
+            if !visited.insert(parent_id) {
+                return Err(ControlPlaneError::InvalidOperation(format!(
+                    "Cyclic artifact lineage detected involving artifact {parent_id}"
+                )));
+            }
+            let parent = self
+                .state
+                .artifacts
+                .get(&parent_id)
+                .ok_or(ControlPlaneError::ArtifactNotFound(parent_id))?;
+            chain.push(parent.clone());
+            current = parent;
+        }
+
+        chain.reverse();
+        Ok(chain)
+    }
+
     // ========================================================================
     // Worktree Management
     // ========================================================================
@@ -2456,6 +2627,40 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let now = self.clock.now();
         let worktree =
             WorktreeRecord::new(studio_id, name, repo_path, worktree_path, base_commit, now);
+
+        let event = ControlPlaneEvent::WorktreeCreated {
+            worktree: worktree.clone(),
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(worktree)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_worktree_with_cwds(
+        &mut self,
+        studio_id: StudioId,
+        name: impl Into<String>,
+        source_root: impl Into<std::path::PathBuf>,
+        source_cwd: impl Into<std::path::PathBuf>,
+        worktree_root: impl Into<std::path::PathBuf>,
+        worktree_cwd: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<WorktreeRecord, ControlPlaneError> {
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        let now = self.clock.now();
+        let worktree = WorktreeRecord::new_with_cwds(
+            studio_id,
+            name,
+            source_root,
+            source_cwd,
+            worktree_root,
+            worktree_cwd,
+            base_commit,
+            now,
+        );
 
         let event = ControlPlaneEvent::WorktreeCreated {
             worktree: worktree.clone(),
@@ -2612,12 +2817,32 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
         let studio_id = worktree.studio_id;
 
-        let event = ControlPlaneEvent::WorktreeNoChangesCaptured {
+        let mut candidate_events = Vec::new();
+
+        if worktree.state != WorktreeState::Retained {
+            worktree
+                .state
+                .validate_transition_to(WorktreeState::Retained)?;
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                previous_state: worktree.state,
+                new_state: WorktreeState::Retained,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::WorktreeNoChangesCaptured {
             worktree_id,
             run_id,
             base_commit: base_commit.into(),
-        };
-        self.commit_transaction(studio_id, vec![event])?;
+        });
+
+        candidate_events.push(ControlPlaneEvent::WorktreeReleased {
+            worktree_id,
+            retained: true,
+            reason: Some("no changes captured".to_string()),
+        });
+
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -2677,7 +2902,19 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             return Err(ControlPlaneError::ArtifactNotFound(stats_id));
         }
 
-        let event = ControlPlaneEvent::WorktreeChangeCaptured {
+        let mut candidate_events = Vec::new();
+        if worktree.state != WorktreeState::ChangeCaptured {
+            worktree
+                .state
+                .validate_transition_to(WorktreeState::ChangeCaptured)?;
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                previous_state: worktree.state,
+                new_state: WorktreeState::ChangeCaptured,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::WorktreeChangeCaptured {
             worktree_id,
             run_id,
             base_commit: base_commit.into(),
@@ -2685,8 +2922,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             patch_artifact_id,
             stats_artifact_id,
             files_changed,
-        };
-        self.commit_transaction(studio_id, vec![event])?;
+        });
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -2703,12 +2940,65 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
         let studio_id = worktree.studio_id;
 
+        if worktree.state == WorktreeState::InUse {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Cannot release worktree {worktree_id} while in InUse state"
+            )));
+        }
+
         let event = ControlPlaneEvent::WorktreeReleased {
             worktree_id,
             retained,
             reason,
         };
         self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn complete_worktree_removal(
+        &mut self,
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        if worktree.state == WorktreeState::InUse {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Cannot remove worktree {worktree_id} while in InUse state"
+            )));
+        }
+
+        let mut candidate_events = Vec::new();
+
+        if worktree.state != WorktreeState::Removing {
+            worktree
+                .state
+                .validate_transition_to(WorktreeState::Removing)?;
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                previous_state: worktree.state,
+                new_state: WorktreeState::Removing,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+            worktree_id,
+            previous_state: WorktreeState::Removing,
+            new_state: WorktreeState::Removed,
+        });
+
+        candidate_events.push(ControlPlaneEvent::WorktreeReleased {
+            worktree_id,
+            retained: false,
+            reason,
+        });
+
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -2787,13 +3077,23 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             });
         }
 
-        if let Some(target_wt) = self.state.worktrees.get(&target_worktree_id)
-            && target_wt.studio_id != studio_id
-        {
+        let target_wt = self
+            .state
+            .worktrees
+            .get(&target_worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(target_worktree_id))?;
+        if target_wt.studio_id != studio_id {
             return Err(ControlPlaneError::StudioMismatch {
                 expected: studio_id,
                 actual: target_wt.studio_id,
             });
+        }
+
+        if worktree.source_root != target_wt.source_root {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Source worktree repository {:?} does not match target worktree repository {:?}",
+                worktree.source_root, target_wt.source_root
+            )));
         }
 
         let task = self
@@ -2821,8 +3121,30 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             }
         }
 
-        if !self.state.artifacts.contains_key(&patch_artifact_id) {
-            return Err(ControlPlaneError::ArtifactNotFound(patch_artifact_id));
+        let patch_artifact = self
+            .state
+            .artifacts
+            .get(&patch_artifact_id)
+            .ok_or(ControlPlaneError::ArtifactNotFound(patch_artifact_id))?;
+        if patch_artifact.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: patch_artifact.studio_id,
+            });
+        }
+        if patch_artifact.task_id != task_id {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Patch artifact task {} does not match reconciliation task {}",
+                patch_artifact.task_id, task_id
+            )));
+        }
+        if let Some(wt_id) = patch_artifact.worktree_id
+            && wt_id != source_worktree_id
+        {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Patch artifact worktree {} does not match reconciliation source worktree {}",
+                wt_id, source_worktree_id
+            )));
         }
 
         let now = self.clock.now();
@@ -2899,21 +3221,33 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .get(&reconciliation_id)
             .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
         let studio_id = rec.studio_id;
+        let source_worktree_id = rec.source_worktree_id;
 
-        if rec.state != ReconciliationState::Checking && rec.state != ReconciliationState::Applying
-        {
+        if rec.state != ReconciliationState::Checking {
             return Err(ControlPlaneError::InvalidOperation(format!(
-                "ReconciliationConflictDetected is only legal from Checking or Applying state, current state is {:?}",
+                "ReconciliationConflictDetected is only legal from Checking state, current state is {:?}",
                 rec.state
             )));
         }
 
-        let event = ControlPlaneEvent::ReconciliationConflictDetected {
+        let mut candidate_events = Vec::new();
+        if let Some(source_wt) = self.state.worktrees.get(&source_worktree_id)
+            && source_wt.state != WorktreeState::Conflicted
+            && source_wt.state.can_transition_to(WorktreeState::Conflicted)
+        {
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id: source_worktree_id,
+                previous_state: source_wt.state,
+                new_state: WorktreeState::Conflicted,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::ReconciliationConflictDetected {
             reconciliation_id,
             conflicted_files,
             reason: reason.into(),
-        };
-        self.commit_transaction(studio_id, vec![event])?;
+        });
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 
@@ -2928,6 +3262,8 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .get(&reconciliation_id)
             .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
         let studio_id = rec.studio_id;
+        let task_id = rec.task_id;
+        let source_worktree_id = rec.source_worktree_id;
 
         if rec.state != ReconciliationState::Applying {
             return Err(ControlPlaneError::InvalidOperation(format!(
@@ -2936,11 +3272,40 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             )));
         }
 
-        let event = ControlPlaneEvent::ReconciliationApplied {
+        let mut candidate_events = Vec::new();
+        if let Some(source_wt) = self.state.worktrees.get(&source_worktree_id)
+            && source_wt.state != WorktreeState::Reconciled
+            && source_wt.state.can_transition_to(WorktreeState::Reconciled)
+        {
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id: source_worktree_id,
+                previous_state: source_wt.state,
+                new_state: WorktreeState::Reconciled,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::ReconciliationApplied {
             reconciliation_id,
             merge_commit,
-        };
-        self.commit_transaction(studio_id, vec![event])?;
+        });
+
+        // Unblock dependent tasks waiting for ReconciledOutput
+        if let Ok(dependents) = self.state.task_graph.dependents_of(task_id) {
+            for dep_id in dependents {
+                if let Some(dep_task) = self.state.task_graph.get_task(dep_id)
+                    && dep_task.state == TaskState::Blocked
+                    && self.are_task_dependencies_satisfied(dep_task, None, Some(reconciliation_id))
+                {
+                    candidate_events.push(ControlPlaneEvent::TaskStateChanged {
+                        task_id: dep_id,
+                        previous_state: TaskState::Blocked,
+                        new_state: TaskState::Ready,
+                    });
+                }
+            }
+        }
+
+        self.commit_transaction(studio_id, candidate_events)?;
         Ok(())
     }
 

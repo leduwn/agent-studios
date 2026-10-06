@@ -5,7 +5,7 @@ use agent_studios_internal_agent::{ControlPlaneActor, ControlPlaneHandle};
 use agent_studios_protocol::agent::{AgentKind, AgentState};
 use agent_studios_protocol::event::ControlPlaneEvent;
 use agent_studios_protocol::run::RunState;
-use agent_studios_protocol::task::{BatchTaskSpec, TaskState};
+use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy, TaskState};
 use chrono::Utc;
 
 fn create_test_actor() -> (ControlPlaneHandle, tokio::task::JoinHandle<()>) {
@@ -190,6 +190,7 @@ async fn test_actor_task_batch_and_live_event_subscription() {
             parent_task_id: None,
             dependency_keys: vec![],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
         BatchTaskSpec {
             key: "step_2".to_string(),
@@ -200,6 +201,7 @@ async fn test_actor_task_batch_and_live_event_subscription() {
             parent_task_id: None,
             dependency_keys: vec!["step_1".to_string()],
             dependency_task_ids: vec![],
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         },
     ];
 
