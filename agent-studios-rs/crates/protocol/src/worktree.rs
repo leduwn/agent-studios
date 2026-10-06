@@ -95,14 +95,81 @@ impl WorktreeState {
     }
 }
 
+/// Typed execution workspace identifying whether an agent executes directly in shared source or an isolated managed worktree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecutionWorkspace {
+    SharedSource {
+        cwd: PathBuf,
+    },
+    Managed {
+        worktree_id: WorktreeId,
+        root: PathBuf,
+        cwd: PathBuf,
+        source_root: PathBuf,
+        source_cwd: PathBuf,
+        base_sha: String,
+    },
+}
+
+impl ExecutionWorkspace {
+    pub fn cwd(&self) -> &std::path::Path {
+        match self {
+            Self::SharedSource { cwd } => cwd,
+            Self::Managed { cwd, .. } => cwd,
+        }
+    }
+
+    pub fn root(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::SharedSource { .. } => None,
+            Self::Managed { root, .. } => Some(root),
+        }
+    }
+
+    pub fn worktree_id(&self) -> Option<WorktreeId> {
+        match self {
+            Self::SharedSource { .. } => None,
+            Self::Managed { worktree_id, .. } => Some(*worktree_id),
+        }
+    }
+
+    pub fn source_root(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::SharedSource { .. } => None,
+            Self::Managed { source_root, .. } => Some(source_root),
+        }
+    }
+
+    pub fn source_cwd(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::SharedSource { .. } => None,
+            Self::Managed { source_cwd, .. } => Some(source_cwd),
+        }
+    }
+
+    pub fn base_sha(&self) -> Option<&str> {
+        match self {
+            Self::SharedSource { .. } => None,
+            Self::Managed { base_sha, .. } => Some(base_sha),
+        }
+    }
+}
+
 /// Durable record of a Git worktree managed by Agent Studios.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeRecord {
     pub id: WorktreeId,
     pub studio_id: StudioId,
     pub name: String,
-    pub repo_path: PathBuf,
-    pub worktree_path: PathBuf,
+    #[serde(alias = "repo_path")]
+    pub source_root: PathBuf,
+    #[serde(default)]
+    pub source_cwd: PathBuf,
+    #[serde(alias = "worktree_path")]
+    pub root: PathBuf,
+    #[serde(default)]
+    pub cwd: PathBuf,
     pub base_commit: String,
     #[serde(default)]
     pub branch_name: Option<String>,
@@ -130,20 +197,33 @@ pub struct WorktreeRecord {
 }
 
 impl WorktreeRecord {
+    pub fn repo_path(&self) -> &std::path::Path {
+        &self.source_root
+    }
+
+    pub fn worktree_path(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         studio_id: StudioId,
         name: impl Into<String>,
-        repo_path: impl Into<PathBuf>,
-        worktree_path: impl Into<PathBuf>,
+        source_root: impl Into<PathBuf>,
+        root: impl Into<PathBuf>,
         base_commit: impl Into<String>,
         created_at: DateTime<Utc>,
     ) -> Self {
+        let s_root = source_root.into();
+        let w_root = root.into();
         Self {
             id: WorktreeId::new(),
             studio_id,
             name: name.into(),
-            repo_path: repo_path.into(),
-            worktree_path: worktree_path.into(),
+            source_root: s_root.clone(),
+            source_cwd: s_root,
+            root: w_root.clone(),
+            cwd: w_root,
             base_commit: base_commit.into(),
             branch_name: None,
             assigned_task_id: None,
@@ -159,5 +239,58 @@ impl WorktreeRecord {
             last_captured_commit: None,
             patch_artifact_id: None,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_cwds(
+        studio_id: StudioId,
+        name: impl Into<String>,
+        source_root: impl Into<PathBuf>,
+        source_cwd: impl Into<PathBuf>,
+        root: impl Into<PathBuf>,
+        cwd: impl Into<PathBuf>,
+        base_commit: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: WorktreeId::new(),
+            studio_id,
+            name: name.into(),
+            source_root: source_root.into(),
+            source_cwd: source_cwd.into(),
+            root: root.into(),
+            cwd: cwd.into(),
+            base_commit: base_commit.into(),
+            branch_name: None,
+            assigned_task_id: None,
+            assigned_agent_id: None,
+            assigned_run_id: None,
+            bound_thread_id: None,
+            state: WorktreeState::Creating,
+            created_at,
+            updated_at: created_at,
+            released_at: None,
+            retained: false,
+            retained_reason: None,
+            last_captured_commit: None,
+            patch_artifact_id: None,
+        }
+    }
+
+    pub fn with_cwds(mut self, source_cwd: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        self.source_cwd = source_cwd.into();
+        self.cwd = cwd.into();
+        self
+    }
+
+    pub fn with_roots(
+        studio_id: StudioId,
+        name: impl Into<String>,
+        source_root: impl Into<PathBuf>,
+        root: impl Into<PathBuf>,
+        base_commit: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self::new(studio_id, name, source_root, root, base_commit, created_at)
     }
 }

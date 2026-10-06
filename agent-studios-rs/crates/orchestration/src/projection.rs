@@ -7,8 +7,9 @@ use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
 use agent_studios_protocol::id::{
     AgentId, ArtifactId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
 };
+use agent_studios_protocol::reconciliation::ReconciliationState;
 use agent_studios_protocol::run::RunState;
-use agent_studios_protocol::task::TaskState;
+use agent_studios_protocol::task::{DependencyOutputPolicy, TaskBlockReason, TaskState};
 use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 
 use crate::read_models::{
@@ -325,6 +326,86 @@ pub fn build_task_graph_snapshot(
         recs.sort();
     }
 
+    let mut task_block_reasons = HashMap::new();
+    for task in &tasks {
+        if matches!(task.state, TaskState::Blocked | TaskState::Pending) {
+            let mut pending_deps = Vec::new();
+            let mut waiting_recons = Vec::new();
+            let mut conflict_recons = Vec::new();
+            let mut failed_recons = Vec::new();
+
+            for dep_id in &task.dependencies {
+                let dep_task = state.task_graph.get_task(*dep_id);
+                match dep_task {
+                    Some(dep) if dep.state == TaskState::Succeeded => {
+                        if task.dependency_output_policy == DependencyOutputPolicy::ReconciledOutput
+                        {
+                            let mut dep_recons: Vec<_> = state
+                                .reconciliations
+                                .values()
+                                .filter(|r| r.task_id == *dep_id)
+                                .collect();
+                            dep_recons.sort_by_key(|r| r.id);
+
+                            if dep_recons.is_empty() {
+                                pending_deps.push(*dep_id);
+                            } else {
+                                for r in dep_recons {
+                                    match r.state {
+                                        ReconciliationState::Applied => {}
+                                        ReconciliationState::Conflicted => {
+                                            conflict_recons.push(r.id);
+                                        }
+                                        ReconciliationState::Failed => {
+                                            failed_recons.push(r.id);
+                                        }
+                                        _ => {
+                                            waiting_recons.push(r.id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        pending_deps.push(*dep_id);
+                    }
+                }
+            }
+
+            if !failed_recons.is_empty() {
+                task_block_reasons.insert(
+                    task.id,
+                    TaskBlockReason::ReconciliationFailed {
+                        reconciliation_ids: failed_recons,
+                    },
+                );
+            } else if !conflict_recons.is_empty() {
+                task_block_reasons.insert(
+                    task.id,
+                    TaskBlockReason::ReconciliationConflict {
+                        reconciliation_ids: conflict_recons,
+                    },
+                );
+            } else if !waiting_recons.is_empty() {
+                task_block_reasons.insert(
+                    task.id,
+                    TaskBlockReason::WaitingForReconciliation {
+                        reconciliation_ids: waiting_recons,
+                    },
+                );
+            } else if !pending_deps.is_empty() {
+                pending_deps.sort();
+                task_block_reasons.insert(
+                    task.id,
+                    TaskBlockReason::WaitingForDependencies {
+                        task_ids: pending_deps,
+                    },
+                );
+            }
+        }
+    }
+
     TaskGraphSnapshot {
         studio_id,
         tasks,
@@ -339,6 +420,7 @@ pub fn build_task_graph_snapshot(
         task_worktrees,
         task_artifacts,
         task_reconciliations,
+        task_block_reasons,
     }
 }
 

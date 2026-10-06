@@ -37,6 +37,39 @@ pub fn reconcile_patch(
         )));
     }
 
+    // Preflight cleanliness check: git status --porcelain
+    let status_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["status", "--porcelain"])
+        .output()?;
+    if !status_out.status.success() {
+        return Err(WorkspaceError::GitError(format!(
+            "git status failed in target worktree: {}",
+            String::from_utf8_lossy(&status_out.stderr)
+        )));
+    }
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    if !status_str.trim().is_empty() {
+        return Err(WorkspaceError::IntegrationWorkspaceDirty(format!(
+            "target worktree {} has uncommitted changes:\n{}",
+            target_worktree.display(),
+            status_str.trim()
+        )));
+    }
+
+    // Snapshot pre-HEAD commit
+    let rev_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !rev_out.status.success() {
+        return Err(WorkspaceError::GitError(format!(
+            "git rev-parse HEAD failed in target worktree: {}",
+            String::from_utf8_lossy(&rev_out.stderr)
+        )));
+    }
+    let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
     // Empty patch has nothing to apply.
     if patch_data.is_empty() {
         return Ok(ReconciliationOutcome::Applied { merge_commit: None });
@@ -65,6 +98,31 @@ pub fn reconcile_patch(
         });
     }
 
+    // Helper closure to rollback on failure
+    let rollback = || -> Result<(), WorkspaceError> {
+        let reset_out = Command::new("git")
+            .current_dir(target_worktree)
+            .args(["reset", "--hard", &pre_head])
+            .output()?;
+        if !reset_out.status.success() {
+            return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
+                "git reset --hard failed: {}",
+                String::from_utf8_lossy(&reset_out.stderr)
+            )));
+        }
+        let clean_out = Command::new("git")
+            .current_dir(target_worktree)
+            .args(["clean", "-fd"])
+            .output()?;
+        if !clean_out.status.success() {
+            return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
+                "git clean -fd failed: {}",
+                String::from_utf8_lossy(&clean_out.stderr)
+            )));
+        }
+        Ok(())
+    };
+
     // 2. Real application: git apply --binary -
     let mut apply_child = Command::new("git")
         .current_dir(target_worktree)
@@ -80,6 +138,7 @@ pub fn reconcile_patch(
 
     let apply_output = apply_child.wait_with_output()?;
     if !apply_output.status.success() {
+        rollback()?;
         return Ok(ReconciliationOutcome::Failed {
             error: format!(
                 "git apply failed after check succeeded: {}",
@@ -95,6 +154,7 @@ pub fn reconcile_patch(
             .args(["add", "-A", "--", "."])
             .output()?;
         if !add_out.status.success() {
+            rollback()?;
             return Ok(ReconciliationOutcome::Failed {
                 error: format!(
                     "git add failed during reconciliation commit: {}",
@@ -108,6 +168,7 @@ pub fn reconcile_patch(
             .args(["commit", "-m", msg])
             .output()?;
         if !commit_out.status.success() {
+            rollback()?;
             return Ok(ReconciliationOutcome::Failed {
                 error: format!(
                     "git commit failed during reconciliation: {}",

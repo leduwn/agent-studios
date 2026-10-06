@@ -9,7 +9,7 @@ pub const fn default_artifact_version() -> u32 {
 }
 
 /// Category of an artifact generated during task execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     File,
@@ -18,6 +18,31 @@ pub enum ArtifactKind {
     Report,
     Plan,
     Other,
+}
+
+/// Lineage key identifying an artifact version family within a Studio.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct ArtifactFamilyKey {
+    pub studio_id: StudioId,
+    pub task_id: TaskId,
+    pub kind: ArtifactKind,
+    pub logical_name: String,
+}
+
+impl ArtifactFamilyKey {
+    pub fn new(
+        studio_id: StudioId,
+        task_id: TaskId,
+        kind: ArtifactKind,
+        logical_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            studio_id,
+            task_id,
+            kind,
+            logical_name: logical_name.into(),
+        }
+    }
 }
 
 /// Metadata record for an artifact managed by Agent Studios.
@@ -49,6 +74,15 @@ pub struct ArtifactRecord {
 }
 
 impl ArtifactRecord {
+    pub fn family_key(&self) -> ArtifactFamilyKey {
+        ArtifactFamilyKey {
+            studio_id: self.studio_id,
+            task_id: self.task_id,
+            kind: self.kind,
+            logical_name: self.logical_name.clone(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         studio_id: StudioId,

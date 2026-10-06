@@ -88,6 +88,9 @@ pub struct TaskGraphSnapshot {
     /// Reconciliations associated with each task (M09).
     #[serde(default)]
     pub task_reconciliations: HashMap<TaskId, Vec<ReconciliationId>>,
+    /// Structured block reason for each blocked or pending task (M09.1).
+    #[serde(default)]
+    pub task_block_reasons: HashMap<TaskId, agent_studios_protocol::task::TaskBlockReason>,
 }
 
 /// Observable summary of an execution run.
@@ -152,6 +155,65 @@ impl ArtifactIndex {
 
     pub fn artifacts_of_kind(&self, kind: ArtifactKind) -> Vec<&ArtifactRecord> {
         self.artifacts.iter().filter(|a| a.kind == kind).collect()
+    }
+
+    /// Finds the highest version artifact in an artifact family.
+    pub fn latest_by_family(
+        &self,
+        studio_id: StudioId,
+        task_id: TaskId,
+        kind: ArtifactKind,
+        logical_name: &str,
+    ) -> Option<&ArtifactRecord> {
+        self.artifacts
+            .iter()
+            .filter(|a| {
+                a.studio_id == studio_id
+                    && a.task_id == task_id
+                    && a.kind == kind
+                    && a.logical_name == logical_name
+            })
+            .max_by_key(|a| a.version)
+    }
+
+    /// Returns all versions in an artifact family, sorted ascending by version.
+    pub fn versions_for_family(
+        &self,
+        studio_id: StudioId,
+        task_id: TaskId,
+        kind: ArtifactKind,
+        logical_name: &str,
+    ) -> Vec<&ArtifactRecord> {
+        let mut list: Vec<&ArtifactRecord> = self
+            .artifacts
+            .iter()
+            .filter(|a| {
+                a.studio_id == studio_id
+                    && a.task_id == task_id
+                    && a.kind == kind
+                    && a.logical_name == logical_name
+            })
+            .collect();
+        list.sort_by_key(|a| a.version);
+        list
+    }
+
+    /// Traces the full lineage of an artifact, walking backwards from the given artifact
+    /// through its `supersedes` references.
+    pub fn lineage_of(&self, artifact_id: &ArtifactId) -> Vec<&ArtifactRecord> {
+        let mut lineage = Vec::new();
+        let mut current_id = Some(*artifact_id);
+
+        while let Some(id) = current_id {
+            if let Some(artifact) = self.get_artifact(&id) {
+                lineage.push(artifact);
+                current_id = artifact.supersedes;
+            } else {
+                break;
+            }
+        }
+
+        lineage
     }
 }
 

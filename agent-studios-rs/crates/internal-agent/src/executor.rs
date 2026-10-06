@@ -444,6 +444,7 @@ impl AgentExecutor for CodexAgentExecutor {
         Ok(())
     }
 
+    #[allow(clippy::collapsible_if)]
     async fn execute_agent(
         &self,
         context: AgentExecutionContext,
@@ -585,6 +586,15 @@ impl AgentExecutor for CodexAgentExecutor {
                     new_ws = ?context.workspace_path,
                     "Retiring worker due to workspace change (non-teleporting invariant)"
                 );
+                let _ = state.thread.submit(Op::Shutdown).await;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                while tokio::time::Instant::now() < deadline {
+                    let status = state.thread.agent_status().await;
+                    if !matches!(status, codex_protocol::protocol::AgentStatus::Running) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
                 let mut guard = self.running_agents.write().await;
                 guard.remove(&context.agent_spec.agent_id);
             }
@@ -679,18 +689,58 @@ impl AgentExecutor for CodexAgentExecutor {
             let agent_control = thread.agent_control();
             let active_turn = Arc::new(AtomicBool::new(true));
 
-            if let (Some(orchestrator), Some(ws)) =
-                (&self.workspace_orchestrator, &context.workspace_path)
-            {
-                let _ = orchestrator
+            if let (Some(orchestrator), Some(ws), Some(wt_id)) = (
+                &self.workspace_orchestrator,
+                &context.workspace_path,
+                context.worktree_id,
+            ) {
+                if let Err(e) = orchestrator
                     .bind_thread_async(ws.clone(), thread_id.to_string())
-                    .await;
+                    .await
+                {
+                    let _ = thread.submit(Op::Shutdown).await;
+                    tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    let _ = self
+                        .control_plane
+                        .record_worktree_retained(
+                            wt_id,
+                            Some(format!("Failed upstream thread binding: {e}")),
+                        )
+                        .await;
+                    return Err(InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: format!("Failed to bind thread to workspace: {e}"),
+                    });
+                }
             }
             if let Some(wt_id) = context.worktree_id {
-                let _ = self
+                if let Err(e) = self
                     .control_plane
                     .bind_worktree_thread(wt_id, thread_id.to_string())
-                    .await;
+                    .await
+                {
+                    let _ = thread.submit(Op::Shutdown).await;
+                    tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    let _ = self
+                        .control_plane
+                        .record_worktree_retained(
+                            wt_id,
+                            Some(format!("Failed durable thread binding: {e}")),
+                        )
+                        .await;
+                    return Err(InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: format!("Failed to record durable thread binding: {e}"),
+                    });
+                }
             }
 
             let state = RunningAgentState {
@@ -955,18 +1005,60 @@ impl AgentExecutor for CodexAgentExecutor {
         let child_control = child_thread.agent_control();
         let active_turn = Arc::new(AtomicBool::new(true));
 
-        if let (Some(orchestrator), Some(ws)) =
-            (&self.workspace_orchestrator, &context.workspace_path)
-        {
-            let _ = orchestrator
+        if let (Some(orchestrator), Some(ws), Some(wt_id)) = (
+            &self.workspace_orchestrator,
+            &context.workspace_path,
+            context.worktree_id,
+        ) {
+            if let Err(e) = orchestrator
                 .bind_thread_async(ws.clone(), live_agent.thread_id.to_string())
-                .await;
+                .await
+            {
+                let _ = child_thread.submit(Op::Shutdown).await;
+                parent_state.budget_tracker.rollback_child_agent();
+                child_tracker.rollback_turn();
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                let _ = self
+                    .control_plane
+                    .record_worktree_retained(
+                        wt_id,
+                        Some(format!("Failed upstream thread binding: {e}")),
+                    )
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
+                    agent_id: context.agent_spec.agent_id,
+                    error: format!("Failed to bind child thread to workspace: {e}"),
+                });
+            }
         }
         if let Some(wt_id) = context.worktree_id {
-            let _ = self
+            if let Err(e) = self
                 .control_plane
                 .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
-                .await;
+                .await
+            {
+                let _ = child_thread.submit(Op::Shutdown).await;
+                parent_state.budget_tracker.rollback_child_agent();
+                child_tracker.rollback_turn();
+                let _ = self
+                    .control_plane
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                    .await;
+                let _ = self
+                    .control_plane
+                    .record_worktree_retained(
+                        wt_id,
+                        Some(format!("Failed durable thread binding: {e}")),
+                    )
+                    .await;
+                return Err(InternalAgentError::ExecutionFailed {
+                    agent_id: context.agent_spec.agent_id,
+                    error: format!("Failed to record durable thread binding: {e}"),
+                });
+            }
         }
 
         let state = RunningAgentState {

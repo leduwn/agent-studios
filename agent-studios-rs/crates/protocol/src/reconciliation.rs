@@ -65,12 +65,40 @@ impl ReconciliationState {
     }
 }
 
+/// Managed integration workspace metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationWorkspace {
+    pub worktree_id: WorktreeId,
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub base_sha: String,
+}
+
+impl IntegrationWorkspace {
+    pub fn new(
+        worktree_id: WorktreeId,
+        root: impl Into<PathBuf>,
+        cwd: impl Into<PathBuf>,
+        base_sha: impl Into<String>,
+    ) -> Self {
+        Self {
+            worktree_id,
+            root: root.into(),
+            cwd: cwd.into(),
+            base_sha: base_sha.into(),
+        }
+    }
+}
+
 /// Durable record of a patch reconciliation operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationRecord {
     pub id: ReconciliationId,
     pub studio_id: StudioId,
-    pub worktree_id: WorktreeId,
+    #[serde(alias = "worktree_id")]
+    pub source_worktree_id: WorktreeId,
+    #[serde(default = "WorktreeId::new")]
+    pub target_worktree_id: WorktreeId,
     pub task_id: TaskId,
     #[serde(default)]
     pub run_id: Option<RunId>,
@@ -91,10 +119,14 @@ pub struct ReconciliationRecord {
 }
 
 impl ReconciliationRecord {
+    pub fn worktree_id(&self) -> WorktreeId {
+        self.source_worktree_id
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         studio_id: StudioId,
-        worktree_id: WorktreeId,
+        source_worktree_id: WorktreeId,
         task_id: TaskId,
         run_id: Option<RunId>,
         patch_artifact_id: ArtifactId,
@@ -105,7 +137,40 @@ impl ReconciliationRecord {
         Self {
             id: ReconciliationId::new(),
             studio_id,
-            worktree_id,
+            source_worktree_id,
+            target_worktree_id: source_worktree_id,
+            task_id,
+            run_id,
+            patch_artifact_id,
+            target_worktree_path: target_worktree_path.into(),
+            base_commit: base_commit.into(),
+            state: ReconciliationState::Pending,
+            conflicted_files: Vec::new(),
+            merge_commit: None,
+            error_message: None,
+            created_at,
+            updated_at: created_at,
+            completed_at: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_target(
+        studio_id: StudioId,
+        source_worktree_id: WorktreeId,
+        target_worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: impl Into<PathBuf>,
+        base_commit: impl Into<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: ReconciliationId::new(),
+            studio_id,
+            source_worktree_id,
+            target_worktree_id,
             task_id,
             run_id,
             patch_artifact_id,

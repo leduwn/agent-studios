@@ -78,6 +78,40 @@ impl TaskState {
     }
 }
 
+/// Policy governing whether a dependent task requires predecessor reconciliations to be applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyOutputPolicy {
+    #[default]
+    TaskSuccess,
+    ReconciledOutput,
+}
+
+/// Structured reason why a task is blocked from execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TaskBlockReason {
+    WaitingForDependencies {
+        task_ids: Vec<TaskId>,
+    },
+    WaitingForWorkspace,
+    WaitingForReconciliation {
+        reconciliation_ids: Vec<crate::id::ReconciliationId>,
+    },
+    ReconciliationConflict {
+        reconciliation_ids: Vec<crate::id::ReconciliationId>,
+    },
+    ReconciliationFailed {
+        reconciliation_ids: Vec<crate::id::ReconciliationId>,
+    },
+    RetryBackoff {
+        next_retry_at: DateTime<Utc>,
+    },
+    ApprovalPending {
+        approval_ids: Vec<String>,
+    },
+}
+
 /// Durable record of a Task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -93,6 +127,8 @@ pub struct TaskRecord {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub retry_count: u32,
+    #[serde(default)]
+    pub dependency_output_policy: DependencyOutputPolicy,
 }
 
 impl TaskRecord {
@@ -124,7 +160,13 @@ impl TaskRecord {
             created_at,
             updated_at: created_at,
             retry_count: 0,
+            dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
         }
+    }
+
+    pub fn with_dependency_output_policy(mut self, policy: DependencyOutputPolicy) -> Self {
+        self.dependency_output_policy = policy;
+        self
     }
 }
 

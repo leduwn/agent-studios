@@ -6,9 +6,11 @@ use tempfile::tempdir;
 
 use agent_studios_protocol::artifact::ArtifactKind;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::worktree::WorktreeRecord;
 use agent_studios_workspace::{
     ArtifactOptions, ArtifactStore, ReconciliationOutcome, WorkspaceOrchestrator,
 };
+use chrono::Utc;
 
 fn init_test_git_repo(repo_dir: &Path) -> String {
     // Configure local git repo in temp directory
@@ -279,4 +281,91 @@ fn test_worktree_lifecycle_capture_and_reconciliation_full() {
         .release_worktree(&repo_dir, &integration_wt.root, false, None)
         .expect("release remove");
     assert!(!integration_wt.root.exists());
+}
+
+#[test]
+fn test_generate_recovery_report() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let studio_id = StudioId::new();
+    let now = Utc::now();
+
+    // 1. Physical worktree 1: matched
+    let wt1 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt1");
+    let thread1 = "thread_matched_123";
+    orchestrator
+        .bind_thread(&wt1.root, thread1)
+        .expect("bind thread1");
+    let mut rec1 = WorktreeRecord::new(studio_id, "wt-1", &repo_dir, &wt1.root, &base_commit, now);
+    rec1.bound_thread_id = Some(thread1.to_string());
+
+    // 2. Physical worktree 2: ownership mismatch
+    let wt2 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt2");
+    let thread2_actual = "thread_actual_456";
+    orchestrator
+        .bind_thread(&wt2.root, thread2_actual)
+        .expect("bind thread2");
+    let mut rec2 = WorktreeRecord::new(studio_id, "wt-2", &repo_dir, &wt2.root, &base_commit, now);
+    rec2.bound_thread_id = Some("thread_expected_other".to_string());
+
+    // 3. Physical worktree 3: foreign (no durable record passed)
+    let wt3 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt3");
+
+    // 4. Durable record 4: missing physical worktree
+    let missing_path = managed_root.join("wt_missing_never_created");
+    let rec4 = WorktreeRecord::new(
+        studio_id,
+        "wt-4-missing",
+        &repo_dir,
+        &missing_path,
+        &base_commit,
+        now,
+    );
+
+    // Run recovery report
+    let report = orchestrator
+        .generate_recovery_report(&repo_dir, &[rec1.clone(), rec2.clone(), rec4.clone()])
+        .expect("generate recovery report");
+
+    // Assertions
+    assert_eq!(report.matched.len(), 1);
+    assert_eq!(report.matched[0].id, rec1.id);
+
+    assert_eq!(report.ownership_mismatches.len(), 1);
+    assert_eq!(report.ownership_mismatches[0].worktree_id, rec2.id);
+    assert_eq!(
+        report.ownership_mismatches[0].expected_thread_id,
+        Some("thread_expected_other".to_string())
+    );
+    assert_eq!(
+        report.ownership_mismatches[0].actual_thread_id,
+        Some(thread2_actual.to_string())
+    );
+
+    assert_eq!(report.missing.len(), 1);
+    assert_eq!(report.missing[0].id, rec4.id);
+
+    // Foreign list must contain wt3.root
+    let canon_wt3 = dunce::canonicalize(&wt3.root).unwrap_or(wt3.root.clone());
+    assert!(
+        report
+            .foreign
+            .iter()
+            .any(|f| dunce::canonicalize(f).unwrap_or(f.clone()) == canon_wt3),
+        "wt3 must be reported as foreign"
+    );
 }

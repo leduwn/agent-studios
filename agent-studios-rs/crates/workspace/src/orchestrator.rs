@@ -5,6 +5,7 @@ use codex_worktree::{CreateWorktree, ManagedWorktree, WorktreeManager, WorktreeS
 
 use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::worktree::WorktreeRecord;
 
 use crate::artifact_store::{ArtifactOptions, ArtifactStore};
 use crate::capture::{self, CapturedChanges};
@@ -274,4 +275,87 @@ impl WorkspaceOrchestrator {
         .await
         .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
     }
+
+    /// Generates a non-destructive recovery diagnostic report comparing physical worktrees with durable records.
+    pub fn generate_recovery_report(
+        &self,
+        source_cwd: &Path,
+        durable_worktrees: &[WorktreeRecord],
+    ) -> Result<WorkspaceRecoveryReport, WorkspaceError> {
+        let physical_checkouts = self
+            .worktree_manager
+            .list(source_cwd)
+            .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?;
+
+        let mut report = WorkspaceRecoveryReport::default();
+        let mut physical_matched = std::collections::HashSet::new();
+
+        for record in durable_worktrees {
+            let canon_root = match dunce::canonicalize(&record.root) {
+                Ok(p) => p,
+                Err(_) => {
+                    report.missing.push(record.clone());
+                    continue;
+                }
+            };
+
+            let physical = physical_checkouts.iter().find(|c| {
+                dunce::canonicalize(&c.root)
+                    .map(|p| p == canon_root)
+                    .unwrap_or(false)
+            });
+
+            match physical {
+                Some(checkout) => {
+                    physical_matched.insert(checkout.root.clone());
+                    let physical_owner =
+                        self.worktree_manager.owner(&checkout.root).unwrap_or(None);
+                    if record.bound_thread_id != physical_owner {
+                        report.ownership_mismatches.push(OwnershipMismatch {
+                            worktree_id: record.id,
+                            path: record.root.clone(),
+                            expected_thread_id: record.bound_thread_id.clone(),
+                            actual_thread_id: physical_owner.clone(),
+                            reason: format!(
+                                "Bound thread mismatch: durable record expected {:?}, physical checkout has {:?}",
+                                record.bound_thread_id, physical_owner
+                            ),
+                        });
+                    } else {
+                        report.matched.push(record.clone());
+                    }
+                }
+                None => {
+                    report.missing.push(record.clone());
+                }
+            }
+        }
+
+        for checkout in physical_checkouts {
+            if !physical_matched.contains(&checkout.root) {
+                report.foreign.push(checkout.root);
+            }
+        }
+
+        Ok(report)
+    }
+}
+
+/// Structured diagnostic report of workspace health comparing durable records with physical checkouts.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct WorkspaceRecoveryReport {
+    pub matched: Vec<WorktreeRecord>,
+    pub missing: Vec<WorktreeRecord>,
+    pub foreign: Vec<PathBuf>,
+    pub ownership_mismatches: Vec<OwnershipMismatch>,
+}
+
+/// Diagnostic detail for a thread/worktree ownership discrepancy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnershipMismatch {
+    pub worktree_id: WorktreeId,
+    pub path: PathBuf,
+    pub expected_thread_id: Option<String>,
+    pub actual_thread_id: Option<String>,
+    pub reason: String,
 }

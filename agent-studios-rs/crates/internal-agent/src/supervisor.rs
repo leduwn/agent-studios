@@ -6,6 +6,7 @@ use std::time::Duration;
 use agent_studios_protocol::agent::AgentKind;
 use agent_studios_protocol::cancellation::CancellationScope;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::reconciliation::ReconciliationState;
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
 use agent_studios_workspace::{ReconciliationOutcome, WorkspaceOrchestrator};
@@ -570,9 +571,8 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                             .await;
                                         let _ = self
                                             .control_plane
-                                            .release_worktree(
+                                            .record_worktree_retained(
                                                 wt_ctx.worktree_id,
-                                                true,
                                                 Some(reason),
                                             )
                                             .await;
@@ -642,6 +642,13 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                                             .await
                                                                         {
                                                                             Ok(recon) => {
+                                                                                let _ = self
+                                                                                    .control_plane
+                                                                                    .transition_reconciliation_state(
+                                                                                        recon.id,
+                                                                                        ReconciliationState::Applying,
+                                                                                    )
+                                                                                    .await;
                                                                                 let commit_msg = format!(
                                                                                     "Reconcile task {}",
                                                                                     completion.task_id
@@ -714,6 +721,15 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                                     );
                                                                 }
                                                             }
+                                                        } else {
+                                                            let _ = self
+                                                                .control_plane
+                                                                .record_worktree_no_changes(
+                                                                    wt_ctx.worktree_id,
+                                                                    Some(completion.run_id),
+                                                                    base_commit.clone(),
+                                                                )
+                                                                .await;
                                                         }
 
                                                         let _ = orchestrator
@@ -748,9 +764,8 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                             .await;
                                                         let _ = self
                                                             .control_plane
-                                                            .release_worktree(
+                                                            .record_worktree_retained(
                                                                 wt_ctx.worktree_id,
-                                                                true,
                                                                 Some(reason),
                                                             )
                                                             .await;
@@ -784,9 +799,8 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                     .await;
                                                 let _ = self
                                                     .control_plane
-                                                    .release_worktree(
+                                                    .record_worktree_retained(
                                                         wt_ctx.worktree_id,
-                                                        true,
                                                         Some(reason),
                                                     )
                                                     .await;

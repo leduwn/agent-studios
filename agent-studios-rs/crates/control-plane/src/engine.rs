@@ -14,7 +14,7 @@ use agent_studios_protocol::id::{
 use agent_studios_protocol::reconciliation::{ReconciliationRecord, ReconciliationState};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy, TaskRecord, TaskState};
 use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 use chrono::{DateTime, Utc};
 
@@ -506,6 +506,82 @@ impl ControlPlaneState {
                     return Err(ReplayError::StudioNotFound {
                         studio_id: artifact.studio_id,
                     });
+                }
+
+                if artifact.version < 1 {
+                    return Err(ReplayError::DomainViolation(
+                        "Artifact version must be at least 1".to_string(),
+                    ));
+                }
+
+                if let Some(supersedes_id) = artifact.supersedes {
+                    let superseded = self.artifacts.get(&supersedes_id).ok_or_else(|| {
+                        ReplayError::DomainViolation(format!(
+                            "Superseded artifact {supersedes_id} not found"
+                        ))
+                    })?;
+                    if superseded.studio_id != artifact.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: artifact.studio_id,
+                            actual: superseded.studio_id,
+                        });
+                    }
+                    if superseded.task_id != artifact.task_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Superseded artifact task {} does not match {}",
+                            superseded.task_id, artifact.task_id
+                        )));
+                    }
+                    if superseded.kind != artifact.kind {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Superseded artifact kind {:?} does not match {:?}",
+                            superseded.kind, artifact.kind
+                        )));
+                    }
+                    if superseded.logical_name != artifact.logical_name {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Superseded artifact logical name '{}' does not match '{}'",
+                            superseded.logical_name, artifact.logical_name
+                        )));
+                    }
+                    if superseded.version >= artifact.version {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Superseded artifact version {} must be strictly smaller than {}",
+                            superseded.version, artifact.version
+                        )));
+                    }
+                }
+
+                if let Some(run_id) = artifact.run_id {
+                    let run = self
+                        .runs
+                        .get(&run_id)
+                        .ok_or(ReplayError::RunNotFound { run_id })?;
+                    if run.task_id != artifact.task_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Artifact run {} task {} does not match artifact task {}",
+                            run_id, run.task_id, artifact.task_id
+                        )));
+                    }
+                    if run.agent_id != artifact.producer_agent_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Artifact run {} agent {} does not match artifact producer {}",
+                            run_id, run.agent_id, artifact.producer_agent_id
+                        )));
+                    }
+                }
+
+                if let Some(worktree_id) = artifact.worktree_id {
+                    let wt = self
+                        .worktrees
+                        .get(&worktree_id)
+                        .ok_or(ReplayError::WorktreeNotFound { worktree_id })?;
+                    if wt.studio_id != artifact.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: artifact.studio_id,
+                            actual: wt.studio_id,
+                        });
+                    }
                 }
 
                 let task = self.task_graph.get_task(artifact.task_id).ok_or(
@@ -1088,6 +1164,33 @@ impl ControlPlaneState {
                 worktree.updated_at = now;
             }
 
+            ControlPlaneEvent::WorktreeNoChangesCaptured {
+                worktree_id,
+                run_id,
+                base_commit,
+            } => {
+                let worktree =
+                    self.worktrees
+                        .get_mut(worktree_id)
+                        .ok_or(ReplayError::WorktreeNotFound {
+                            worktree_id: *worktree_id,
+                        })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if let Some(rid) = run_id.filter(|id| !self.runs.contains_key(id)) {
+                    return Err(ReplayError::RunNotFound { run_id: rid });
+                }
+
+                worktree.last_captured_commit = Some(base_commit.clone());
+                worktree.updated_at = now;
+            }
+
             ControlPlaneEvent::ReconciliationCreated { reconciliation } => {
                 if envelope.studio_id != reconciliation.studio_id {
                     return Err(ReplayError::StudioMismatch {
@@ -1106,15 +1209,26 @@ impl ControlPlaneState {
                     });
                 }
 
-                let worktree = self.worktrees.get(&reconciliation.worktree_id).ok_or(
-                    ReplayError::WorktreeNotFound {
-                        worktree_id: reconciliation.worktree_id,
-                    },
-                )?;
-                if worktree.studio_id != reconciliation.studio_id {
+                let source_worktree = self
+                    .worktrees
+                    .get(&reconciliation.source_worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: reconciliation.source_worktree_id,
+                    })?;
+                if source_worktree.studio_id != reconciliation.studio_id {
                     return Err(ReplayError::StudioMismatch {
                         expected: reconciliation.studio_id,
-                        actual: worktree.studio_id,
+                        actual: source_worktree.studio_id,
+                    });
+                }
+
+                if let Some(target_worktree) =
+                    self.worktrees.get(&reconciliation.target_worktree_id)
+                    && target_worktree.studio_id != reconciliation.studio_id
+                {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: reconciliation.studio_id,
+                        actual: target_worktree.studio_id,
                     });
                 }
 
@@ -1217,7 +1331,11 @@ impl ControlPlaneState {
 
                 rec.conflicted_files = conflicted_files.clone();
                 rec.error_message = Some(reason.clone());
+                rec.state = ReconciliationState::Conflicted;
                 rec.updated_at = now;
+                if rec.completed_at.is_none() {
+                    rec.completed_at = Some(now);
+                }
             }
 
             ControlPlaneEvent::ReconciliationApplied {
@@ -1238,7 +1356,36 @@ impl ControlPlaneState {
                 }
 
                 rec.merge_commit = merge_commit.clone();
+                rec.state = ReconciliationState::Applied;
                 rec.updated_at = now;
+                if rec.completed_at.is_none() {
+                    rec.completed_at = Some(now);
+                }
+            }
+
+            ControlPlaneEvent::ReconciliationFailed {
+                reconciliation_id,
+                error,
+            } => {
+                let rec = self.reconciliations.get_mut(reconciliation_id).ok_or(
+                    ReplayError::ReconciliationNotFound {
+                        reconciliation_id: *reconciliation_id,
+                    },
+                )?;
+
+                if envelope.studio_id != rec.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: rec.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                rec.error_message = Some(error.clone());
+                rec.state = ReconciliationState::Failed;
+                rec.updated_at = now;
+                if rec.completed_at.is_none() {
+                    rec.completed_at = Some(now);
+                }
             }
         }
 
@@ -1577,6 +1724,29 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Ok(task)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_task_with_policy(
+        &mut self,
+        studio_id: StudioId,
+        title: impl Into<String>,
+        description: impl Into<String>,
+        parent_task_id: Option<TaskId>,
+        assigned_agent_id: Option<AgentId>,
+        dependencies: Vec<TaskId>,
+        dependency_output_policy: agent_studios_protocol::task::DependencyOutputPolicy,
+    ) -> Result<TaskRecord, ControlPlaneError> {
+        let mut task = self.create_task(
+            studio_id,
+            title,
+            description,
+            parent_task_id,
+            assigned_agent_id,
+            dependencies,
+        )?;
+        task.dependency_output_policy = dependency_output_policy;
+        Ok(task)
+    }
+
     pub fn create_task_batch(
         &mut self,
         studio_id: StudioId,
@@ -1730,6 +1900,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                 created_at: now,
                 updated_at: now,
                 retry_count: 0,
+                dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
             };
 
             candidate_events.push(ControlPlaneEvent::TaskCreated { task: task.clone() });
@@ -2166,34 +2337,6 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         content_hash: Option<String>,
         location: impl Into<String>,
     ) -> Result<ArtifactRecord, ControlPlaneError> {
-        if !self.state.studios.contains_key(&studio_id) {
-            return Err(ControlPlaneError::StudioNotFound(studio_id));
-        }
-
-        let task = self
-            .state
-            .task_graph
-            .get_task(task_id)
-            .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
-        if task.studio_id != studio_id {
-            return Err(ControlPlaneError::StudioMismatch {
-                expected: studio_id,
-                actual: task.studio_id,
-            });
-        }
-
-        let agent = self
-            .state
-            .agents
-            .get(&producer_agent_id)
-            .ok_or(ControlPlaneError::AgentNotFound(producer_agent_id))?;
-        if agent.studio_id != studio_id {
-            return Err(ControlPlaneError::StudioMismatch {
-                expected: studio_id,
-                actual: agent.studio_id,
-            });
-        }
-
         let now = self.clock.now();
         let artifact = ArtifactRecord::new(
             studio_id,
@@ -2205,13 +2348,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             location,
             now,
         );
-
-        let event = ControlPlaneEvent::ArtifactRegistered {
-            artifact: artifact.clone(),
-        };
-
-        self.commit_transaction(studio_id, vec![event])?;
-        Ok(artifact)
+        self.register_artifact_record(artifact)
     }
 
     pub fn get_artifact(&self, id: ArtifactId) -> Option<&ArtifactRecord> {
@@ -2224,7 +2361,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
     pub fn register_artifact_record(
         &mut self,
-        artifact: ArtifactRecord,
+        mut artifact: ArtifactRecord,
     ) -> Result<ArtifactRecord, ControlPlaneError> {
         let studio_id = artifact.studio_id;
         if !self.state.studios.contains_key(&studio_id) {
@@ -2267,6 +2404,29 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                     actual: wt.studio_id,
                 });
             }
+        }
+
+        // Lineage version allocation (M09 Part X)
+        let existing_family_latest = self
+            .state
+            .artifacts
+            .values()
+            .filter(|a| {
+                a.studio_id == artifact.studio_id
+                    && a.task_id == artifact.task_id
+                    && a.kind == artifact.kind
+                    && a.logical_name == artifact.logical_name
+            })
+            .max_by_key(|a| a.version);
+
+        if let Some(latest) = existing_family_latest {
+            let caller_specified_lineage = artifact.version > 1 && artifact.supersedes.is_some();
+            if !caller_specified_lineage {
+                artifact.version = latest.version + 1;
+                artifact.supersedes = Some(latest.id);
+            }
+        } else if artifact.version == 0 {
+            artifact.version = 1;
         }
 
         let event = ControlPlaneEvent::ArtifactRegistered {
@@ -2385,11 +2545,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
         let studio_id = worktree.studio_id;
 
-        if let Some(existing) = worktree
-            .bound_thread_id
-            .as_ref()
-            .filter(|&e| e != &thread_id)
-        {
+        if let Some(existing) = &worktree.bound_thread_id {
+            if existing == &thread_id {
+                return Ok(());
+            }
             return Err(ControlPlaneError::WorktreeOwnershipConflict {
                 worktree_id,
                 reason: format!(
@@ -2401,6 +2560,62 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let event = ControlPlaneEvent::WorktreeThreadBound {
             worktree_id,
             thread_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_worktree_retained(
+        &mut self,
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+        let mut candidate_events = Vec::new();
+
+        if worktree.state != WorktreeState::Retained {
+            worktree
+                .state
+                .validate_transition_to(WorktreeState::Retained)?;
+            candidate_events.push(ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                previous_state: worktree.state,
+                new_state: WorktreeState::Retained,
+            });
+        }
+
+        candidate_events.push(ControlPlaneEvent::WorktreeReleased {
+            worktree_id,
+            retained: true,
+            reason,
+        });
+
+        self.commit_transaction(studio_id, candidate_events)?;
+        Ok(())
+    }
+
+    pub fn record_worktree_no_changes(
+        &mut self,
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: impl Into<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        let event = ControlPlaneEvent::WorktreeNoChangesCaptured {
+            worktree_id,
+            run_id,
+            base_commit: base_commit.into(),
         };
         self.commit_transaction(studio_id, vec![event])?;
         Ok(())
@@ -2418,6 +2633,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
         let studio_id = worktree.studio_id;
         let previous_state = worktree.state;
+
+        if previous_state == new_state {
+            return Ok(());
+        }
 
         previous_state.validate_transition_to(new_state)?;
 
@@ -2528,6 +2747,30 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         target_worktree_path: impl Into<std::path::PathBuf>,
         base_commit: impl Into<String>,
     ) -> Result<ReconciliationRecord, ControlPlaneError> {
+        self.create_reconciliation_with_target(
+            studio_id,
+            worktree_id,
+            worktree_id,
+            task_id,
+            run_id,
+            patch_artifact_id,
+            target_worktree_path,
+            base_commit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_reconciliation_with_target(
+        &mut self,
+        studio_id: StudioId,
+        source_worktree_id: WorktreeId,
+        target_worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<ReconciliationRecord, ControlPlaneError> {
         if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
@@ -2535,12 +2778,21 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         let worktree = self
             .state
             .worktrees
-            .get(&worktree_id)
-            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+            .get(&source_worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(source_worktree_id))?;
         if worktree.studio_id != studio_id {
             return Err(ControlPlaneError::StudioMismatch {
                 expected: studio_id,
                 actual: worktree.studio_id,
+            });
+        }
+
+        if let Some(target_wt) = self.state.worktrees.get(&target_worktree_id)
+            && target_wt.studio_id != studio_id
+        {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: target_wt.studio_id,
             });
         }
 
@@ -2574,9 +2826,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         }
 
         let now = self.clock.now();
-        let reconciliation = ReconciliationRecord::new(
+        let reconciliation = ReconciliationRecord::new_with_target(
             studio_id,
-            worktree_id,
+            source_worktree_id,
+            target_worktree_id,
             task_id,
             run_id,
             patch_artifact_id,
@@ -2592,6 +2845,20 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Ok(reconciliation)
     }
 
+    pub fn start_reconciliation(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+    ) -> Result<(), ControlPlaneError> {
+        self.transition_reconciliation_state(reconciliation_id, ReconciliationState::Checking)
+    }
+
+    pub fn mark_reconciliation_applying(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+    ) -> Result<(), ControlPlaneError> {
+        self.transition_reconciliation_state(reconciliation_id, ReconciliationState::Applying)
+    }
+
     pub fn transition_reconciliation_state(
         &mut self,
         reconciliation_id: ReconciliationId,
@@ -2604,6 +2871,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
         let studio_id = rec.studio_id;
         let previous_state = rec.state;
+
+        if previous_state == new_state {
+            return Ok(());
+        }
 
         previous_state.validate_transition_to(new_state)?;
 
@@ -2629,6 +2900,14 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
         let studio_id = rec.studio_id;
 
+        if rec.state != ReconciliationState::Checking && rec.state != ReconciliationState::Applying
+        {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "ReconciliationConflictDetected is only legal from Checking or Applying state, current state is {:?}",
+                rec.state
+            )));
+        }
+
         let event = ControlPlaneEvent::ReconciliationConflictDetected {
             reconciliation_id,
             conflicted_files,
@@ -2650,9 +2929,43 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
         let studio_id = rec.studio_id;
 
+        if rec.state != ReconciliationState::Applying {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "ReconciliationApplied is only legal from Applying state, current state is {:?}",
+                rec.state
+            )));
+        }
+
         let event = ControlPlaneEvent::ReconciliationApplied {
             reconciliation_id,
             merge_commit,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_reconciliation_failed(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+        error: impl Into<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let rec = self
+            .state
+            .reconciliations
+            .get(&reconciliation_id)
+            .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
+        let studio_id = rec.studio_id;
+
+        if rec.state.is_terminal() {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Cannot fail reconciliation in terminal state {:?}",
+                rec.state
+            )));
+        }
+
+        let event = ControlPlaneEvent::ReconciliationFailed {
+            reconciliation_id,
+            error: error.into(),
         };
         self.commit_transaction(studio_id, vec![event])?;
         Ok(())

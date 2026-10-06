@@ -170,6 +170,11 @@ pub enum ControlPlaneEvent {
         retained: bool,
         reason: Option<String>,
     },
+    WorktreeNoChangesCaptured {
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: String,
+    },
     ReconciliationCreated {
         reconciliation: ReconciliationRecord,
     },
@@ -186,6 +191,10 @@ pub enum ControlPlaneEvent {
     ReconciliationApplied {
         reconciliation_id: ReconciliationId,
         merge_commit: Option<String>,
+    },
+    ReconciliationFailed {
+        reconciliation_id: ReconciliationId,
+        error: String,
     },
 }
 

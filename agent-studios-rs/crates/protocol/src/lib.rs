@@ -13,18 +13,18 @@ pub mod worktree;
 
 pub use agent::{AgentDescriptor, AgentKind, AgentState};
 pub use approval::{ApprovalKind, ApprovalRequest, ApprovalState};
-pub use artifact::{ArtifactKind, ArtifactRecord};
+pub use artifact::{ArtifactFamilyKey, ArtifactKind, ArtifactRecord};
 pub use cancellation::{CancellationScope, CancellationSummary};
 pub use error::{IdParseError, TransitionError};
 pub use event::{ControlPlaneEvent, EventEnvelope};
 pub use id::{
     AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
 };
-pub use reconciliation::{ReconciliationRecord, ReconciliationState};
+pub use reconciliation::{IntegrationWorkspace, ReconciliationRecord, ReconciliationState};
 pub use run::{RunRecord, RunState};
 pub use studio::Studio;
-pub use task::{TaskRecord, TaskState};
-pub use worktree::{WorktreeRecord, WorktreeState};
+pub use task::{DependencyOutputPolicy, TaskBlockReason, TaskRecord, TaskState};
+pub use worktree::{ExecutionWorkspace, WorktreeRecord, WorktreeState};
 
 #[cfg(test)]
 mod tests {

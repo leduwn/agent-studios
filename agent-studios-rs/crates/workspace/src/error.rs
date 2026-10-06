@@ -42,6 +42,12 @@ pub enum WorkspaceError {
     #[error("Reconciliation error: {0}")]
     ReconciliationError(String),
 
+    #[error("Integration workspace is dirty: {0}")]
+    IntegrationWorkspaceDirty(String),
+
+    #[error("Reconciliation rollback failed: {0}")]
+    ReconciliationRollbackFailed(String),
+
     #[error("Invalid workspace operation: {0}")]
     InvalidOperation(String),
 }

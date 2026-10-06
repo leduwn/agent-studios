@@ -271,6 +271,41 @@ pub enum ControlPlaneCommand {
         reason: String,
         respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
     },
+    RecordWorktreeRetained {
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordWorktreeNoChanges {
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: String,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    CreateReconciliationWithTarget {
+        studio_id: StudioId,
+        source_worktree_id: WorktreeId,
+        target_worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: std::path::PathBuf,
+        base_commit: String,
+        respond_to: oneshot::Sender<Result<ReconciliationRecord, ControlPlaneError>>,
+    },
+    StartReconciliation {
+        reconciliation_id: ReconciliationId,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    MarkReconciliationApplying {
+        reconciliation_id: ReconciliationId,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordReconciliationFailed {
+        reconciliation_id: ReconciliationId,
+        error: String,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1127,6 +1162,131 @@ impl ControlPlaneHandle {
             .map_err(|_| InternalAgentError::ActorDropped)?
             .map_err(InternalAgentError::ControlPlane)
     }
+
+    pub async fn record_worktree_retained(
+        &self,
+        worktree_id: WorktreeId,
+        reason: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordWorktreeRetained {
+                worktree_id,
+                reason,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_worktree_no_changes(
+        &self,
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: impl Into<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordWorktreeNoChanges {
+                worktree_id,
+                run_id,
+                base_commit: base_commit.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_reconciliation_with_target(
+        &self,
+        studio_id: StudioId,
+        source_worktree_id: WorktreeId,
+        target_worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<ReconciliationRecord, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CreateReconciliationWithTarget {
+                studio_id,
+                source_worktree_id,
+                target_worktree_id,
+                task_id,
+                run_id,
+                patch_artifact_id,
+                target_worktree_path: target_worktree_path.into(),
+                base_commit: base_commit.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn start_reconciliation(
+        &self,
+        reconciliation_id: ReconciliationId,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::StartReconciliation {
+                reconciliation_id,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn mark_reconciliation_applying(
+        &self,
+        reconciliation_id: ReconciliationId,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::MarkReconciliationApplying {
+                reconciliation_id,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_reconciliation_failed(
+        &self,
+        reconciliation_id: ReconciliationId,
+        error: impl Into<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordReconciliationFailed {
+                reconciliation_id,
+                error: error.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
 }
 
 pub struct ControlPlaneActor;
@@ -1615,6 +1775,73 @@ impl ControlPlaneActor {
                             conflicted_files,
                             reason,
                         );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordWorktreeRetained {
+                        worktree_id,
+                        reason,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_worktree_retained(worktree_id, reason);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordWorktreeNoChanges {
+                        worktree_id,
+                        run_id,
+                        base_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_worktree_no_changes(
+                            worktree_id,
+                            run_id,
+                            base_commit,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::CreateReconciliationWithTarget {
+                        studio_id,
+                        source_worktree_id,
+                        target_worktree_id,
+                        task_id,
+                        run_id,
+                        patch_artifact_id,
+                        target_worktree_path,
+                        base_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane.create_reconciliation_with_target(
+                            studio_id,
+                            source_worktree_id,
+                            target_worktree_id,
+                            task_id,
+                            run_id,
+                            patch_artifact_id,
+                            target_worktree_path,
+                            base_commit,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::StartReconciliation {
+                        reconciliation_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane.start_reconciliation(reconciliation_id);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::MarkReconciliationApplying {
+                        reconciliation_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane.mark_reconciliation_applying(reconciliation_id);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordReconciliationFailed {
+                        reconciliation_id,
+                        error,
+                        respond_to,
+                    } => {
+                        let res =
+                            control_plane.record_reconciliation_failed(reconciliation_id, error);
                         let _ = respond_to.send(res);
                     }
                 }
