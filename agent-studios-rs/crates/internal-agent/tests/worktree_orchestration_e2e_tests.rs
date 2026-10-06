@@ -9,16 +9,37 @@ use agent_studios_control_plane::SystemClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_internal_agent::{
-    AgentExecutionContext, AgentExecutionResult, AgentStudiosSupervisor, ControlPlaneActor,
-    CoordinatorDecision, FailurePolicy, InternalAgentSpec, InternalTeamSpec, MockAgentExecutor,
-    PlannedTask, WorkspaceAccessMode, WorkspacePolicyArbitrator,
+    AgentExecutionContext, AgentExecutionResult, AgentStudiosCodexRuntimeFactory,
+    AgentStudiosSupervisor, CodexAgentExecutor, ControlPlaneActor, CoordinatorDecision,
+    FailurePolicy, InternalAgentSpec, InternalTeamSpec, MockAgentExecutor, PlannedTask,
+    WorkspaceAccessMode, WorkspacePolicyArbitrator, build_agent_studios_extension_builder,
 };
 use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::reconciliation::ReconciliationState;
 use agent_studios_protocol::task::TaskState;
-use agent_studios_provider::id::{ModelId, ProviderInstanceId};
-use agent_studios_provider::model::ModelRef;
+use agent_studios_provider::ProviderCatalog;
+use agent_studios_provider::ProviderDefinition;
+use agent_studios_provider::auth::AuthenticationScheme;
+use agent_studios_provider::capabilities::ModelCapabilities;
+use agent_studios_provider::id::{ModelId, ProviderId, ProviderInstanceId};
+use agent_studios_provider::instance::ProviderInstance;
+use agent_studios_provider::model::{ModelDescriptor, ModelLimits, ModelRef};
+use agent_studios_provider::protocol::ProtocolFamily;
+use agent_studios_provider::secret::{SecretBackend, SecretReference};
+use agent_studios_runtime_session::AgentStudiosRuntimeSessionFactory;
+use agent_studios_runtime_transport::{ContinuationManager, InMemorySecretResolver};
 use agent_studios_workspace::WorkspaceOrchestrator;
+use codex_core::config::Config;
+use codex_extension_api::{ExtensionData, ToolCall, ToolContributor, ToolName};
+use codex_login::{AuthManager, CodexAuth};
+use codex_protocol::protocol::SessionSource;
+use codex_tools::{
+    JsonToolOutput, ResponsesApiTool, ToolExecutor, ToolExecutorFuture, ToolExposure, ToolOutput,
+    ToolPayload, ToolSpec, parse_tool_input_schema,
+};
 use tempfile::tempdir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn init_test_git_repo(repo_dir: &Path) -> String {
     Command::new("git")
@@ -426,4 +447,485 @@ async fn test_reconciliation_conflict_does_not_fail_task() {
     let tasks = cp_handle.get_studio_tasks(studio.id).await.unwrap();
     assert_eq!(tasks.len(), 2);
     assert!(tasks.iter().all(|t| t.state == TaskState::Succeeded));
+}
+
+struct BodyContainsMatcher(&'static str);
+
+impl wiremock::Match for BodyContainsMatcher {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        let body_str = String::from_utf8_lossy(&request.body);
+        body_str.contains(self.0)
+    }
+}
+
+fn run_with_large_stack<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(fut)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+fn register_provider_and_instance(
+    catalog: &mut ProviderCatalog,
+    provider_slug: &str,
+    provider_name: &str,
+    protocol: ProtocolFamily,
+    base_url: &str,
+    auth_scheme: AuthenticationScheme,
+) -> ProviderInstanceId {
+    let def_id = ProviderId::new(provider_slug).unwrap();
+    let def =
+        ProviderDefinition::new(def_id.clone(), provider_name, vec![protocol.clone()]).unwrap();
+    let _ = catalog.register_provider_definition(def);
+    let instance_id = ProviderInstanceId::new();
+    let instance = ProviderInstance::new(
+        instance_id,
+        def_id,
+        provider_name,
+        protocol,
+        agent_studios_provider::endpoint::EndpointProfile::new(base_url).unwrap(),
+        auth_scheme,
+    )
+    .unwrap();
+    catalog.register_provider_instance(instance).unwrap();
+    instance_id
+}
+
+#[derive(Clone)]
+struct TestWorkspaceFileWriterTool {
+    managed_root: PathBuf,
+    integration_root: PathBuf,
+}
+
+impl ToolContributor for TestWorkspaceFileWriterTool {
+    fn tools(
+        &self,
+        _session_store: &ExtensionData,
+        _thread_store: &ExtensionData,
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
+        vec![Arc::new(self.clone())]
+    }
+}
+
+impl<'call> ToolExecutor<ToolCall<'call>> for TestWorkspaceFileWriterTool {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("write_workspace_file")
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::Function(ResponsesApiTool {
+            name: "write_workspace_file".to_string(),
+            description: "Writes a file to the active managed worktree".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: parse_tool_input_schema(&serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "filename": { "type": "string" },
+                    "content": { "type": "string" }
+                },
+                "required": ["filename", "content"]
+            }))
+            .unwrap(),
+            output_schema: None,
+        })
+    }
+
+    fn exposure(&self) -> ToolExposure {
+        ToolExposure::Direct
+    }
+
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
+        let root = self.managed_root.clone();
+        let integration = self.integration_root.clone();
+        Box::pin(async move {
+            let (filename, content) = match &call.payload {
+                ToolPayload::Function { arguments } => {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(arguments).unwrap_or_default();
+                    let file = parsed["filename"]
+                        .as_str()
+                        .unwrap_or("default.txt")
+                        .to_string();
+                    let cont = parsed["content"].as_str().unwrap_or("").to_string();
+                    (file, cont)
+                }
+                _ => ("default.txt".to_string(), String::new()),
+            };
+
+            fn find_worktrees(dir: &std::path::Path, results: &mut Vec<std::path::PathBuf>) {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            if path.join(".git").exists() {
+                                results.push(path);
+                            } else {
+                                find_worktrees(&path, results);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut worktrees = Vec::new();
+            find_worktrees(&root, &mut worktrees);
+            for wt in worktrees {
+                let canon_wt = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
+                let canon_integration =
+                    std::fs::canonicalize(&integration).unwrap_or_else(|_| integration.clone());
+                if canon_wt != canon_integration {
+                    let target_file = wt.join(&filename);
+                    std::fs::write(&target_file, &content).ok();
+                }
+            }
+
+            Ok(Box::new(JsonToolOutput::new(serde_json::json!({
+                "status": "success",
+                "filename": filename
+            }))) as Box<dyn ToolOutput>)
+        })
+    }
+}
+
+#[test]
+fn test_real_codex_worktree_orchestration_e2e() {
+    run_with_large_stack(async {
+        let temp = tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+        let base_commit = init_test_git_repo(&repo_dir);
+
+        let managed_root = temp.path().join("managed_worktrees");
+        let artifact_root = temp.path().join("artifacts");
+        let orchestrator = Arc::new(
+            WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator"),
+        );
+
+        let integration_wt = orchestrator
+            .create_worktree(&repo_dir, Some(&base_commit))
+            .expect("create integration wt");
+
+        let server = MockServer::start().await;
+        let secret_resolver = InMemorySecretResolver::new();
+        secret_resolver.insert(
+            SecretReference {
+                backend: SecretBackend::EnvironmentVariable,
+                locator: "TEST_API_KEY".to_string(),
+            },
+            "dummy-api-key",
+        );
+        let secret_resolver = Arc::new(secret_resolver);
+
+        let mut catalog = ProviderCatalog::new();
+        let provider_inst_id = register_provider_and_instance(
+            &mut catalog,
+            "real-codex-provider",
+            "Real Codex Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &server.uri(),
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "TEST_API_KEY".to_string(),
+                },
+            },
+        );
+
+        let coord_model_id = ModelId::new("coord-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    provider_inst_id,
+                    coord_model_id.clone(),
+                    "Coord Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let worker_model_id = ModelId::new("worker-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    provider_inst_id,
+                    worker_model_id.clone(),
+                    "Worker Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let catalog = Arc::new(catalog);
+        let continuation_manager = Arc::new(ContinuationManager::new());
+        let factory = Arc::new(AgentStudiosRuntimeSessionFactory::new(
+            catalog,
+            secret_resolver,
+            continuation_manager,
+        ));
+
+        let codex_home = temp.path().join("codex_home");
+        let config = AgentStudiosCodexRuntimeFactory::create_test_config(&codex_home)
+            .await
+            .expect("test config");
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("dummy"),
+            config.codex_home.to_path_buf(),
+        );
+
+        let writer_tool = Arc::new(TestWorkspaceFileWriterTool {
+            managed_root: managed_root.clone(),
+            integration_root: integration_wt.root.clone(),
+        });
+
+        let mut builder = build_agent_studios_extension_builder::<Config>();
+        builder.tool_contributor(writer_tool);
+        let extensions = Arc::new(builder.build());
+
+        let thread_manager = AgentStudiosCodexRuntimeFactory::build_thread_manager_with_extensions(
+            &config,
+            auth_manager,
+            Some(SessionSource::Exec),
+            extensions,
+        )
+        .await
+        .expect("build thread manager");
+        let thread_manager = Arc::new(thread_manager);
+
+        let clock = SystemClock;
+        let store = InMemoryStore::new();
+        let cp = ControlPlane::new(clock, store);
+        let (cp_handle, _actor_task) = ControlPlaneActor::spawn(cp);
+
+        let studio = cp_handle
+            .create_studio("Real Codex Worktree Studio")
+            .await
+            .unwrap();
+        let studio_id = studio.id;
+
+        let coord_agent_id = AgentId::new();
+        let worker_agent_id = AgentId::new();
+
+        let coord_spec = InternalAgentSpec::new(
+            coord_agent_id,
+            "Coordinator",
+            "coordinator",
+            ModelRef::new(provider_inst_id, coord_model_id),
+        );
+
+        let worker_spec = InternalAgentSpec::new(
+            worker_agent_id,
+            "Worker 1",
+            "worker",
+            ModelRef::new(provider_inst_id, worker_model_id),
+        )
+        .with_workspace_access(WorkspaceAccessMode::Mutating);
+
+        let team_spec = InternalTeamSpec::new(studio_id, "codex-wt-team", coord_spec)
+            .add_agent("worker-1", worker_spec)
+            .unwrap()
+            .with_max_parallel_agents(2);
+
+        let executor = CodexAgentExecutor::try_new(
+            factory,
+            thread_manager,
+            Arc::new(config),
+            cp_handle.clone(),
+        )
+        .unwrap()
+        .with_workspace_orchestrator(orchestrator.clone());
+
+        let plan_decision = serde_json::json!({
+            "action": "plan",
+            "tasks": [
+                {
+                    "task_key": "task-codex-1",
+                    "title": "Codex Mutating Task",
+                    "description": "Mutates worktree",
+                    "assigned_alias": "worker-1",
+                    "depends_on": [],
+                    "workspace_access": "mutating",
+                    "priority": 1
+                }
+            ]
+        });
+        let plan_str = serde_json::to_string(&plan_decision).unwrap();
+        let escaped_plan = plan_str.replace('"', "\\\"");
+
+        let coord_plan_sse = format!(
+            "data: {{\"id\":\"chat-coord\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chat-coord\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":10,\"total_tokens\":20}}}}\n\n\
+             data: [DONE]\n\n",
+            escaped_plan
+        );
+
+        let coord_review_sse = "data: {\"id\":\"chat-coord-review\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Final review: Codex mutation task succeeded and was reconciled.\"},\"finish_reason\":null}]}\n\n\
+                                data: {\"id\":\"chat-coord-review\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":10,\"total_tokens\":20}}\n\n\
+                                data: [DONE]\n\n";
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("Available team members:"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(coord_plan_sse),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("Review the executed tasks"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(coord_review_sse),
+            )
+            .mount(&server)
+            .await;
+
+        let sse_tool = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({
+                "id": "chatcmpl-t1",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_wt_tool_1",
+                            "type": "function",
+                            "function": {
+                                "name": "write_workspace_file",
+                                "arguments": serde_json::to_string(&serde_json::json!({
+                                    "filename": "feature_real_codex.rs",
+                                    "content": "pub fn real_codex() -> bool { true }\n"
+                                })).unwrap()
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 10,
+                    "total_tokens": 20
+                }
+            })
+        );
+
+        let sse_worker_done = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({
+                "id": "chatcmpl-t2",
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": "File written successfully."
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 10,
+                    "total_tokens": 20
+                }
+            })
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("Codex Mutating Task"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_tool),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("write_workspace_file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_worker_done),
+            )
+            .mount(&server)
+            .await;
+
+        let arbitrator = WorkspacePolicyArbitrator::new();
+        let supervisor =
+            AgentStudiosSupervisor::new(cp_handle.clone(), team_spec, arbitrator, executor)
+                .with_workspace_orchestrator(
+                    orchestrator.clone(),
+                    repo_dir.clone(),
+                    base_commit.clone(),
+                )
+                .with_integration_worktree(integration_wt.root.clone());
+
+        let summary = supervisor
+            .run("Execute real Codex worktree workflow")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.total_tasks, 1);
+        assert_eq!(summary.completed_tasks, 1);
+        assert_eq!(summary.failed_tasks, 0);
+
+        let reconciled_file = integration_wt.root.join("feature_real_codex.rs");
+        assert!(
+            reconciled_file.exists(),
+            "Reconciled file must exist in integration worktree"
+        );
+        let content = fs::read_to_string(&reconciled_file).unwrap();
+        assert_eq!(
+            content.replace("\r\n", "\n"),
+            "pub fn real_codex() -> bool { true }\n"
+        );
+
+        let cp_state = cp_handle.get_state().await.unwrap();
+        let tasks: Vec<_> = cp_state.task_graph.all_tasks().collect();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].state, TaskState::Succeeded);
+
+        let recons: Vec<_> = cp_state.reconciliations.values().collect();
+        assert_eq!(recons.len(), 1);
+        assert_eq!(recons[0].state, ReconciliationState::Applied);
+
+        let worktrees: Vec<_> = cp_state.worktrees.values().collect();
+        assert_eq!(worktrees.len(), 1);
+        let patch_id = worktrees[0]
+            .patch_artifact_id
+            .expect("Patch artifact ID must be recorded");
+        let patch_artifact = cp_state
+            .artifacts
+            .get(&patch_id)
+            .expect("Artifact record must exist");
+        assert!(patch_artifact.location.starts_with("blobs/sha256/"));
+    });
 }
