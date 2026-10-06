@@ -58,18 +58,10 @@ impl WorktreeState {
                 Self::InUse | Self::Retained | Self::Removing | Self::Removed | Self::Failed
             ) | (
                 Self::InUse,
-                Self::InUse
-                    | Self::ChangeCaptured
-                    | Self::Ready
-                    | Self::Retained
-                    | Self::Failed
+                Self::InUse | Self::ChangeCaptured | Self::Ready | Self::Retained | Self::Failed
             ) | (
                 Self::ChangeCaptured,
-                Self::ReconcilePending
-                    | Self::Retained
-                    | Self::InUse
-                    | Self::Ready
-                    | Self::Failed
+                Self::ReconcilePending | Self::Retained | Self::InUse | Self::Ready | Self::Failed
             ) | (
                 Self::ReconcilePending,
                 Self::Reconciled | Self::Conflicted | Self::Retained | Self::Failed

@@ -153,6 +153,7 @@ impl ArtifactStore {
     }
 
     /// High-level helper: stores raw data into the store and creates a fully populated `ArtifactRecord`.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_artifact(
         &self,
         studio_id: StudioId,
@@ -180,7 +181,11 @@ impl ArtifactStore {
 
         record.run_id = options.run_id;
         record.worktree_id = options.worktree_id;
-        record.version = if options.version == 0 { 1 } else { options.version };
+        record.version = if options.version == 0 {
+            1
+        } else {
+            options.version
+        };
         record.supersedes = options.supersedes;
         record.relative_path = options.relative_path;
         record.size_bytes = Some(size as u64);

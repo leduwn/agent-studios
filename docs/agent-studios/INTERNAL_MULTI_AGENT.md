@@ -120,15 +120,31 @@ runs on a dedicated Tokio background task:
     `get_ready_tasks`, `get_studio_tasks`.
 - State transitions are committed atomically via `commit_transaction`.
 
-### B. Workspace Policy Arbitrator (`workspace_policy.rs`)
+### B. Workspace Policy Arbitrator & Isolated Worktrees (`workspace_policy.rs`)
 
 Multi-agent coordination requires deterministic access control over workspace files:
-- **`WorkspaceAccessMode::ReadOnly`**: Multiple agents may hold concurrent read leases on the
-  same workspace key.
-- **`WorkspaceAccessMode::Mutating`**: Exactly one agent may hold a mutating lease. All other
-  read and mutate requests block or return `InternalAgentError::WorkspaceConflict`.
+- **`WorkspaceAccessMode::ReadOnly`**: Tasks execute against shared source without exclusive lease.
+- **`WorkspaceAccessMode::Mutating`**: Tasks require dedicated isolated worktrees. In Milestone M09,
+  the global studio lock is replaced by per-worktree leases (`worktree-{worktree_id}`). Multiple
+  mutating agents execute concurrently in parallel when allocated distinct dedicated worktrees.
 - **RAII Leases (`WorkspaceLease`)**: Automatically decrements reader count or clears mutating
   ownership when dropped, guaranteeing that crashes or cancellations never leave dangling locks.
+
+### B.1 Worktree Orchestration & Non-Teleporting Workers (Milestone M09)
+
+Integrated with `agent-studios-workspace` and `codex_worktree::WorktreeManager`:
+
+- **Thread-Worktree 1:1 Affinity**: Enforces `codex_worktree::bind_thread` semantics with `codex-thread.json`.
+- **Non-Teleporting Worker Invariant**: A Codex thread's working directory (`Config.cwd`) is immutable.
+  Reusing a worker thread across tasks is allowed ONLY when `existing.bound_workspace == requested.workspace_path`.
+  If the workspace differs, the old worker is retired and a new thread is spawned with a fresh `ThreadId`
+  pointing to the new worktree path.
+- **Ephemeral Change Capture**: Staged diffs are computed using isolated temporary Git index files (`GIT_INDEX_FILE`),
+  leaving active `.git/index` files unaffected.
+- **Safe Patch Reconciliation**: Two-phase patch application on a dedicated integration worktree
+  (`git apply --check --binary` dry-run first). Conflicts are recorded as `Conflicted` without failing
+  the task (`TaskState = Succeeded`, `ReconciliationState = Conflicted`).
+- **Dirty Worktree Retention**: Crashed, failed, or cancelled worktrees are retained on disk for inspection.
 
 ### C. Execution Budget Tracker (`budget.rs`)
 

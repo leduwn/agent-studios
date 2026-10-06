@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 
 use agent_studios_protocol::agent::{AgentExecutionBudget, AgentState};
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
+use agent_studios_protocol::id::{
+    AgentId, ArtifactId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
+};
 use agent_studios_protocol::run::RunState;
-use agent_studios_protocol::task::TaskRecord;
+use agent_studios_protocol::task::{TaskRecord, TaskState};
+use agent_studios_protocol::worktree::WorktreeRecord;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +79,15 @@ pub struct TaskGraphSnapshot {
     pub cancelled_tasks: Vec<TaskId>,
     /// Dependency adjacency: TaskId -> Vec of prerequisite TaskIds it depends on.
     pub adjacency: HashMap<TaskId, Vec<TaskId>>,
+    /// Worktree assigned to each task (M09).
+    #[serde(default)]
+    pub task_worktrees: HashMap<TaskId, WorktreeId>,
+    /// Artifacts produced by each task (M09).
+    #[serde(default)]
+    pub task_artifacts: HashMap<TaskId, Vec<ArtifactId>>,
+    /// Reconciliations associated with each task (M09).
+    #[serde(default)]
+    pub task_reconciliations: HashMap<TaskId, Vec<ReconciliationId>>,
 }
 
 /// Observable summary of an execution run.
@@ -104,4 +117,113 @@ pub struct RunOutcome {
     pub duration_ms: Option<u64>,
     pub tool_calls_count: u64,
     pub error: Option<String>,
+}
+
+/// Point-in-time index of artifacts registered in a Studio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ArtifactIndex {
+    pub studio_id: StudioId,
+    pub artifacts: Vec<ArtifactRecord>,
+    pub by_kind: HashMap<ArtifactKind, Vec<ArtifactId>>,
+    pub by_task: HashMap<TaskId, Vec<ArtifactId>>,
+    pub by_worktree: HashMap<WorktreeId, Vec<ArtifactId>>,
+    pub by_agent: HashMap<AgentId, Vec<ArtifactId>>,
+    pub total_bytes: u64,
+}
+
+impl ArtifactIndex {
+    pub fn get_artifact(&self, id: &ArtifactId) -> Option<&ArtifactRecord> {
+        self.artifacts.iter().find(|a| a.id == *id)
+    }
+
+    pub fn artifacts_for_task(&self, task_id: &TaskId) -> Vec<&ArtifactRecord> {
+        self.artifacts
+            .iter()
+            .filter(|a| a.task_id == *task_id)
+            .collect()
+    }
+
+    pub fn artifacts_for_worktree(&self, worktree_id: &WorktreeId) -> Vec<&ArtifactRecord> {
+        self.artifacts
+            .iter()
+            .filter(|a| a.worktree_id == Some(*worktree_id))
+            .collect()
+    }
+
+    pub fn artifacts_of_kind(&self, kind: ArtifactKind) -> Vec<&ArtifactRecord> {
+        self.artifacts.iter().filter(|a| a.kind == kind).collect()
+    }
+}
+
+/// Point-in-time snapshot of managed worktrees in a Studio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WorktreeSnapshot {
+    pub studio_id: StudioId,
+    pub worktrees: Vec<WorktreeRecord>,
+    pub active_worktrees: Vec<WorktreeId>,
+    pub retained_worktrees: Vec<WorktreeId>,
+    pub by_task: HashMap<TaskId, WorktreeId>,
+    pub by_thread: HashMap<String, WorktreeId>,
+}
+
+impl WorktreeSnapshot {
+    pub fn get_worktree(&self, id: &WorktreeId) -> Option<&WorktreeRecord> {
+        self.worktrees.iter().find(|w| w.id == *id)
+    }
+
+    pub fn worktree_for_task(&self, task_id: &TaskId) -> Option<&WorktreeRecord> {
+        self.by_task
+            .get(task_id)
+            .and_then(|wt_id| self.get_worktree(wt_id))
+    }
+
+    pub fn worktree_for_thread(&self, thread_id: &str) -> Option<&WorktreeRecord> {
+        self.by_thread
+            .get(thread_id)
+            .and_then(|wt_id| self.get_worktree(wt_id))
+    }
+}
+
+/// Category of event in a task timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineItemKind {
+    TaskCreated,
+    TaskStateChanged,
+    TaskRetryScheduled,
+    RunCreated,
+    RunStateChanged,
+    WorktreeAssigned,
+    WorktreeThreadBound,
+    WorktreeChangeCaptured,
+    WorktreeReleased,
+    ArtifactRegistered,
+    ReconciliationCreated,
+    ReconciliationStateChanged,
+    ReconciliationConflictDetected,
+    ReconciliationApplied,
+}
+
+/// Chronological item in a task timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineItem {
+    pub timestamp: DateTime<Utc>,
+    pub sequence: u64,
+    pub kind: TimelineItemKind,
+    pub description: String,
+    pub related_id: Option<String>,
+}
+
+/// Chronological projection of all events and lifecycle activities for a Task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskTimelineProjection {
+    pub task_id: TaskId,
+    pub studio_id: StudioId,
+    pub current_state: TaskState,
+    pub assigned_agent_id: Option<AgentId>,
+    pub assigned_worktree_id: Option<WorktreeId>,
+    pub bound_thread_id: Option<String>,
+    pub artifact_ids: Vec<ArtifactId>,
+    pub reconciliation_ids: Vec<ReconciliationId>,
+    pub items: Vec<TimelineItem>,
 }

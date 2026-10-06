@@ -256,6 +256,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
     }
 
     /// Runs the complete supervisor workflow: boot -> plan -> materialize -> schedule -> review
+    #[allow(clippy::collapsible_if)]
     pub async fn run(
         &self,
         objective: &str,
@@ -465,12 +466,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                     if let Some(ref wt_ctx) = worktree_ctx {
                         let _ = self
                             .control_plane
-                            .assign_worktree(
-                                wt_ctx.worktree_id,
-                                task.id,
-                                agent_id,
-                                Some(run.id),
-                            )
+                            .assign_worktree(wt_ctx.worktree_id, task.id, agent_id, Some(run.id))
                             .await;
                     }
 

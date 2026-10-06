@@ -956,6 +956,7 @@ impl ControlPlaneHandle {
             .map_err(InternalAgentError::ControlPlane)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_worktree_change_captured(
         &self,
         worktree_id: WorktreeId,
@@ -1038,6 +1039,7 @@ impl ControlPlaneHandle {
             .map_err(InternalAgentError::ControlPlane)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_reconciliation(
         &self,
         studio_id: StudioId,

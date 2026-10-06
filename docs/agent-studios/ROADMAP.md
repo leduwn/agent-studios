@@ -250,9 +250,33 @@ This roadmap defines the strategic progression for building Agent Studios upon t
     (Coordinator on Gemini 2.5 Pro, Coder on Claude 3.7 Sonnet, Reviewer on GPT-4o), secret isolation,
     and same-model-slug cross-instance isolation.
 
-### M09: Worktree, Task & Artifact Orchestration
-- Extend Git worktree isolation for concurrent workers based on upstream Codex worktree infrastructure.
-- Implement deterministic artifact tracking, versioning, and reconciliation workflows.
+### M09: Worktree, Task & Artifact Orchestration (Completed on `feat/worktree-task-artifact-orchestration`)
+
+- Establish `agent-studios-workspace` crate wrapping upstream `codex_worktree::WorktreeManager`.
+- Worktree & reconciliation domain state machines:
+  - `WorktreeRecord` & `WorktreeState` (`Creating`, `Ready`, `InUse`, `ChangeCaptured`, `ReconcilePending`, `Reconciled`, `Conflicted`, `Retained`, `Removing`, `Removed`, `Failed`).
+  - `ReconciliationRecord` & `ReconciliationState` (`Pending`, `Checking`, `Applying`, `Applied`, `Conflicted`, `Failed`, `Cancelled`).
+  - 10 new domain events in `agent-studios-protocol` with strict replay validation.
+- Non-teleporting worker invariant & thread affinity:
+  - Enforced 1:1 binding between Codex `ThreadId` and managed worktree via `codex_worktree::bind_thread` and `codex-thread.json`.
+  - Immutable thread working directory (`Config.cwd`); worker reuse allowed strictly when requested workspace equals bound workspace.
+- Per-workspace concurrency arbitration:
+  - Replaced global single-writer lock with per-worktree leases (`worktree-{worktree_id}`), unlocking concurrent mutating task execution across distinct worktrees.
+- Ephemeral Git index change-set capture:
+  - Isolated temporary Git index via `GIT_INDEX_FILE` computes binary diffs without mutating worktree index.
+- Content-addressed `ArtifactStore`:
+  - Atomic writing, deduplication, and SHA-256 blob storage (`<artifact-root>/blobs/sha256/<hash>`).
+- Safe patch reconciliation engine:
+  - Two-phase application on dedicated integration worktree (`git apply --check --binary` dry-run).
+  - Clean conflict detection leaving workspace untouched (`TaskState = Succeeded`, `ReconciliationState = Conflicted`).
+  - Dirty workspace retention policy on task failure or cancellation.
+- Observability read models & projections:
+  - `ArtifactIndex`: point-in-time index of artifacts by kind, task, worktree, and agent with total byte tracking.
+  - `WorktreeSnapshot`: active and retained worktrees, task and thread bindings.
+  - `TaskTimelineProjection`: chronological timeline of task events, runs, worktree bindings, change captures, artifacts, and reconciliations.
+  - Enriched `TaskGraphSnapshot`: task dependency DAG correlated with assigned worktrees, generated artifacts, and reconciliations.
+- Full verification:
+  - All workspace unit tests, E2E parallel mutating orchestration tests, and read model projection tests passing.
 
 ### M10: External Runtime Interface
 - Define standard `AgentRuntime` interface (lifecycle, communication, supervision, capabilities).

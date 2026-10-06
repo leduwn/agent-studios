@@ -209,14 +209,16 @@ fn test_worktree_lifecycle_capture_and_reconciliation_full() {
         )
         .expect("store patch artifact");
 
-    assert!(orchestrator.artifact_store().has_blob(
-        patch_record
-            .content_hash
-            .as_deref()
-            .unwrap()
-            .strip_prefix("sha256:")
-            .unwrap()
-    ));
+    assert!(
+        orchestrator.artifact_store().has_blob(
+            patch_record
+                .content_hash
+                .as_deref()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap()
+        )
+    );
 
     // 6. Reconciliation: create dedicated integration worktree
     let integration_wt = orchestrator
@@ -251,7 +253,10 @@ fn test_worktree_lifecycle_capture_and_reconciliation_full() {
         .expect("reconcile conflicting patch");
 
     match conflict_outcome {
-        ReconciliationOutcome::Conflicted { conflicted_files, reason } => {
+        ReconciliationOutcome::Conflicted {
+            conflicted_files,
+            reason,
+        } => {
             assert!(!conflicted_files.is_empty() || !reason.is_empty());
         }
         other => panic!("expected Conflicted, got {other:?}"),

@@ -91,6 +91,7 @@ pub struct ReconciliationRecord {
 }
 
 impl ReconciliationRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         studio_id: StudioId,
         worktree_id: WorktreeId,

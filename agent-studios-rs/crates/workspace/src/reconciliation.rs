@@ -130,6 +130,7 @@ pub fn reconcile_patch(
 }
 
 /// Parses git apply error messages to discover which files conflicted.
+#[allow(clippy::collapsible_if)]
 pub fn extract_conflicted_files(stderr: &str) -> Vec<String> {
     let mut files = Vec::new();
     for line in stderr.lines() {
@@ -144,10 +145,7 @@ pub fn extract_conflicted_files(stderr: &str) -> Vec<String> {
         } else if let Some(rest) = trimmed.strip_prefix("error: ") {
             if let Some(file) = rest.split(':').next() {
                 let file = file.trim();
-                if !file.is_empty()
-                    && !file.contains(' ')
-                    && !files.iter().any(|f| f == file)
-                {
+                if !file.is_empty() && !file.contains(' ') && !files.iter().any(|f| f == file) {
                     files.push(file.to_string());
                 }
             }

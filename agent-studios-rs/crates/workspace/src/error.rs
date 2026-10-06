@@ -22,7 +22,9 @@ pub enum WorkspaceError {
     #[error("Path validation failed: {path:?} - {reason}")]
     PathValidationFailed { path: PathBuf, reason: String },
 
-    #[error("Cross-repository mismatch: source {source_repo:?} does not match target {target_repo:?}")]
+    #[error(
+        "Cross-repository mismatch: source {source_repo:?} does not match target {target_repo:?}"
+    )]
     CrossRepoMismatch {
         source_repo: PathBuf,
         target_repo: PathBuf,

@@ -6,8 +6,7 @@ use crate::approval::{ApprovalRequest, ApprovalState};
 use crate::artifact::ArtifactRecord;
 use crate::cancellation::CancellationScope;
 use crate::id::{
-    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
-    WorktreeId,
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
 };
 use crate::reconciliation::{ReconciliationRecord, ReconciliationState};
 use crate::run::{RunRecord, RunState};

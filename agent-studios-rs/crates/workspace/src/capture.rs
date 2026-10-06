@@ -114,11 +114,7 @@ pub fn capture_changes(
     let head_commit = match head_output {
         Ok(out) if out.status.success() => {
             let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !sha.is_empty() {
-                Some(sha)
-            } else {
-                None
-            }
+            if !sha.is_empty() { Some(sha) } else { None }
         }
         _ => None,
     };

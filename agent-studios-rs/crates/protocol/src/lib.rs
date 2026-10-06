@@ -18,8 +18,7 @@ pub use cancellation::{CancellationScope, CancellationSummary};
 pub use error::{IdParseError, TransitionError};
 pub use event::{ControlPlaneEvent, EventEnvelope};
 pub use id::{
-    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
-    WorktreeId,
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
 };
 pub use reconciliation::{ReconciliationRecord, ReconciliationState};
 pub use run::{RunRecord, RunState};
@@ -236,7 +235,11 @@ mod tests {
         let removed = WorktreeState::Removed;
         assert!(removed.is_terminal());
         assert!(!removed.can_transition_to(WorktreeState::Ready));
-        assert!(removed.validate_transition_to(WorktreeState::Ready).is_err());
+        assert!(
+            removed
+                .validate_transition_to(WorktreeState::Ready)
+                .is_err()
+        );
     }
 
     #[test]
@@ -258,9 +261,11 @@ mod tests {
 
         let applied = ReconciliationState::Applied;
         assert!(applied.is_terminal());
-        assert!(applied
-            .validate_transition_to(ReconciliationState::Pending)
-            .is_err());
+        assert!(
+            applied
+                .validate_transition_to(ReconciliationState::Pending)
+                .is_err()
+        );
     }
 
     #[test]

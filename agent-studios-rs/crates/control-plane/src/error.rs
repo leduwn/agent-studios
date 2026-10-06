@@ -1,7 +1,6 @@
 use agent_studios_protocol::error::TransitionError;
 use agent_studios_protocol::id::{
-    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
-    WorktreeId,
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
 };
 use thiserror::Error;
 
@@ -169,9 +168,7 @@ pub enum ReplayError {
     DuplicateWorktree { worktree_id: WorktreeId },
 
     #[error("Reconciliation already exists: {reconciliation_id}")]
-    DuplicateReconciliation {
-        reconciliation_id: ReconciliationId,
-    },
+    DuplicateReconciliation { reconciliation_id: ReconciliationId },
 
     #[error("Studio not found: {studio_id}")]
     StudioNotFound { studio_id: StudioId },
@@ -192,9 +189,7 @@ pub enum ReplayError {
     WorktreeNotFound { worktree_id: WorktreeId },
 
     #[error("Reconciliation not found: {reconciliation_id}")]
-    ReconciliationNotFound {
-        reconciliation_id: ReconciliationId,
-    },
+    ReconciliationNotFound { reconciliation_id: ReconciliationId },
 
     #[error("State mismatch: current state is {actual}, event expected {expected}")]
     StateMismatch { actual: String, expected: String },

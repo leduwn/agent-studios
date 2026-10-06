@@ -67,18 +67,16 @@ impl WorkspaceOrchestrator {
     /// Validates that a worktree root and its working directory lie strictly
     /// inside the managed root and do not escape via traversal or symlinks.
     pub fn validate_worktree_path(&self, root: &Path, cwd: &Path) -> Result<(), WorkspaceError> {
-        let canonical_root = dunce::canonicalize(root).map_err(|e| {
-            WorkspaceError::PathValidationFailed {
+        let canonical_root =
+            dunce::canonicalize(root).map_err(|e| WorkspaceError::PathValidationFailed {
                 path: root.to_path_buf(),
                 reason: format!("cannot canonicalize root: {e}"),
-            }
-        })?;
-        let canonical_cwd = dunce::canonicalize(cwd).map_err(|e| {
-            WorkspaceError::PathValidationFailed {
+            })?;
+        let canonical_cwd =
+            dunce::canonicalize(cwd).map_err(|e| WorkspaceError::PathValidationFailed {
                 path: cwd.to_path_buf(),
                 reason: format!("cannot canonicalize cwd: {e}"),
-            }
-        })?;
+            })?;
 
         if !canonical_root.starts_with(&self.managed_root) {
             return Err(WorkspaceError::PathValidationFailed {

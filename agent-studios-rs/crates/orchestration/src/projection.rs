@@ -2,13 +2,18 @@ use std::collections::{HashMap, HashSet};
 
 use agent_studios_control_plane::engine::ControlPlaneState;
 use agent_studios_protocol::agent::{AgentExecutionBudget, AgentState};
+use agent_studios_protocol::artifact::ArtifactRecord;
 use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{
+    AgentId, ArtifactId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
+};
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
+use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 
 use crate::read_models::{
-    AgentOperationalState, AgentSummary, BudgetUsage, RunSummary, TaskGraphSnapshot,
+    AgentOperationalState, AgentSummary, ArtifactIndex, BudgetUsage, RunSummary, TaskGraphSnapshot,
+    TaskTimelineProjection, TimelineItem, TimelineItemKind, WorktreeSnapshot,
 };
 
 /// Projects events into an AgentSummary.
@@ -289,6 +294,37 @@ pub fn build_task_graph_snapshot(
         deps.sort();
     }
 
+    let mut task_worktrees = HashMap::new();
+    let mut task_artifacts: HashMap<TaskId, Vec<ArtifactId>> = HashMap::new();
+    let mut task_reconciliations: HashMap<TaskId, Vec<ReconciliationId>> = HashMap::new();
+
+    for wt in state.worktrees.values() {
+        if let Some(tid) = wt.assigned_task_id.filter(|_| wt.studio_id == studio_id) {
+            task_worktrees.insert(tid, wt.id);
+        }
+    }
+
+    for art in state.artifacts.values() {
+        if art.studio_id == studio_id {
+            task_artifacts.entry(art.task_id).or_default().push(art.id);
+        }
+    }
+    for arts in task_artifacts.values_mut() {
+        arts.sort();
+    }
+
+    for rec in state.reconciliations.values() {
+        if rec.studio_id == studio_id {
+            task_reconciliations
+                .entry(rec.task_id)
+                .or_default()
+                .push(rec.id);
+        }
+    }
+    for recs in task_reconciliations.values_mut() {
+        recs.sort();
+    }
+
     TaskGraphSnapshot {
         studio_id,
         tasks,
@@ -300,7 +336,542 @@ pub fn build_task_graph_snapshot(
         failed_tasks,
         cancelled_tasks,
         adjacency,
+        task_worktrees,
+        task_artifacts,
+        task_reconciliations,
     }
+}
+
+/// Projects events into an ArtifactIndex for a studio.
+pub fn project_artifact_index(studio_id: StudioId, events: &[EventEnvelope]) -> ArtifactIndex {
+    let mut artifacts: HashMap<ArtifactId, ArtifactRecord> = HashMap::new();
+
+    for envelope in events {
+        if envelope.studio_id != studio_id {
+            continue;
+        }
+
+        if let ControlPlaneEvent::ArtifactRegistered { artifact } = &envelope.event {
+            artifacts.insert(artifact.id, artifact.clone());
+        }
+    }
+
+    let mut list: Vec<ArtifactRecord> = artifacts.into_values().collect();
+    list.sort_by_key(|a| (a.created_at, a.id));
+
+    let mut by_kind: HashMap<agent_studios_protocol::artifact::ArtifactKind, Vec<ArtifactId>> =
+        HashMap::new();
+    let mut by_task: HashMap<TaskId, Vec<ArtifactId>> = HashMap::new();
+    let mut by_worktree: HashMap<WorktreeId, Vec<ArtifactId>> = HashMap::new();
+    let mut by_agent: HashMap<AgentId, Vec<ArtifactId>> = HashMap::new();
+    let mut total_bytes = 0u64;
+
+    for art in &list {
+        by_kind.entry(art.kind).or_default().push(art.id);
+        by_task.entry(art.task_id).or_default().push(art.id);
+        if let Some(wt_id) = art.worktree_id {
+            by_worktree.entry(wt_id).or_default().push(art.id);
+        }
+        by_agent
+            .entry(art.producer_agent_id)
+            .or_default()
+            .push(art.id);
+        if let Some(bytes) = art.size_bytes {
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+    }
+
+    for ids in by_kind.values_mut() {
+        ids.sort();
+    }
+    for ids in by_task.values_mut() {
+        ids.sort();
+    }
+    for ids in by_worktree.values_mut() {
+        ids.sort();
+    }
+    for ids in by_agent.values_mut() {
+        ids.sort();
+    }
+
+    ArtifactIndex {
+        studio_id,
+        artifacts: list,
+        by_kind,
+        by_task,
+        by_worktree,
+        by_agent,
+        total_bytes,
+    }
+}
+
+/// Builds an ArtifactIndex from ControlPlaneState.
+pub fn build_artifact_index(studio_id: StudioId, state: &ControlPlaneState) -> ArtifactIndex {
+    let mut list: Vec<ArtifactRecord> = state
+        .artifacts
+        .values()
+        .filter(|a| a.studio_id == studio_id)
+        .cloned()
+        .collect();
+
+    list.sort_by_key(|a| (a.created_at, a.id));
+
+    let mut by_kind: HashMap<agent_studios_protocol::artifact::ArtifactKind, Vec<ArtifactId>> =
+        HashMap::new();
+    let mut by_task: HashMap<TaskId, Vec<ArtifactId>> = HashMap::new();
+    let mut by_worktree: HashMap<WorktreeId, Vec<ArtifactId>> = HashMap::new();
+    let mut by_agent: HashMap<AgentId, Vec<ArtifactId>> = HashMap::new();
+    let mut total_bytes = 0u64;
+
+    for art in &list {
+        by_kind.entry(art.kind).or_default().push(art.id);
+        by_task.entry(art.task_id).or_default().push(art.id);
+        if let Some(wt_id) = art.worktree_id {
+            by_worktree.entry(wt_id).or_default().push(art.id);
+        }
+        by_agent
+            .entry(art.producer_agent_id)
+            .or_default()
+            .push(art.id);
+        if let Some(bytes) = art.size_bytes {
+            total_bytes = total_bytes.saturating_add(bytes);
+        }
+    }
+
+    for ids in by_kind.values_mut() {
+        ids.sort();
+    }
+    for ids in by_task.values_mut() {
+        ids.sort();
+    }
+    for ids in by_worktree.values_mut() {
+        ids.sort();
+    }
+    for ids in by_agent.values_mut() {
+        ids.sort();
+    }
+
+    ArtifactIndex {
+        studio_id,
+        artifacts: list,
+        by_kind,
+        by_task,
+        by_worktree,
+        by_agent,
+        total_bytes,
+    }
+}
+
+/// Projects events into a WorktreeSnapshot for a studio.
+pub fn project_worktree_snapshot(
+    studio_id: StudioId,
+    events: &[EventEnvelope],
+) -> WorktreeSnapshot {
+    let mut worktrees: HashMap<WorktreeId, WorktreeRecord> = HashMap::new();
+
+    for envelope in events {
+        if envelope.studio_id != studio_id {
+            continue;
+        }
+
+        match &envelope.event {
+            ControlPlaneEvent::WorktreeCreated { worktree } => {
+                worktrees.insert(worktree.id, worktree.clone());
+            }
+            ControlPlaneEvent::WorktreeAssigned {
+                worktree_id,
+                task_id,
+                agent_id,
+                run_id,
+            } => {
+                if let Some(wt) = worktrees.get_mut(worktree_id) {
+                    wt.assigned_task_id = Some(*task_id);
+                    wt.assigned_agent_id = Some(*agent_id);
+                    wt.assigned_run_id = *run_id;
+                    wt.updated_at = envelope.timestamp;
+                }
+            }
+            ControlPlaneEvent::WorktreeThreadBound {
+                worktree_id,
+                thread_id,
+            } => {
+                if let Some(wt) = worktrees.get_mut(worktree_id) {
+                    wt.bound_thread_id = Some(thread_id.clone());
+                    wt.updated_at = envelope.timestamp;
+                }
+            }
+            ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                new_state,
+                ..
+            } => {
+                if let Some(wt) = worktrees.get_mut(worktree_id) {
+                    wt.state = *new_state;
+                    wt.updated_at = envelope.timestamp;
+                }
+            }
+            ControlPlaneEvent::WorktreeChangeCaptured {
+                worktree_id,
+                patch_artifact_id,
+                head_commit,
+                ..
+            } => {
+                if let Some(wt) = worktrees.get_mut(worktree_id) {
+                    wt.patch_artifact_id = Some(*patch_artifact_id);
+                    if let Some(head) = head_commit {
+                        wt.last_captured_commit = Some(head.clone());
+                    }
+                    wt.updated_at = envelope.timestamp;
+                }
+            }
+            ControlPlaneEvent::WorktreeReleased {
+                worktree_id,
+                retained,
+                reason,
+            } => {
+                if let Some(wt) = worktrees.get_mut(worktree_id) {
+                    wt.released_at = Some(envelope.timestamp);
+                    wt.retained = *retained;
+                    wt.retained_reason = reason.clone();
+                    wt.updated_at = envelope.timestamp;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut list: Vec<WorktreeRecord> = worktrees.into_values().collect();
+    list.sort_by_key(|w| (w.created_at, w.id));
+
+    let mut active_worktrees = Vec::new();
+    let mut retained_worktrees = Vec::new();
+    let mut by_task = HashMap::new();
+    let mut by_thread = HashMap::new();
+
+    for wt in &list {
+        if wt.state.is_active() {
+            active_worktrees.push(wt.id);
+        }
+        if wt.retained || wt.state == WorktreeState::Retained {
+            retained_worktrees.push(wt.id);
+        }
+        if let Some(task_id) = wt.assigned_task_id {
+            by_task.insert(task_id, wt.id);
+        }
+        if let Some(ref thread_id) = wt.bound_thread_id {
+            by_thread.insert(thread_id.clone(), wt.id);
+        }
+    }
+
+    active_worktrees.sort();
+    retained_worktrees.sort();
+
+    WorktreeSnapshot {
+        studio_id,
+        worktrees: list,
+        active_worktrees,
+        retained_worktrees,
+        by_task,
+        by_thread,
+    }
+}
+
+/// Builds a WorktreeSnapshot from ControlPlaneState.
+pub fn build_worktree_snapshot(studio_id: StudioId, state: &ControlPlaneState) -> WorktreeSnapshot {
+    let mut list: Vec<WorktreeRecord> = state
+        .worktrees
+        .values()
+        .filter(|w| w.studio_id == studio_id)
+        .cloned()
+        .collect();
+
+    list.sort_by_key(|w| (w.created_at, w.id));
+
+    let mut active_worktrees = Vec::new();
+    let mut retained_worktrees = Vec::new();
+    let mut by_task = HashMap::new();
+    let mut by_thread = HashMap::new();
+
+    for wt in &list {
+        if wt.state.is_active() {
+            active_worktrees.push(wt.id);
+        }
+        if wt.retained || wt.state == WorktreeState::Retained {
+            retained_worktrees.push(wt.id);
+        }
+        if let Some(task_id) = wt.assigned_task_id {
+            by_task.insert(task_id, wt.id);
+        }
+        if let Some(ref thread_id) = wt.bound_thread_id {
+            by_thread.insert(thread_id.clone(), wt.id);
+        }
+    }
+
+    active_worktrees.sort();
+    retained_worktrees.sort();
+
+    WorktreeSnapshot {
+        studio_id,
+        worktrees: list,
+        active_worktrees,
+        retained_worktrees,
+        by_task,
+        by_thread,
+    }
+}
+
+/// Projects events into a TaskTimelineProjection for a specific task.
+pub fn project_task_timeline(
+    task_id: TaskId,
+    events: &[EventEnvelope],
+) -> Option<TaskTimelineProjection> {
+    let mut task_record: Option<(StudioId, TaskState, Option<AgentId>)> = None;
+    let mut items = Vec::new();
+    let mut assigned_worktree_id = None;
+    let mut bound_thread_id = None;
+    let mut artifact_ids = Vec::new();
+    let mut reconciliation_ids = Vec::new();
+
+    let mut task_runs = HashSet::new();
+    let mut task_reconciliations = HashSet::new();
+
+    for envelope in events {
+        match &envelope.event {
+            ControlPlaneEvent::TaskCreated { task } if task.id == task_id => {
+                task_record = Some((task.studio_id, task.state, task.assigned_agent_id));
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::TaskCreated,
+                    description: format!("Task created: {}", task.title),
+                    related_id: Some(task.id.to_string()),
+                });
+            }
+            ControlPlaneEvent::TaskStateChanged {
+                task_id: tid,
+                previous_state,
+                new_state,
+            } if *tid == task_id => {
+                if let Some((_, state, _)) = task_record.as_mut() {
+                    *state = *new_state;
+                }
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::TaskStateChanged,
+                    description: format!(
+                        "State transitioned from {:?} to {:?}",
+                        previous_state, new_state
+                    ),
+                    related_id: Some(tid.to_string()),
+                });
+            }
+            ControlPlaneEvent::TaskRetryScheduled {
+                task_id: tid,
+                attempt,
+                reason,
+                ..
+            } if *tid == task_id => {
+                if let Some((_, state, _)) = task_record.as_mut() {
+                    *state = TaskState::Retrying;
+                }
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::TaskRetryScheduled,
+                    description: format!("Retry attempt {} scheduled: {}", attempt, reason),
+                    related_id: Some(tid.to_string()),
+                });
+            }
+            ControlPlaneEvent::RunCreated { run } if run.task_id == task_id => {
+                task_runs.insert(run.id);
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::RunCreated,
+                    description: format!("Run {} created (attempt {})", run.id, run.attempt),
+                    related_id: Some(run.id.to_string()),
+                });
+            }
+            ControlPlaneEvent::RunStateChanged {
+                run_id,
+                previous_state,
+                new_state,
+            } if task_runs.contains(run_id) => {
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::RunStateChanged,
+                    description: format!(
+                        "Run {} transitioned from {:?} to {:?}",
+                        run_id, previous_state, new_state
+                    ),
+                    related_id: Some(run_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::WorktreeAssigned {
+                worktree_id,
+                task_id: tid,
+                ..
+            } if *tid == task_id => {
+                assigned_worktree_id = Some(*worktree_id);
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::WorktreeAssigned,
+                    description: format!("Worktree {} assigned to task", worktree_id),
+                    related_id: Some(worktree_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::WorktreeThreadBound {
+                worktree_id,
+                thread_id,
+            } if assigned_worktree_id == Some(*worktree_id) => {
+                bound_thread_id = Some(thread_id.clone());
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::WorktreeThreadBound,
+                    description: format!("Thread {} bound to worktree {}", thread_id, worktree_id),
+                    related_id: Some(thread_id.clone()),
+                });
+            }
+            ControlPlaneEvent::WorktreeChangeCaptured {
+                worktree_id,
+                patch_artifact_id,
+                files_changed,
+                ..
+            } if assigned_worktree_id == Some(*worktree_id) => {
+                if !artifact_ids.contains(patch_artifact_id) {
+                    artifact_ids.push(*patch_artifact_id);
+                }
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::WorktreeChangeCaptured,
+                    description: format!(
+                        "Captured {} changed files into patch artifact {}",
+                        files_changed, patch_artifact_id
+                    ),
+                    related_id: Some(patch_artifact_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::WorktreeReleased {
+                worktree_id,
+                retained,
+                reason,
+            } if assigned_worktree_id == Some(*worktree_id) => {
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::WorktreeReleased,
+                    description: format!(
+                        "Worktree released (retained={}{})",
+                        retained,
+                        reason
+                            .as_ref()
+                            .map(|r| format!(", reason={}", r))
+                            .unwrap_or_default()
+                    ),
+                    related_id: Some(worktree_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::ArtifactRegistered { artifact } if artifact.task_id == task_id => {
+                if !artifact_ids.contains(&artifact.id) {
+                    artifact_ids.push(artifact.id);
+                }
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::ArtifactRegistered,
+                    description: format!(
+                        "Artifact registered: {} ({:?})",
+                        artifact.logical_name, artifact.kind
+                    ),
+                    related_id: Some(artifact.id.to_string()),
+                });
+            }
+            ControlPlaneEvent::ReconciliationCreated { reconciliation }
+                if reconciliation.task_id == task_id =>
+            {
+                task_reconciliations.insert(reconciliation.id);
+                if !reconciliation_ids.contains(&reconciliation.id) {
+                    reconciliation_ids.push(reconciliation.id);
+                }
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::ReconciliationCreated,
+                    description: format!("Reconciliation {} created", reconciliation.id),
+                    related_id: Some(reconciliation.id.to_string()),
+                });
+            }
+            ControlPlaneEvent::ReconciliationStateChanged {
+                reconciliation_id,
+                previous_state,
+                new_state,
+            } if task_reconciliations.contains(reconciliation_id) => {
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::ReconciliationStateChanged,
+                    description: format!(
+                        "Reconciliation {} transitioned from {:?} to {:?}",
+                        reconciliation_id, previous_state, new_state
+                    ),
+                    related_id: Some(reconciliation_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::ReconciliationConflictDetected {
+                reconciliation_id,
+                conflicted_files,
+                reason,
+            } if task_reconciliations.contains(reconciliation_id) => {
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::ReconciliationConflictDetected,
+                    description: format!(
+                        "Reconciliation conflict in {:?}: {}",
+                        conflicted_files, reason
+                    ),
+                    related_id: Some(reconciliation_id.to_string()),
+                });
+            }
+            ControlPlaneEvent::ReconciliationApplied {
+                reconciliation_id,
+                merge_commit,
+            } if task_reconciliations.contains(reconciliation_id) => {
+                items.push(TimelineItem {
+                    timestamp: envelope.timestamp,
+                    sequence: envelope.sequence,
+                    kind: TimelineItemKind::ReconciliationApplied,
+                    description: format!(
+                        "Reconciliation applied successfully (merge commit: {:?})",
+                        merge_commit
+                    ),
+                    related_id: Some(reconciliation_id.to_string()),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let (studio_id, current_state, assigned_agent_id) = task_record?;
+
+    items.sort_by_key(|item| item.sequence);
+
+    Some(TaskTimelineProjection {
+        task_id,
+        studio_id,
+        current_state,
+        assigned_agent_id,
+        assigned_worktree_id,
+        bound_thread_id,
+        artifact_ids,
+        reconciliation_ids,
+        items,
+    })
 }
 
 /// Projects events into a RunSummary.

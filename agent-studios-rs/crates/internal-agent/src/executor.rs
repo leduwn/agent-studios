@@ -621,8 +621,9 @@ impl AgentExecutor for CodexAgentExecutor {
 
             let mut coordinator_config = (*self.config).clone();
             if let Some(ref ws) = context.workspace_path {
-                coordinator_config.cwd = AbsolutePathBuf::from_absolute_path(ws)
-                    .map_err(|e| InternalAgentError::Other(format!("invalid workspace path: {e}")))?;
+                coordinator_config.cwd = AbsolutePathBuf::from_absolute_path(ws).map_err(|e| {
+                    InternalAgentError::Other(format!("invalid workspace path: {e}"))
+                })?;
             }
             if context.agent_spec.workspace_access.is_read_only() {
                 coordinator_config

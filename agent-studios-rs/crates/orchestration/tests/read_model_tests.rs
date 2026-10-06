@@ -1,14 +1,20 @@
 use agent_studios_control_plane::engine::ControlPlaneState;
 use agent_studios_orchestration::{
-    SequenceError, SequenceTracker, build_task_graph_snapshot, project_agent_summary,
-    project_run_summary,
+    SequenceError, SequenceTracker, TimelineItemKind, build_artifact_index,
+    build_task_graph_snapshot, build_worktree_snapshot, project_agent_summary,
+    project_artifact_index, project_run_summary, project_task_timeline, project_worktree_snapshot,
 };
 use agent_studios_protocol::agent::{AgentDescriptor, AgentExecutionBudget, AgentKind, AgentState};
+use agent_studios_protocol::artifact::{ArtifactKind, ArtifactRecord};
 use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
-use agent_studios_protocol::id::{AgentId, EventId, StudioId, TaskId};
+use agent_studios_protocol::id::{
+    AgentId, ArtifactId, EventId, RunId, StudioId, TaskId, WorktreeId,
+};
+use agent_studios_protocol::reconciliation::ReconciliationRecord;
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{TaskRecord, TaskState};
+use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 use chrono::Utc;
 
 #[test]
@@ -550,4 +556,469 @@ fn test_run_summary_with_outcome_recorded() {
         Some("tool_calls limit reached")
     );
     assert_eq!(summary.error.as_deref(), Some("tool_calls limit reached"));
+}
+
+#[test]
+fn test_artifact_index_projection_and_build() {
+    let studio_id = StudioId::new();
+    let task1_id = TaskId::new();
+    let task2_id = TaskId::new();
+    let agent_id = AgentId::new();
+    let wt_id = WorktreeId::new();
+    let now = Utc::now();
+
+    let art1 = ArtifactRecord::new(
+        studio_id,
+        task1_id,
+        agent_id,
+        ArtifactKind::Patch,
+        "patch.diff",
+        Some("sha256:abc".to_string()),
+        "blobs/sha256/abc",
+        now,
+    )
+    .with_worktree_id(Some(wt_id))
+    .with_size_bytes(Some(100));
+
+    let art2 = ArtifactRecord::new(
+        studio_id,
+        task1_id,
+        agent_id,
+        ArtifactKind::Log,
+        "execution.log",
+        Some("sha256:def".to_string()),
+        "blobs/sha256/def",
+        now,
+    )
+    .with_worktree_id(Some(wt_id))
+    .with_size_bytes(Some(250));
+
+    let art3 = ArtifactRecord::new(
+        studio_id,
+        task2_id,
+        agent_id,
+        ArtifactKind::Report,
+        "summary.json",
+        Some("sha256:123".to_string()),
+        "blobs/sha256/123",
+        now,
+    )
+    .with_size_bytes(Some(500));
+
+    let events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::ArtifactRegistered {
+                artifact: art1.clone(),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::ArtifactRegistered {
+                artifact: art2.clone(),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 3,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::ArtifactRegistered {
+                artifact: art3.clone(),
+            },
+        },
+    ];
+
+    let index = project_artifact_index(studio_id, &events);
+    assert_eq!(index.artifacts.len(), 3);
+    assert_eq!(index.total_bytes, 850);
+    assert_eq!(index.artifacts_for_task(&task1_id).len(), 2);
+    assert_eq!(index.artifacts_for_task(&task2_id).len(), 1);
+    assert_eq!(index.artifacts_for_worktree(&wt_id).len(), 2);
+    assert_eq!(index.artifacts_of_kind(ArtifactKind::Patch).len(), 1);
+    assert_eq!(index.get_artifact(&art1.id), Some(&art1));
+
+    // Test build_artifact_index from ControlPlaneState
+    let mut state = ControlPlaneState::default();
+    state.artifacts.insert(art1.id, art1);
+    state.artifacts.insert(art2.id, art2);
+    state.artifacts.insert(art3.id, art3);
+
+    let state_index = build_artifact_index(studio_id, &state);
+    assert_eq!(state_index.artifacts.len(), 3);
+    assert_eq!(state_index.total_bytes, 850);
+    assert_eq!(state_index.artifacts_for_task(&task1_id).len(), 2);
+}
+
+#[test]
+fn test_worktree_snapshot_projection_and_build() {
+    let studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let now = Utc::now();
+
+    let mut wt = WorktreeRecord::new(
+        studio_id,
+        "wt_feature",
+        "/repos/main",
+        "/managed/wt_feature",
+        "commit_abc",
+        now,
+    );
+    let wt_id = wt.id;
+
+    let patch_art_id = ArtifactId::new();
+
+    let events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeCreated {
+                worktree: wt.clone(),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeAssigned {
+                worktree_id: wt_id,
+                task_id,
+                agent_id,
+                run_id: Some(run_id),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 3,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeThreadBound {
+                worktree_id: wt_id,
+                thread_id: "thread_alpha".to_string(),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 4,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id: wt_id,
+                previous_state: WorktreeState::Creating,
+                new_state: WorktreeState::InUse,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 5,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeChangeCaptured {
+                worktree_id: wt_id,
+                run_id: Some(run_id),
+                base_commit: "commit_abc".to_string(),
+                head_commit: Some("commit_def".to_string()),
+                patch_artifact_id: patch_art_id,
+                stats_artifact_id: None,
+                files_changed: 3,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 6,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeReleased {
+                worktree_id: wt_id,
+                retained: true,
+                reason: Some("Retained for inspection".to_string()),
+            },
+        },
+    ];
+
+    let snapshot = project_worktree_snapshot(studio_id, &events);
+    assert_eq!(snapshot.worktrees.len(), 1);
+    assert_eq!(snapshot.retained_worktrees, vec![wt_id]);
+    assert_eq!(snapshot.worktree_for_task(&task_id).unwrap().id, wt_id);
+    assert_eq!(
+        snapshot.worktree_for_thread("thread_alpha").unwrap().id,
+        wt_id
+    );
+
+    let projected_wt = snapshot.get_worktree(&wt_id).unwrap();
+    assert_eq!(projected_wt.patch_artifact_id, Some(patch_art_id));
+    assert!(projected_wt.retained);
+    assert_eq!(
+        projected_wt.retained_reason.as_deref(),
+        Some("Retained for inspection")
+    );
+
+    // Test build_worktree_snapshot from ControlPlaneState
+    wt.assigned_task_id = Some(task_id);
+    wt.bound_thread_id = Some("thread_alpha".to_string());
+    wt.retained = true;
+    let mut state = ControlPlaneState::default();
+    state.worktrees.insert(wt_id, wt);
+
+    let state_snapshot = build_worktree_snapshot(studio_id, &state);
+    assert_eq!(state_snapshot.worktrees.len(), 1);
+    assert_eq!(state_snapshot.retained_worktrees, vec![wt_id]);
+    assert_eq!(
+        state_snapshot.worktree_for_task(&task_id).unwrap().id,
+        wt_id
+    );
+}
+
+#[test]
+fn test_task_timeline_projection() {
+    let studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let agent_id = AgentId::new();
+    let wt_id = WorktreeId::new();
+    let art_id = ArtifactId::new();
+    let run = RunRecord::new(task_id, agent_id, 1);
+    let run_id = run.id;
+    let now = Utc::now();
+
+    let mut task = TaskRecord::new(
+        studio_id,
+        "Implement Feature X",
+        "Details",
+        None,
+        Some(agent_id),
+        vec![],
+        now,
+    );
+    task.id = task_id;
+
+    let rec = ReconciliationRecord::new(
+        studio_id,
+        wt_id,
+        task_id,
+        Some(run_id),
+        art_id,
+        "/managed/integration",
+        "commit_base",
+        now,
+    );
+    let rec_id = rec.id;
+
+    let events = vec![
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 1,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::TaskCreated { task },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 2,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeAssigned {
+                worktree_id: wt_id,
+                task_id,
+                agent_id,
+                run_id: None,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 3,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeThreadBound {
+                worktree_id: wt_id,
+                thread_id: "thread_123".to_string(),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 4,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::RunCreated { run },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 5,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::TaskStateChanged {
+                task_id,
+                previous_state: TaskState::Ready,
+                new_state: TaskState::Running,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 6,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::WorktreeChangeCaptured {
+                worktree_id: wt_id,
+                run_id: Some(run_id),
+                base_commit: "commit_base".to_string(),
+                head_commit: Some("commit_head".to_string()),
+                patch_artifact_id: art_id,
+                stats_artifact_id: None,
+                files_changed: 2,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 7,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::ReconciliationCreated {
+                reconciliation: rec,
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 8,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::ReconciliationApplied {
+                reconciliation_id: rec_id,
+                merge_commit: Some("commit_merge".to_string()),
+            },
+        },
+        EventEnvelope {
+            event_id: EventId::new(),
+            schema_version: 1,
+            sequence: 9,
+            studio_id,
+            timestamp: now,
+            event: ControlPlaneEvent::TaskStateChanged {
+                task_id,
+                previous_state: TaskState::Running,
+                new_state: TaskState::Succeeded,
+            },
+        },
+    ];
+
+    let timeline = project_task_timeline(task_id, &events).unwrap();
+    assert_eq!(timeline.task_id, task_id);
+    assert_eq!(timeline.studio_id, studio_id);
+    assert_eq!(timeline.current_state, TaskState::Succeeded);
+    assert_eq!(timeline.assigned_worktree_id, Some(wt_id));
+    assert_eq!(timeline.bound_thread_id.as_deref(), Some("thread_123"));
+    assert_eq!(timeline.artifact_ids, vec![art_id]);
+    assert_eq!(timeline.items.len(), 9);
+    assert_eq!(timeline.items[0].kind, TimelineItemKind::TaskCreated);
+    assert_eq!(timeline.items[1].kind, TimelineItemKind::WorktreeAssigned);
+    assert_eq!(
+        timeline.items[2].kind,
+        TimelineItemKind::WorktreeThreadBound
+    );
+    assert_eq!(timeline.items[3].kind, TimelineItemKind::RunCreated);
+    assert_eq!(timeline.items[4].kind, TimelineItemKind::TaskStateChanged);
+    assert_eq!(
+        timeline.items[5].kind,
+        TimelineItemKind::WorktreeChangeCaptured
+    );
+    assert_eq!(
+        timeline.items[6].kind,
+        TimelineItemKind::ReconciliationCreated
+    );
+    assert_eq!(
+        timeline.items[7].kind,
+        TimelineItemKind::ReconciliationApplied
+    );
+    assert_eq!(timeline.items[8].kind, TimelineItemKind::TaskStateChanged);
+}
+
+#[test]
+fn test_enriched_task_graph_snapshot() {
+    let studio_id = StudioId::new();
+    let mut state = ControlPlaneState::default();
+
+    let t1_id = TaskId::new();
+    let mut t1 = TaskRecord::new(
+        studio_id,
+        "Mutating Task",
+        "Desc",
+        None,
+        None,
+        vec![],
+        Utc::now(),
+    );
+    t1.id = t1_id;
+    state.task_graph.add_task(t1).unwrap();
+
+    let mut wt = WorktreeRecord::new(
+        studio_id,
+        "wt_1",
+        "/repo",
+        "/managed/wt_1",
+        "base_c",
+        Utc::now(),
+    );
+    wt.assigned_task_id = Some(t1_id);
+    let wt_id = wt.id;
+    state.worktrees.insert(wt_id, wt);
+
+    let art = ArtifactRecord::new(
+        studio_id,
+        t1_id,
+        AgentId::new(),
+        ArtifactKind::Patch,
+        "patch.diff",
+        None,
+        "location",
+        Utc::now(),
+    );
+    let art_id = art.id;
+    state.artifacts.insert(art_id, art);
+
+    let rec = ReconciliationRecord::new(
+        studio_id,
+        wt_id,
+        t1_id,
+        None,
+        art_id,
+        "/integration",
+        "base_c",
+        Utc::now(),
+    );
+    let rec_id = rec.id;
+    state.reconciliations.insert(rec_id, rec);
+
+    let snapshot = build_task_graph_snapshot(studio_id, &state);
+    assert_eq!(snapshot.task_worktrees.get(&t1_id), Some(&wt_id));
+    assert_eq!(snapshot.task_artifacts.get(&t1_id), Some(&vec![art_id]));
+    assert_eq!(
+        snapshot.task_reconciliations.get(&t1_id),
+        Some(&vec![rec_id])
+    );
 }

@@ -94,7 +94,10 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
     let cp = ControlPlane::new(clock, store);
     let (cp_handle, _task) = ControlPlaneActor::spawn(cp);
 
-    let studio = cp_handle.create_studio("Mutating E2E Studio").await.unwrap();
+    let studio = cp_handle
+        .create_studio("Mutating E2E Studio")
+        .await
+        .unwrap();
 
     let coord = InternalAgentSpec::new(AgentId::new(), "Coord", "Coordinator", dummy_model());
     let worker1 = InternalAgentSpec::new(AgentId::new(), "Worker1", "Worker", dummy_model())
@@ -163,9 +166,7 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
         let current = active_clone.fetch_add(1, Ordering::SeqCst) + 1;
         eprintln!(
             "HANDLER start: {} task={:?} active={}",
-            ctx.agent_spec.display_name,
-            ctx.task_id,
-            current
+            ctx.agent_spec.display_name, ctx.task_id, current
         );
         let mut prev_peak = peak_clone.load(Ordering::SeqCst);
         while current > prev_peak {
@@ -182,11 +183,17 @@ async fn test_parallel_mutating_tasks_with_distinct_worktrees() {
 
         let ws = ctx.workspace_path.expect("worker must have workspace_path");
         if ctx.agent_spec.display_name == "Worker1" {
-            fs::write(ws.join("feature_one.rs"), "pub fn feature_one() -> i32 { 1 }\n")
-                .expect("write feature_one");
+            fs::write(
+                ws.join("feature_one.rs"),
+                "pub fn feature_one() -> i32 { 1 }\n",
+            )
+            .expect("write feature_one");
         } else {
-            fs::write(ws.join("feature_two.rs"), "pub fn feature_two() -> i32 { 2 }\n")
-                .expect("write feature_two");
+            fs::write(
+                ws.join("feature_two.rs"),
+                "pub fn feature_two() -> i32 { 2 }\n",
+            )
+            .expect("write feature_two");
         }
 
         // Wait up to 5 seconds for peer mutating worker to also become active concurrently
