@@ -111,6 +111,10 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
         self.team_spec.max_parallel_agents
     }
 
+    pub fn executor(&self) -> &Arc<E> {
+        &self.executor
+    }
+
     /// Step 1: Boot all agents into the ControlPlane
     pub async fn boot(&self) -> Result<(), InternalAgentError> {
         self.team_spec.validate()?;

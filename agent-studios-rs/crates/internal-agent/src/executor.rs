@@ -237,6 +237,7 @@ impl std::fmt::Debug for RunningAgentState {
     }
 }
 
+#[derive(Clone)]
 pub struct CodexAgentExecutor {
     thread_manager: Arc<ThreadManager>,
     session_factory: Arc<AgentStudiosRuntimeSessionFactory>,

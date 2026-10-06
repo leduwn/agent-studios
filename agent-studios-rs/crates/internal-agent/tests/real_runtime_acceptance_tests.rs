@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,12 +8,14 @@ use agent_studios_control_plane::error::ControlPlaneError;
 use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_internal_agent::{
     AgentBudgetTracker, AgentExecutionBudget, AgentExecutionContext, AgentExecutor,
-    AgentRuntimeExtensionContext, AgentStudiosCodexRuntimeFactory, BudgetScopeId,
-    CodexAgentExecutor, ControlPlaneActor, ControlPlaneHandle, InternalAgentError,
-    InternalAgentSpec, build_agent_studios_extension_builder,
+    AgentRuntimeExtensionContext, AgentStudiosCodexRuntimeFactory, AgentStudiosSupervisor,
+    BudgetScopeId, CodexAgentExecutor, ControlPlaneActor, ControlPlaneHandle, FailurePolicy,
+    InternalAgentError, InternalAgentSpec, InternalTeamSpec, WorkspaceAccessMode,
+    WorkspacePolicyArbitrator, build_agent_studios_extension_builder,
 };
 use agent_studios_orchestration::projection::project_agent_summary;
 use agent_studios_protocol::agent::{AgentKind, AgentState};
+use agent_studios_protocol::cancellation::CancellationScope;
 use agent_studios_protocol::error::TransitionError;
 use agent_studios_protocol::event::ControlPlaneEvent;
 use agent_studios_protocol::id::AgentId;
@@ -40,12 +42,15 @@ use codex_extension_api::{
     ToolLifecycleContributor, ToolLifecycleFuture, ToolName,
 };
 use codex_login::{AuthManager, CodexAuth};
-use codex_protocol::protocol::{EventMsg, SessionSource, SubAgentSource};
+use codex_protocol::protocol::{AgentStatus, EventMsg, SessionSource, SubAgentSource};
 use codex_protocol::user_input::UserInput;
 use codex_tools::{
     JsonToolOutput, ResponsesApiTool, ToolExecutor, ToolExecutorFuture, ToolExposure, ToolOutput,
     ToolSpec, parse_tool_input_schema,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1775,6 +1780,664 @@ fn late_completion_cannot_mark_cancelled_run_successful() {
             cp_state.task_graph.get_task(task_id).unwrap().state,
             TaskState::Cancelled,
             "Task state must remain Cancelled"
+        );
+    });
+}
+
+struct BodyContainsMatcher(&'static str);
+
+impl wiremock::Match for BodyContainsMatcher {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        let body_str = String::from_utf8_lossy(&request.body);
+        body_str.contains(self.0)
+    }
+}
+
+#[test]
+fn real_supervisor_failfast_interrupts_inflight_codex_sibling() {
+    run_with_large_stack(async {
+        // 1. Set up Coordinator WireMock server
+        let coord_server = MockServer::start().await;
+
+        let plan_decision = serde_json::json!({
+            "action": "plan",
+            "tasks": [
+                {
+                    "task_key": "task-a",
+                    "title": "Task A for Worker A",
+                    "description": "Failing task",
+                    "assigned_alias": "worker-a",
+                    "depends_on": [],
+                    "workspace_access": "read_only",
+                    "priority": 1
+                },
+                {
+                    "task_key": "task-b",
+                    "title": "Task B for Worker B",
+                    "description": "Slow task",
+                    "assigned_alias": "worker-b",
+                    "depends_on": [],
+                    "workspace_access": "read_only",
+                    "priority": 1
+                }
+            ]
+        });
+        let plan_str = serde_json::to_string(&plan_decision).unwrap();
+        let escaped_plan = plan_str.replace('"', "\\\"");
+
+        let coord_plan_sse = format!(
+            "data: {{\"id\":\"chat-coord\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"id\":\"chat-coord\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":10,\"total_tokens\":20}}}}\n\n\
+             data: [DONE]\n\n",
+            escaped_plan
+        );
+
+        let coord_review_sse = "data: {\"id\":\"chat-coord-review\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Final review: FailFast triggered cancellation of Worker B after Worker A failed.\"},\"finish_reason\":null}]}\n\n\
+                                data: {\"id\":\"chat-coord-review\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":10,\"total_tokens\":20}}\n\n\
+                                data: [DONE]\n\n";
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("Available team members:"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(coord_plan_sse),
+            )
+            .mount(&coord_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(BodyContainsMatcher("Review the executed tasks"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(coord_review_sse),
+            )
+            .mount(&coord_server)
+            .await;
+
+        // 2. Set up Worker B custom TCP SSE server (stays open, detects client disconnect)
+        let worker_b_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker_b_addr = worker_b_listener.local_addr().unwrap();
+        let worker_b_url = format!("http://{}", worker_b_addr);
+
+        let b_request_started_flag = Arc::new(AtomicBool::new(false));
+        let b_request_started_notify = Arc::new(Notify::new());
+        let b_client_disconnected_flag = Arc::new(AtomicBool::new(false));
+        let b_client_disconnected_notify = Arc::new(Notify::new());
+
+        let b_started_flag_clone = Arc::clone(&b_request_started_flag);
+        let b_started_notify_clone = Arc::clone(&b_request_started_notify);
+        let b_disconnected_flag_clone = Arc::clone(&b_client_disconnected_flag);
+        let b_disconnected_notify_clone = Arc::clone(&b_client_disconnected_notify);
+
+        let _worker_b_server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = worker_b_listener.accept().await {
+                let mut req_buf = Vec::new();
+                let mut temp_buf = [0u8; 1024];
+                while !req_buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = match socket.read(&mut temp_buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    req_buf.extend_from_slice(&temp_buf[..n]);
+                }
+
+                // Drain request body if Content-Length present
+                let header_str = String::from_utf8_lossy(&req_buf);
+                let mut content_length = 0;
+                for line in header_str.lines() {
+                    if line.to_lowercase().starts_with("content-length:") {
+                        content_length = line
+                            .split(':')
+                            .nth(1)
+                            .and_then(|val| val.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(header_end) = req_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let body_start = header_end + 4;
+                    let body_already_read = req_buf.len() - body_start;
+                    let mut remaining = content_length.saturating_sub(body_already_read);
+                    while remaining > 0 {
+                        let to_read = remaining.min(temp_buf.len());
+                        match socket.read(&mut temp_buf[..to_read]).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => remaining = remaining.saturating_sub(n),
+                        }
+                    }
+                }
+
+                b_started_flag_clone.store(true, Ordering::SeqCst);
+                b_started_notify_clone.notify_waiters();
+
+                let partial_sse = "HTTP/1.1 200 OK\r\n\
+                                   Content-Type: text/event-stream\r\n\
+                                   Cache-Control: no-cache\r\n\
+                                   Connection: close\r\n\
+                                   \r\n\
+                                   data: {\"id\":\"chat-b\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Worker B working chunk\"},\"finish_reason\":null}]}\n\n";
+
+                if socket.write_all(partial_sse.as_bytes()).await.is_ok() {
+                    let _ = socket.flush().await;
+                }
+
+                // Wait for client to disconnect upon cancellation (never send [DONE])
+                loop {
+                    match socket.read(&mut temp_buf).await {
+                        Ok(0) | Err(_) => {
+                            b_disconnected_flag_clone.store(true, Ordering::SeqCst);
+                            b_disconnected_notify_clone.notify_waiters();
+                            break;
+                        }
+                        Ok(_) => {}
+                    }
+                }
+            }
+        });
+
+        // 3. Set up Worker A custom TCP server (waits for allow_failure, returns HTTP 400 Bad Request)
+        let worker_a_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker_a_addr = worker_a_listener.local_addr().unwrap();
+        let worker_a_url = format!("http://{}", worker_a_addr);
+
+        let a_allow_failure_flag = Arc::new(AtomicBool::new(false));
+        let a_allow_failure_notify = Arc::new(Notify::new());
+
+        let a_allow_flag_clone = Arc::clone(&a_allow_failure_flag);
+        let a_allow_notify_clone = Arc::clone(&a_allow_failure_notify);
+
+        let _worker_a_server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = worker_a_listener.accept().await {
+                let mut req_buf = Vec::new();
+                let mut temp_buf = [0u8; 1024];
+                while !req_buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = match socket.read(&mut temp_buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => n,
+                    };
+                    req_buf.extend_from_slice(&temp_buf[..n]);
+                }
+
+                // Drain request body if Content-Length present
+                let header_str = String::from_utf8_lossy(&req_buf);
+                let mut content_length = 0;
+                for line in header_str.lines() {
+                    if line.to_lowercase().starts_with("content-length:") {
+                        content_length = line
+                            .split(':')
+                            .nth(1)
+                            .and_then(|val| val.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                    }
+                }
+                if let Some(header_end) = req_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let body_start = header_end + 4;
+                    let body_already_read = req_buf.len() - body_start;
+                    let mut remaining = content_length.saturating_sub(body_already_read);
+                    while remaining > 0 {
+                        let to_read = remaining.min(temp_buf.len());
+                        match socket.read(&mut temp_buf[..to_read]).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => remaining = remaining.saturating_sub(n),
+                        }
+                    }
+                }
+
+                // Wait until Worker B is verified running
+                while !a_allow_flag_clone.load(Ordering::SeqCst) {
+                    a_allow_notify_clone.notified().await;
+                }
+
+                let err_body = "{\"error\":{\"message\":\"Simulated deterministic failure for Worker A\",\"type\":\"invalid_request_error\"}}";
+                let err_resp = format!(
+                    "HTTP/1.1 400 Bad Request\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    err_body.len(),
+                    err_body
+                );
+
+                if socket.write_all(err_resp.as_bytes()).await.is_ok() {
+                    let _ = socket.flush().await;
+                }
+            }
+        });
+
+        // 4. Provider Catalog & Models
+        let mut catalog = ProviderCatalog::new();
+        let secret_resolver = Arc::new(
+            InMemorySecretResolver::new()
+                .with_env_secret("COORD_KEY", "coord-secret")
+                .with_env_secret("WORKER_A_KEY", "worker-a-secret")
+                .with_env_secret("WORKER_B_KEY", "worker-b-secret"),
+        );
+
+        let coord_inst_id = register_provider_and_instance(
+            &mut catalog,
+            "provider-coord",
+            "Coord Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &coord_server.uri(),
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "COORD_KEY".to_string(),
+                },
+            },
+        );
+        let coord_model_id = ModelId::new("coord-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    coord_inst_id,
+                    coord_model_id.clone(),
+                    "Coord Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let worker_a_inst_id = register_provider_and_instance(
+            &mut catalog,
+            "provider-worker-a",
+            "Worker A Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &worker_a_url,
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "WORKER_A_KEY".to_string(),
+                },
+            },
+        );
+        let worker_a_model_id = ModelId::new("worker-a-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    worker_a_inst_id,
+                    worker_a_model_id.clone(),
+                    "Worker A Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let worker_b_inst_id = register_provider_and_instance(
+            &mut catalog,
+            "provider-worker-b",
+            "Worker B Provider",
+            ProtocolFamily::OpenAiChatCompletions,
+            &worker_b_url,
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "WORKER_B_KEY".to_string(),
+                },
+            },
+        );
+        let worker_b_model_id = ModelId::new("worker-b-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    worker_b_inst_id,
+                    worker_b_model_id.clone(),
+                    "Worker B Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let catalog = Arc::new(catalog);
+        let continuation_manager = Arc::new(ContinuationManager::new());
+        let factory = Arc::new(AgentStudiosRuntimeSessionFactory::new(
+            catalog,
+            secret_resolver,
+            continuation_manager,
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (manager, base_config) = create_test_thread_manager(temp_dir.path()).await;
+        let manager = Arc::new(manager);
+        let (cp_handle, _actor_task) = create_test_actor();
+
+        let studio = cp_handle
+            .create_studio("failfast-e2e-studio")
+            .await
+            .unwrap();
+        let studio_id = studio.id;
+
+        let coord_agent_id = AgentId::new();
+        let worker_a_id = AgentId::new();
+        let worker_b_id = AgentId::new();
+
+        let coord_spec = InternalAgentSpec::new(
+            coord_agent_id,
+            "Coordinator",
+            "coordinator",
+            ModelRef::new(coord_inst_id, coord_model_id),
+        );
+
+        let worker_a_spec = InternalAgentSpec::new(
+            worker_a_id,
+            "Worker A",
+            "worker",
+            ModelRef::new(worker_a_inst_id, worker_a_model_id),
+        )
+        .with_workspace_access(WorkspaceAccessMode::ReadOnly);
+
+        let worker_b_spec = InternalAgentSpec::new(
+            worker_b_id,
+            "Worker B",
+            "worker",
+            ModelRef::new(worker_b_inst_id, worker_b_model_id),
+        )
+        .with_workspace_access(WorkspaceAccessMode::ReadOnly);
+
+        let team_spec = InternalTeamSpec::new(studio_id, "failfast-team", coord_spec)
+            .add_agent("worker-a", worker_a_spec)
+            .unwrap()
+            .add_agent("worker-b", worker_b_spec)
+            .unwrap()
+            .with_max_parallel_agents(2);
+
+        let executor = CodexAgentExecutor::try_new(
+            factory,
+            Arc::clone(&manager),
+            Arc::new(base_config),
+            cp_handle.clone(),
+        )
+        .unwrap();
+
+        let supervisor = AgentStudiosSupervisor::new(
+            cp_handle.clone(),
+            team_spec,
+            WorkspacePolicyArbitrator::default(),
+            executor.clone(),
+        )
+        .with_failure_policy(FailurePolicy::FailFast);
+
+        // 5. Run supervisor in background task
+        let sup = Arc::new(supervisor);
+        let sup_clone = Arc::clone(&sup);
+        let supervisor_run_task =
+            tokio::spawn(async move { sup_clone.run("Parallel FailFast Workflow").await });
+
+        // 6. Deterministic synchronization:
+        // Wait for Worker B's HTTP request to start
+        let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while !b_request_started_flag.load(Ordering::SeqCst) {
+            if tokio::time::Instant::now() >= wait_deadline {
+                panic!("Worker B HTTP request failed to start before deadline");
+            }
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                b_request_started_notify.notified(),
+            )
+            .await;
+        }
+
+        // Wait for Worker B run in ControlPlane to reach Running
+        let mut run_b_id_opt = None;
+        let mut task_b_id_opt = None;
+        while tokio::time::Instant::now() < wait_deadline {
+            let cp_state = cp_handle.get_state().await.unwrap();
+            if let Some(run_b) = cp_state
+                .runs
+                .values()
+                .find(|r| r.agent_id == worker_b_id && r.state == RunState::Running)
+            {
+                run_b_id_opt = Some(run_b.id);
+                task_b_id_opt = Some(run_b.task_id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let run_b_id = run_b_id_opt.expect("Worker B run must be Running in ControlPlane");
+        let task_b_id = task_b_id_opt.expect("Worker B task must exist");
+
+        // Confirm Worker B Codex thread is AgentStatus::Running
+        let (_worker_b_thread_id, worker_b_thread) = {
+            let mut th = None;
+            while tokio::time::Instant::now() < wait_deadline {
+                let running = executor.running_agents();
+                let guard = running.read().await;
+                let maybe_thread_id = guard.get(&worker_b_id).map(|s| s.thread_id);
+                drop(guard);
+                let maybe_thread = match maybe_thread_id {
+                    Some(tid) => manager
+                        .get_thread(tid)
+                        .await
+                        .ok()
+                        .map(|thread| (tid, thread)),
+                    None => None,
+                };
+                if let Some(pair) = maybe_thread {
+                    th = Some(pair);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            th.expect("Worker B live Codex thread must be registered")
+        };
+
+        let b_status_running = worker_b_thread.agent_status().await;
+        assert_eq!(
+            b_status_running,
+            AgentStatus::Running,
+            "Worker B Codex thread must be Running"
+        );
+
+        // Worker B is confirmed in-flight and running. Now allow Worker A failure!
+        a_allow_failure_flag.store(true, Ordering::SeqCst);
+        a_allow_failure_notify.notify_waiters();
+
+        // Supervisor observes Worker A failure -> FailFast triggers cancellation of Worker B -> Worker B transport disconnects
+        let supervisor_summary = tokio::time::timeout(Duration::from_secs(20), supervisor_run_task)
+            .await
+            .expect("Supervisor run timed out")
+            .expect("Supervisor task panicked")
+            .expect("Supervisor run returned Err");
+
+        assert_eq!(supervisor_summary.failed_tasks, 1);
+        assert_eq!(supervisor_summary.cancelled_tasks, 1);
+
+        // Wait for Worker B client_disconnected signal
+        while !b_client_disconnected_flag.load(Ordering::SeqCst) {
+            if tokio::time::Instant::now() >= wait_deadline {
+                panic!("Worker B client failed to disconnect before deadline");
+            }
+            let _ = tokio::time::timeout(
+                Duration::from_millis(50),
+                b_client_disconnected_notify.notified(),
+            )
+            .await;
+        }
+        assert!(
+            b_client_disconnected_flag.load(Ordering::SeqCst),
+            "Worker B transport must disconnect upon FailFast cancellation"
+        );
+
+        // 7. Validate Worker B Codex thread leaves AgentStatus::Running
+        let b_status_after = worker_b_thread.agent_status().await;
+        assert_ne!(
+            b_status_after,
+            AgentStatus::Running,
+            "Worker B Codex thread must leave AgentStatus::Running after cancellation"
+        );
+
+        // 8. Find Worker A run_id and task_id
+        let cp_state = cp_handle.get_state().await.unwrap();
+        let run_a = cp_state
+            .runs
+            .values()
+            .find(|r| r.agent_id == worker_a_id)
+            .expect("Worker A run must exist");
+        let run_a_id = run_a.id;
+        let task_a_id = run_a.task_id;
+
+        // 9. Validate event ordering in durable ControlPlane stream:
+        // Worker B Run Running < Worker A Run Failed < CancellationRequested < Worker B Run Cancelled
+        let (events, _) = cp_handle.subscribe_events(studio_id, 0).await.unwrap();
+
+        let seq_b_running = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.event,
+                    ControlPlaneEvent::RunStateChanged {
+                        run_id,
+                        new_state: RunState::Running,
+                        ..
+                    } if *run_id == run_b_id
+                )
+            })
+            .map(|e| e.sequence)
+            .expect("Worker B Run Running event must exist in event stream");
+
+        let seq_a_failed = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.event,
+                    ControlPlaneEvent::RunStateChanged {
+                        run_id,
+                        new_state: RunState::Failed,
+                        ..
+                    } if *run_id == run_a_id
+                )
+            })
+            .map(|e| e.sequence)
+            .expect("Worker A Run Failed event must exist in event stream");
+
+        let seq_cancellation_requested = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.event,
+                    ControlPlaneEvent::CancellationRequested { scope, .. }
+                    if *scope == CancellationScope::Studio(studio_id)
+                )
+            })
+            .map(|e| e.sequence)
+            .expect("CancellationRequested event must exist in event stream");
+
+        let seq_b_cancelled = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.event,
+                    ControlPlaneEvent::RunStateChanged {
+                        run_id,
+                        new_state: RunState::Cancelled,
+                        ..
+                    } if *run_id == run_b_id
+                )
+            })
+            .map(|e| e.sequence)
+            .expect("Worker B Run Cancelled event must exist in event stream");
+
+        assert!(
+            seq_b_running < seq_a_failed,
+            "Expected seq(Run B Running) < seq(Run A Failed), got {seq_b_running} >= {seq_a_failed}"
+        );
+        assert!(
+            seq_a_failed < seq_cancellation_requested,
+            "Expected seq(Run A Failed) < seq(CancellationRequested), got {seq_a_failed} >= {seq_cancellation_requested}"
+        );
+        assert!(
+            seq_cancellation_requested < seq_b_cancelled,
+            "Expected seq(CancellationRequested) < seq(Run B Cancelled), got {seq_cancellation_requested} >= {seq_b_cancelled}"
+        );
+
+        // 10. Validate final states: Worker A task/run Failed, Worker B task/run Cancelled, Worker B agent Idle, Coordinator agent Idle
+        assert_eq!(
+            cp_state.runs.get(&run_a_id).unwrap().state,
+            RunState::Failed,
+            "Worker A run must be Failed"
+        );
+        assert_eq!(
+            cp_state.task_graph.get_task(task_a_id).unwrap().state,
+            TaskState::Failed,
+            "Worker A task must be Failed"
+        );
+        assert_eq!(
+            cp_state.runs.get(&run_b_id).unwrap().state,
+            RunState::Cancelled,
+            "Worker B run must be Cancelled"
+        );
+        assert_eq!(
+            cp_state.task_graph.get_task(task_b_id).unwrap().state,
+            TaskState::Cancelled,
+            "Worker B task must be Cancelled"
+        );
+        assert_eq!(
+            cp_state.agents.get(&worker_b_id).unwrap().state,
+            AgentState::Idle,
+            "Worker B agent must be Idle"
+        );
+        assert_eq!(
+            cp_state.agents.get(&coord_agent_id).unwrap().state,
+            AgentState::Idle,
+            "Coordinator agent must be Idle"
+        );
+
+        // 11. Validate late-completion safety: attempting transition_run_state / transition_task_state fails
+        let late_run_res = cp_handle
+            .transition_run_state(run_b_id, RunState::Succeeded)
+            .await;
+        assert!(
+            matches!(
+                late_run_res,
+                Err(InternalAgentError::ControlPlane(
+                    ControlPlaneError::Transition(TransitionError::TerminalRunTransition {
+                        state: RunState::Cancelled,
+                    })
+                ))
+            ),
+            "Expected TerminalRunTransition error for late run completion: {:?}",
+            late_run_res
+        );
+
+        let late_task_res = cp_handle
+            .transition_task_state(task_b_id, TaskState::Succeeded)
+            .await;
+        assert!(
+            matches!(
+                late_task_res,
+                Err(InternalAgentError::ControlPlane(
+                    ControlPlaneError::Transition(TransitionError::TerminalTaskTransition {
+                        state: TaskState::Cancelled,
+                    })
+                ))
+            ),
+            "Expected TerminalTaskTransition error for late task completion: {:?}",
+            late_task_res
+        );
+
+        let verified_cp_state = cp_handle.get_state().await.unwrap();
+        assert_eq!(
+            verified_cp_state.runs.get(&run_b_id).unwrap().state,
+            RunState::Cancelled
+        );
+        assert_eq!(
+            verified_cp_state
+                .task_graph
+                .get_task(task_b_id)
+                .unwrap()
+                .state,
+            TaskState::Cancelled
         );
     });
 }
