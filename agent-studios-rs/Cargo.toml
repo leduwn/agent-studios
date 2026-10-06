@@ -10,6 +10,7 @@ members = [
     "crates/runtime-session",
     "crates/internal-agent",
     "crates/orchestration",
+    "crates/workspace",
 ]
 
 [workspace.package]
