@@ -1651,6 +1651,8 @@ fn real_failfast_interrupts_slow_codex_worker() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: None,
+            worktree_id: None,
+            workspace_path: None,
         };
 
         // Spawn agent execution in background task

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use agent_studios_protocol::agent::AgentState;
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
 use agent_studios_runtime_session::AgentStudiosRuntimeSessionFactory;
+use agent_studios_workspace::WorkspaceOrchestrator;
 use async_trait::async_trait;
 use codex_config::Constrained;
 use codex_core::config::{Config, Permissions};
@@ -19,6 +21,7 @@ use codex_protocol::protocol::{
     AskForApproval, EventMsg, Op, SandboxPolicy, SessionSource, SubAgentSource,
 };
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio::sync::RwLock;
 
 use crate::budget::{AgentBudgetTracker, BudgetScopeId};
@@ -37,6 +40,8 @@ pub struct AgentExecutionContext {
     pub prompt: String,
     pub budget: AgentExecutionBudget,
     pub output_schema: Option<serde_json::Value>,
+    pub worktree_id: Option<WorktreeId>,
+    pub workspace_path: Option<PathBuf>,
 }
 
 impl AgentExecutionContext {
@@ -55,6 +60,8 @@ impl AgentExecutionContext {
             prompt: prompt.into(),
             budget,
             output_schema: None,
+            worktree_id: None,
+            workspace_path: None,
         }
     }
 
@@ -75,6 +82,16 @@ impl AgentExecutionContext {
 
     pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
         self.output_schema = Some(schema);
+        self
+    }
+
+    pub fn with_worktree_id(mut self, worktree_id: Option<WorktreeId>) -> Self {
+        self.worktree_id = worktree_id;
+        self
+    }
+
+    pub fn with_workspace_path(mut self, workspace_path: Option<PathBuf>) -> Self {
+        self.workspace_path = workspace_path;
         self
     }
 }
@@ -175,7 +192,8 @@ impl AgentExecutor for MockAgentExecutor {
             .unwrap()
             .push(context.clone());
 
-        if let Some(ref handler) = *self.custom_handler.lock().unwrap() {
+        let maybe_handler = self.custom_handler.lock().unwrap().clone();
+        if let Some(handler) = maybe_handler {
             return handler(context);
         }
 
@@ -224,6 +242,8 @@ pub struct RunningAgentState {
     pub parent_agent_id: Option<AgentId>,
     pub extension_context: Arc<AgentRuntimeExtensionContext>,
     pub budget_tracker: Arc<AgentBudgetTracker>,
+    pub bound_workspace: Option<PathBuf>,
+    pub bound_worktree_id: Option<WorktreeId>,
 }
 
 impl std::fmt::Debug for RunningAgentState {
@@ -233,6 +253,8 @@ impl std::fmt::Debug for RunningAgentState {
             .field("active_turn", &self.active_turn.load(Ordering::Relaxed))
             .field("current_run_id", &self.current_run_id)
             .field("parent_agent_id", &self.parent_agent_id)
+            .field("bound_workspace", &self.bound_workspace)
+            .field("bound_worktree_id", &self.bound_worktree_id)
             .finish()
     }
 }
@@ -245,6 +267,7 @@ pub struct CodexAgentExecutor {
     control_plane: ControlPlaneHandle,
     running_agents: Arc<RwLock<HashMap<AgentId, RunningAgentState>>>,
     coordinator_agent_id: Arc<RwLock<Option<AgentId>>>,
+    workspace_orchestrator: Option<Arc<WorkspaceOrchestrator>>,
 }
 
 impl CodexAgentExecutor {
@@ -261,7 +284,17 @@ impl CodexAgentExecutor {
             control_plane,
             running_agents: Arc::new(RwLock::new(HashMap::new())),
             coordinator_agent_id: Arc::new(RwLock::new(None)),
+            workspace_orchestrator: None,
         })
+    }
+
+    pub fn with_workspace_orchestrator(mut self, orchestrator: Arc<WorkspaceOrchestrator>) -> Self {
+        self.workspace_orchestrator = Some(orchestrator);
+        self
+    }
+
+    pub fn workspace_orchestrator(&self) -> Option<&Arc<WorkspaceOrchestrator>> {
+        self.workspace_orchestrator.as_ref()
     }
 
     pub fn validate_agent_spec(&self, spec: &InternalAgentSpec) -> Result<(), InternalAgentError> {
@@ -440,110 +473,121 @@ impl AgentExecutor for CodexAgentExecutor {
         };
 
         if let Some(mut state) = existing {
-            let tracker = if state.parent_agent_id.is_none() {
-                Arc::clone(&state.budget_tracker)
-            } else {
-                let scope = context
-                    .run_id
-                    .map(BudgetScopeId::Run)
-                    .unwrap_or_else(|| BudgetScopeId::Coordinator(context.agent_spec.agent_id));
-                Arc::new(AgentBudgetTracker::new_with_scope(
-                    scope,
-                    context.agent_spec.agent_id,
-                    context.budget.clone(),
-                ))
-            };
+            if state.bound_workspace == context.workspace_path {
+                let tracker = if state.parent_agent_id.is_none() {
+                    Arc::clone(&state.budget_tracker)
+                } else {
+                    let scope = context
+                        .run_id
+                        .map(BudgetScopeId::Run)
+                        .unwrap_or_else(|| BudgetScopeId::Coordinator(context.agent_spec.agent_id));
+                    Arc::new(AgentBudgetTracker::new_with_scope(
+                        scope,
+                        context.agent_spec.agent_id,
+                        context.budget.clone(),
+                    ))
+                };
 
-            state.extension_context.set_task_and_run(
-                context.task_id,
-                context.run_id,
-                Arc::clone(&tracker),
-            );
-            state.budget_tracker = Arc::clone(&tracker);
-            state.current_run_id = context.run_id;
-            state.active_turn.store(true, Ordering::SeqCst);
+                state.extension_context.set_task_and_run(
+                    context.task_id,
+                    context.run_id,
+                    Arc::clone(&tracker),
+                );
+                state.budget_tracker = Arc::clone(&tracker);
+                state.current_run_id = context.run_id;
+                state.active_turn.store(true, Ordering::SeqCst);
 
-            {
-                let mut guard = self.running_agents.write().await;
-                guard.insert(context.agent_spec.agent_id, state.clone());
-            }
+                {
+                    let mut guard = self.running_agents.write().await;
+                    guard.insert(context.agent_spec.agent_id, state.clone());
+                }
 
-            tracker.check_wall_clock()?;
-            if let Err(e) = tracker.reserve_turn() {
+                tracker.check_wall_clock()?;
+                if let Err(e) = tracker.reserve_turn() {
+                    let _ = self
+                        .control_plane
+                        .record_budget_exceeded(
+                            context.studio_id,
+                            context.agent_spec.agent_id,
+                            context.run_id,
+                            "turns".to_string(),
+                            context.budget.max_turns.unwrap_or(0) as u64,
+                            tracker.turns_used() as u64 + 1,
+                        )
+                        .await;
+                    return Err(e);
+                }
+
                 let _ = self
                     .control_plane
-                    .record_budget_exceeded(
-                        context.studio_id,
-                        context.agent_spec.agent_id,
+                    .transition_agent_state(context.agent_spec.agent_id, AgentState::Busy)
+                    .await;
+
+                let mut start_options = TurnStartOptions::default();
+                if let Some(schema) = context.output_schema.clone() {
+                    start_options.final_output_json_schema = Some(schema);
+                }
+
+                let resume_cfg = (*self.config).clone();
+                let send_request = SendRequest {
+                    caller: state.thread_id,
+                    target: AgentTarget::Id(state.thread_id),
+                    resume_config: resume_cfg,
+                    input: AgentInput::UserInput(vec![UserInput::Text {
+                        text: context.prompt.clone(),
+                        text_elements: vec![],
+                    }]),
+                    start_options,
+                };
+
+                if let Err(e) = state.agent_control.send(send_request).await {
+                    tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    return Err(InternalAgentError::ExecutionFailed {
+                        agent_id: context.agent_spec.agent_id,
+                        error: format!("Failed to send input to agent: {e}"),
+                    });
+                }
+                tracker.commit_turn();
+
+                let drain_res = self
+                    .drain_events(
+                        &state.thread,
+                        &state.active_turn,
+                        &tracker,
                         context.run_id,
-                        "turns".to_string(),
-                        context.budget.max_turns.unwrap_or(0) as u64,
-                        tracker.turns_used() as u64 + 1,
+                        context.agent_spec.agent_id,
+                        context.studio_id,
                     )
                     .await;
-                return Err(e);
-            }
 
-            let _ = self
-                .control_plane
-                .transition_agent_state(context.agent_spec.agent_id, AgentState::Busy)
-                .await;
-
-            let mut start_options = TurnStartOptions::default();
-            if let Some(schema) = context.output_schema.clone() {
-                start_options.final_output_json_schema = Some(schema);
-            }
-
-            let resume_cfg = (*self.config).clone();
-            let send_request = SendRequest {
-                caller: state.thread_id,
-                target: AgentTarget::Id(state.thread_id),
-                resume_config: resume_cfg,
-                input: AgentInput::UserInput(vec![UserInput::Text {
-                    text: context.prompt.clone(),
-                    text_elements: vec![],
-                }]),
-                start_options,
-            };
-
-            if let Err(e) = state.agent_control.send(send_request).await {
-                tracker.rollback_turn();
                 let _ = self
                     .control_plane
                     .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
                     .await;
-                return Err(InternalAgentError::ExecutionFailed {
-                    agent_id: context.agent_spec.agent_id,
-                    error: format!("Failed to send input to agent: {e}"),
+
+                let (output, turns, tools, success) = drain_res?;
+                let elapsed = start.elapsed().as_secs();
+                return Ok(AgentExecutionResult {
+                    output,
+                    turns_used: turns,
+                    tool_calls_used: tools,
+                    duration_secs: elapsed,
+                    success,
                 });
+            } else {
+                tracing::info!(
+                    agent_id = %context.agent_spec.agent_id,
+                    old_ws = ?state.bound_workspace,
+                    new_ws = ?context.workspace_path,
+                    "Retiring worker due to workspace change (non-teleporting invariant)"
+                );
+                let mut guard = self.running_agents.write().await;
+                guard.remove(&context.agent_spec.agent_id);
             }
-            tracker.commit_turn();
-
-            let drain_res = self
-                .drain_events(
-                    &state.thread,
-                    &state.active_turn,
-                    &tracker,
-                    context.run_id,
-                    context.agent_spec.agent_id,
-                    context.studio_id,
-                )
-                .await;
-
-            let _ = self
-                .control_plane
-                .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
-                .await;
-
-            let (output, turns, tools, success) = drain_res?;
-            let elapsed = start.elapsed().as_secs();
-            return Ok(AgentExecutionResult {
-                output,
-                turns_used: turns,
-                tool_calls_used: tools,
-                duration_secs: elapsed,
-                success,
-            });
         }
 
         let is_coordinator = context.parent_agent_id.is_none();
@@ -576,6 +620,10 @@ impl AgentExecutor for CodexAgentExecutor {
                 .await;
 
             let mut coordinator_config = (*self.config).clone();
+            if let Some(ref ws) = context.workspace_path {
+                coordinator_config.cwd = AbsolutePathBuf::from_absolute_path(ws)
+                    .map_err(|e| InternalAgentError::Other(format!("invalid workspace path: {e}")))?;
+            }
             if context.agent_spec.workspace_access.is_read_only() {
                 coordinator_config
                     .set_legacy_sandbox_policy(SandboxPolicy::ReadOnly {
@@ -630,6 +678,20 @@ impl AgentExecutor for CodexAgentExecutor {
             let agent_control = thread.agent_control();
             let active_turn = Arc::new(AtomicBool::new(true));
 
+            if let (Some(orchestrator), Some(ws)) =
+                (&self.workspace_orchestrator, &context.workspace_path)
+            {
+                let _ = orchestrator
+                    .bind_thread_async(ws.clone(), thread_id.to_string())
+                    .await;
+            }
+            if let Some(wt_id) = context.worktree_id {
+                let _ = self
+                    .control_plane
+                    .bind_worktree_thread(wt_id, thread_id.to_string())
+                    .await;
+            }
+
             let state = RunningAgentState {
                 thread_id,
                 thread: Arc::clone(&thread),
@@ -639,6 +701,8 @@ impl AgentExecutor for CodexAgentExecutor {
                 parent_agent_id: None,
                 extension_context: Arc::clone(&ext_ctx),
                 budget_tracker: Arc::clone(&tracker),
+                bound_workspace: context.workspace_path.clone(),
+                bound_worktree_id: context.worktree_id,
             };
 
             {
@@ -776,6 +840,10 @@ impl AgentExecutor for CodexAgentExecutor {
         let mut child_config = (*self.config).clone();
         child_config.model_provider_id = prepared_session.model_provider_id().to_string();
         child_config.model = Some(prepared_session.selected_model().to_string());
+        if let Some(ref ws) = context.workspace_path {
+            child_config.cwd = AbsolutePathBuf::from_absolute_path(ws)
+                .map_err(|e| InternalAgentError::Other(format!("invalid workspace path: {e}")))?;
+        }
         if context.agent_spec.workspace_access.is_read_only() {
             child_config
                 .set_legacy_sandbox_policy(SandboxPolicy::ReadOnly {
@@ -886,6 +954,20 @@ impl AgentExecutor for CodexAgentExecutor {
         let child_control = child_thread.agent_control();
         let active_turn = Arc::new(AtomicBool::new(true));
 
+        if let (Some(orchestrator), Some(ws)) =
+            (&self.workspace_orchestrator, &context.workspace_path)
+        {
+            let _ = orchestrator
+                .bind_thread_async(ws.clone(), live_agent.thread_id.to_string())
+                .await;
+        }
+        if let Some(wt_id) = context.worktree_id {
+            let _ = self
+                .control_plane
+                .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
+                .await;
+        }
+
         let state = RunningAgentState {
             thread_id: live_agent.thread_id,
             thread: Arc::clone(&child_thread),
@@ -895,6 +977,8 @@ impl AgentExecutor for CodexAgentExecutor {
             parent_agent_id: Some(parent_id),
             extension_context: Arc::clone(&child_ext_ctx),
             budget_tracker: Arc::clone(&child_tracker),
+            bound_workspace: context.workspace_path.clone(),
+            bound_worktree_id: context.worktree_id,
         };
 
         {

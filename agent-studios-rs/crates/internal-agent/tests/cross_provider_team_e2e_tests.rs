@@ -802,6 +802,8 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: None,
+            worktree_id: None,
+            workspace_path: None,
         };
 
         let coord_res = executor.execute_agent(coord_ctx).await.unwrap();
@@ -818,6 +820,8 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
+            worktree_id: None,
+            workspace_path: None,
         };
 
         let worker1_res = executor.execute_agent(worker_turn1_ctx).await.unwrap();
@@ -834,6 +838,8 @@ fn test_hierarchical_codex_agent_tree_and_worker_reuse() {
             output_schema: None,
             budget: AgentExecutionBudget::default(),
             parent_agent_id: Some(coord_id),
+            worktree_id: None,
+            workspace_path: None,
         };
 
         let worker2_res = executor.execute_agent(worker_turn2_ctx).await.unwrap();

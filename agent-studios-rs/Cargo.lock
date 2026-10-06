@@ -134,6 +134,7 @@ dependencies = [
  "agent-studios-provider",
  "agent-studios-runtime-session",
  "agent-studios-runtime-transport",
+ "agent-studios-workspace",
  "async-trait",
  "chrono",
  "codex-attachment-store",

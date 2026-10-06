@@ -6,12 +6,17 @@ use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::error::ControlPlaneError;
 use agent_studios_control_plane::store::InMemoryStore;
 use agent_studios_protocol::agent::{AgentDescriptor, AgentKind, AgentState, BatchAgentSpec};
+use agent_studios_protocol::artifact::ArtifactRecord;
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
 use agent_studios_protocol::event::EventEnvelope;
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{
+    AgentId, ArtifactId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
+};
+use agent_studios_protocol::reconciliation::{ReconciliationRecord, ReconciliationState};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 use chrono::{DateTime, Utc};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -190,6 +195,81 @@ pub enum ControlPlaneCommand {
     GetTask {
         task_id: TaskId,
         respond_to: oneshot::Sender<Option<TaskRecord>>,
+    },
+    CreateWorktree {
+        studio_id: StudioId,
+        name: String,
+        repo_path: std::path::PathBuf,
+        worktree_path: std::path::PathBuf,
+        base_commit: String,
+        respond_to: oneshot::Sender<Result<WorktreeRecord, ControlPlaneError>>,
+    },
+    AssignWorktree {
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    BindWorktreeThread {
+        worktree_id: WorktreeId,
+        thread_id: String,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    TransitionWorktreeState {
+        worktree_id: WorktreeId,
+        new_state: WorktreeState,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordWorktreeChangeCaptured {
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: String,
+        head_commit: Option<String>,
+        patch_artifact_id: ArtifactId,
+        stats_artifact_id: Option<ArtifactId>,
+        files_changed: usize,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    ReleaseWorktree {
+        worktree_id: WorktreeId,
+        retained: bool,
+        reason: Option<String>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    GetWorktree {
+        worktree_id: WorktreeId,
+        respond_to: oneshot::Sender<Option<WorktreeRecord>>,
+    },
+    RegisterArtifactRecord {
+        artifact: ArtifactRecord,
+        respond_to: oneshot::Sender<Result<ArtifactRecord, ControlPlaneError>>,
+    },
+    CreateReconciliation {
+        studio_id: StudioId,
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: std::path::PathBuf,
+        base_commit: String,
+        respond_to: oneshot::Sender<Result<ReconciliationRecord, ControlPlaneError>>,
+    },
+    TransitionReconciliationState {
+        reconciliation_id: ReconciliationId,
+        new_state: ReconciliationState,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordReconciliationApplied {
+        reconciliation_id: ReconciliationId,
+        merge_commit: Option<String>,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
+    },
+    RecordReconciliationConflict {
+        reconciliation_id: ReconciliationId,
+        conflicted_files: Vec<String>,
+        reason: String,
+        respond_to: oneshot::Sender<Result<(), ControlPlaneError>>,
     },
 }
 
@@ -789,6 +869,262 @@ impl ControlPlaneHandle {
             .map_err(|_| InternalAgentError::ActorDropped)?
             .map_err(InternalAgentError::ControlPlane)
     }
+
+    pub async fn create_worktree(
+        &self,
+        studio_id: StudioId,
+        name: impl Into<String>,
+        repo_path: impl Into<std::path::PathBuf>,
+        worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<WorktreeRecord, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CreateWorktree {
+                studio_id,
+                name: name.into(),
+                repo_path: repo_path.into(),
+                worktree_path: worktree_path.into(),
+                base_commit: base_commit.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn assign_worktree(
+        &self,
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::AssignWorktree {
+                worktree_id,
+                task_id,
+                agent_id,
+                run_id,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn bind_worktree_thread(
+        &self,
+        worktree_id: WorktreeId,
+        thread_id: impl Into<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::BindWorktreeThread {
+                worktree_id,
+                thread_id: thread_id.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn transition_worktree_state(
+        &self,
+        worktree_id: WorktreeId,
+        new_state: WorktreeState,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::TransitionWorktreeState {
+                worktree_id,
+                new_state,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_worktree_change_captured(
+        &self,
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: impl Into<String>,
+        head_commit: Option<String>,
+        patch_artifact_id: ArtifactId,
+        stats_artifact_id: Option<ArtifactId>,
+        files_changed: usize,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordWorktreeChangeCaptured {
+                worktree_id,
+                run_id,
+                base_commit: base_commit.into(),
+                head_commit,
+                patch_artifact_id,
+                stats_artifact_id,
+                files_changed,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn release_worktree(
+        &self,
+        worktree_id: WorktreeId,
+        retained: bool,
+        reason: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::ReleaseWorktree {
+                worktree_id,
+                retained,
+                reason,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn get_worktree(
+        &self,
+        worktree_id: WorktreeId,
+    ) -> Result<Option<WorktreeRecord>, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::GetWorktree {
+                worktree_id,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await.map_err(|_| InternalAgentError::ActorDropped)
+    }
+
+    pub async fn register_artifact_record(
+        &self,
+        artifact: ArtifactRecord,
+    ) -> Result<ArtifactRecord, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RegisterArtifactRecord {
+                artifact,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn create_reconciliation(
+        &self,
+        studio_id: StudioId,
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<ReconciliationRecord, InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::CreateReconciliation {
+                studio_id,
+                worktree_id,
+                task_id,
+                run_id,
+                patch_artifact_id,
+                target_worktree_path: target_worktree_path.into(),
+                base_commit: base_commit.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn transition_reconciliation_state(
+        &self,
+        reconciliation_id: ReconciliationId,
+        new_state: ReconciliationState,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::TransitionReconciliationState {
+                reconciliation_id,
+                new_state,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_reconciliation_applied(
+        &self,
+        reconciliation_id: ReconciliationId,
+        merge_commit: Option<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordReconciliationApplied {
+                reconciliation_id,
+                merge_commit,
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
+
+    pub async fn record_reconciliation_conflict(
+        &self,
+        reconciliation_id: ReconciliationId,
+        conflicted_files: Vec<String>,
+        reason: impl Into<String>,
+    ) -> Result<(), InternalAgentError> {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(ControlPlaneCommand::RecordReconciliationConflict {
+                reconciliation_id,
+                conflicted_files,
+                reason: reason.into(),
+                respond_to: tx,
+            })
+            .await
+            .map_err(|_| InternalAgentError::ActorDropped)?;
+        rx.await
+            .map_err(|_| InternalAgentError::ActorDropped)?
+            .map_err(InternalAgentError::ControlPlane)
+    }
 }
 
 pub struct ControlPlaneActor;
@@ -1138,6 +1474,146 @@ impl ControlPlaneActor {
                     } => {
                         let task = control_plane.get_task(task_id).cloned();
                         let _ = respond_to.send(task);
+                    }
+                    ControlPlaneCommand::CreateWorktree {
+                        studio_id,
+                        name,
+                        repo_path,
+                        worktree_path,
+                        base_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane.create_worktree(
+                            studio_id,
+                            name,
+                            repo_path,
+                            worktree_path,
+                            base_commit,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::AssignWorktree {
+                        worktree_id,
+                        task_id,
+                        agent_id,
+                        run_id,
+                        respond_to,
+                    } => {
+                        let res =
+                            control_plane.assign_worktree(worktree_id, task_id, agent_id, run_id);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::BindWorktreeThread {
+                        worktree_id,
+                        thread_id,
+                        respond_to,
+                    } => {
+                        let res = control_plane.bind_worktree_thread(worktree_id, thread_id);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::TransitionWorktreeState {
+                        worktree_id,
+                        new_state,
+                        respond_to,
+                    } => {
+                        let res = control_plane.transition_worktree_state(worktree_id, new_state);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordWorktreeChangeCaptured {
+                        worktree_id,
+                        run_id,
+                        base_commit,
+                        head_commit,
+                        patch_artifact_id,
+                        stats_artifact_id,
+                        files_changed,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_worktree_change_captured(
+                            worktree_id,
+                            run_id,
+                            base_commit,
+                            head_commit,
+                            patch_artifact_id,
+                            stats_artifact_id,
+                            files_changed,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::ReleaseWorktree {
+                        worktree_id,
+                        retained,
+                        reason,
+                        respond_to,
+                    } => {
+                        let res = control_plane.release_worktree(worktree_id, retained, reason);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::GetWorktree {
+                        worktree_id,
+                        respond_to,
+                    } => {
+                        let wt = control_plane.get_worktree(worktree_id).cloned();
+                        let _ = respond_to.send(wt);
+                    }
+                    ControlPlaneCommand::RegisterArtifactRecord {
+                        artifact,
+                        respond_to,
+                    } => {
+                        let res = control_plane.register_artifact_record(artifact);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::CreateReconciliation {
+                        studio_id,
+                        worktree_id,
+                        task_id,
+                        run_id,
+                        patch_artifact_id,
+                        target_worktree_path,
+                        base_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane.create_reconciliation(
+                            studio_id,
+                            worktree_id,
+                            task_id,
+                            run_id,
+                            patch_artifact_id,
+                            target_worktree_path,
+                            base_commit,
+                        );
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::TransitionReconciliationState {
+                        reconciliation_id,
+                        new_state,
+                        respond_to,
+                    } => {
+                        let res = control_plane
+                            .transition_reconciliation_state(reconciliation_id, new_state);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordReconciliationApplied {
+                        reconciliation_id,
+                        merge_commit,
+                        respond_to,
+                    } => {
+                        let res = control_plane
+                            .record_reconciliation_applied(reconciliation_id, merge_commit);
+                        let _ = respond_to.send(res);
+                    }
+                    ControlPlaneCommand::RecordReconciliationConflict {
+                        reconciliation_id,
+                        conflicted_files,
+                        reason,
+                        respond_to,
+                    } => {
+                        let res = control_plane.record_reconciliation_conflict(
+                            reconciliation_id,
+                            conflicted_files,
+                            reason,
+                        );
+                        let _ = respond_to.send(res);
                     }
                 }
 

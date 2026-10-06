@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 agent-studios-protocol = { path = "../protocol" }
 agent-studios-control-plane = { path = "../control-plane" }
+agent-studios-workspace = { path = "../workspace" }
 agent-studios-provider = { path = "../provider" }
 agent-studios-protocol-adapters = { path = "../protocol-adapters" }
 agent-studios-runtime-transport = { path = "../runtime-transport" }
