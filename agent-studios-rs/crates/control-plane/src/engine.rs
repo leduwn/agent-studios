@@ -9,11 +9,14 @@ use agent_studios_protocol::event::{
     CONTROL_PLANE_EVENT_SCHEMA_VERSION, ControlPlaneEvent, EventEnvelope,
 };
 use agent_studios_protocol::id::{
-    AgentId, ApprovalId, ArtifactId, EventId, RunId, StudioId, TaskId,
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
+    WorktreeId,
 };
+use agent_studios_protocol::reconciliation::{ReconciliationRecord, ReconciliationState};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 use chrono::{DateTime, Utc};
 
 use crate::clock::{Clock, SystemClock};
@@ -32,11 +35,15 @@ pub struct ControlPlaneState {
     pub runs: HashMap<RunId, RunRecord>,
     pub approvals: HashMap<ApprovalId, ApprovalRequest>,
     pub artifacts: HashMap<ArtifactId, ArtifactRecord>,
+    pub worktrees: HashMap<WorktreeId, WorktreeRecord>,
+    pub reconciliations: HashMap<ReconciliationId, ReconciliationRecord>,
 
     // Auxiliary indices for fast query resolution
     pub runs_by_task: HashMap<TaskId, Vec<RunId>>,
     pub tasks_by_studio: HashMap<StudioId, HashSet<TaskId>>,
     pub agents_by_studio: HashMap<StudioId, HashSet<AgentId>>,
+    pub worktrees_by_studio: HashMap<StudioId, HashSet<WorktreeId>>,
+    pub reconciliations_by_studio: HashMap<StudioId, HashSet<ReconciliationId>>,
 }
 
 impl ControlPlaneState {
@@ -801,6 +808,439 @@ impl ControlPlaneState {
 
                 task.retry_count = *attempt;
                 task.updated_at = now;
+            }
+
+            ControlPlaneEvent::WorktreeCreated { worktree } => {
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&worktree.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: worktree.studio_id,
+                    });
+                }
+                if self.worktrees.contains_key(&worktree.id) {
+                    return Err(ReplayError::DuplicateWorktree {
+                        worktree_id: worktree.id,
+                    });
+                }
+                if let Some(task_id) = worktree.assigned_task_id {
+                    let task = self
+                        .task_graph
+                        .get_task(task_id)
+                        .ok_or(ReplayError::TaskNotFound { task_id })?;
+                    if task.studio_id != worktree.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: worktree.studio_id,
+                            actual: task.studio_id,
+                        });
+                    }
+                }
+                if let Some(agent_id) = worktree.assigned_agent_id {
+                    let agent = self
+                        .agents
+                        .get(&agent_id)
+                        .ok_or(ReplayError::AgentNotFound { agent_id })?;
+                    if agent.studio_id != worktree.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: worktree.studio_id,
+                            actual: agent.studio_id,
+                        });
+                    }
+                }
+                if let Some(run_id) = worktree.assigned_run_id {
+                    if !self.runs.contains_key(&run_id) {
+                        return Err(ReplayError::RunNotFound { run_id });
+                    }
+                }
+
+                self.worktrees_by_studio
+                    .entry(worktree.studio_id)
+                    .or_default()
+                    .insert(worktree.id);
+                self.worktrees.insert(worktree.id, worktree.clone());
+            }
+
+            ControlPlaneEvent::WorktreeAssigned {
+                worktree_id,
+                task_id,
+                agent_id,
+                run_id,
+            } => {
+                let worktree = self
+                    .worktrees
+                    .get_mut(worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: *worktree_id,
+                    })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if worktree.state.is_terminal() {
+                    return Err(ReplayError::DomainViolation(format!(
+                        "Cannot assign task to worktree {} in terminal state {:?}",
+                        worktree_id, worktree.state
+                    )));
+                }
+
+                let task = self
+                    .task_graph
+                    .get_task(*task_id)
+                    .ok_or(ReplayError::TaskNotFound { task_id: *task_id })?;
+                if task.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: task.studio_id,
+                    });
+                }
+
+                let agent = self
+                    .agents
+                    .get(agent_id)
+                    .ok_or(ReplayError::AgentNotFound {
+                        agent_id: *agent_id,
+                    })?;
+                if agent.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: agent.studio_id,
+                    });
+                }
+
+                if let Some(rid) = run_id {
+                    let run = self
+                        .runs
+                        .get(rid)
+                        .ok_or(ReplayError::RunNotFound { run_id: *rid })?;
+                    if run.task_id != *task_id || run.agent_id != *agent_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Run {rid} does not match assigned task {task_id} and agent {agent_id}"
+                        )));
+                    }
+                }
+
+                worktree.assigned_task_id = Some(*task_id);
+                worktree.assigned_agent_id = Some(*agent_id);
+                worktree.assigned_run_id = *run_id;
+                worktree.updated_at = now;
+            }
+
+            ControlPlaneEvent::WorktreeThreadBound {
+                worktree_id,
+                thread_id,
+            } => {
+                let worktree = self
+                    .worktrees
+                    .get_mut(worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: *worktree_id,
+                    })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if let Some(existing) = &worktree.bound_thread_id {
+                    if existing != thread_id {
+                        return Err(ReplayError::DomainViolation(format!(
+                            "Worktree {worktree_id} already bound to thread {existing}, cannot rebind to {thread_id}"
+                        )));
+                    }
+                }
+
+                worktree.bound_thread_id = Some(thread_id.clone());
+                worktree.updated_at = now;
+            }
+
+            ControlPlaneEvent::WorktreeStateChanged {
+                worktree_id,
+                previous_state,
+                new_state,
+            } => {
+                let worktree = self
+                    .worktrees
+                    .get_mut(worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: *worktree_id,
+                    })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if worktree.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", worktree.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                worktree.state = *new_state;
+                worktree.updated_at = now;
+                if *new_state == WorktreeState::Removed && worktree.released_at.is_none() {
+                    worktree.released_at = Some(now);
+                }
+            }
+
+            ControlPlaneEvent::WorktreeChangeCaptured {
+                worktree_id,
+                run_id,
+                head_commit,
+                patch_artifact_id,
+                stats_artifact_id,
+                ..
+            } => {
+                let worktree = self
+                    .worktrees
+                    .get_mut(worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: *worktree_id,
+                    })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if let Some(rid) = run_id {
+                    if !self.runs.contains_key(rid) {
+                        return Err(ReplayError::RunNotFound { run_id: *rid });
+                    }
+                }
+
+                let patch_artifact = self.artifacts.get(patch_artifact_id).ok_or(
+                    ReplayError::DomainViolation(format!(
+                        "Patch artifact {patch_artifact_id} not found"
+                    )),
+                )?;
+                if patch_artifact.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: patch_artifact.studio_id,
+                    });
+                }
+
+                if let Some(stats_id) = stats_artifact_id {
+                    let stats_artifact = self.artifacts.get(stats_id).ok_or(
+                        ReplayError::DomainViolation(format!(
+                            "Stats artifact {stats_id} not found"
+                        )),
+                    )?;
+                    if stats_artifact.studio_id != worktree.studio_id {
+                        return Err(ReplayError::StudioMismatch {
+                            expected: worktree.studio_id,
+                            actual: stats_artifact.studio_id,
+                        });
+                    }
+                }
+
+                worktree.last_captured_commit = head_commit.clone();
+                worktree.patch_artifact_id = Some(*patch_artifact_id);
+                worktree.updated_at = now;
+            }
+
+            ControlPlaneEvent::WorktreeReleased {
+                worktree_id,
+                retained,
+                reason,
+            } => {
+                let worktree = self
+                    .worktrees
+                    .get_mut(worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: *worktree_id,
+                    })?;
+
+                if envelope.studio_id != worktree.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: worktree.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                worktree.retained = *retained;
+                worktree.retained_reason = reason.clone();
+                worktree.released_at = Some(now);
+                worktree.updated_at = now;
+            }
+
+            ControlPlaneEvent::ReconciliationCreated { reconciliation } => {
+                if envelope.studio_id != reconciliation.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: reconciliation.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+                if !self.studios.contains_key(&reconciliation.studio_id) {
+                    return Err(ReplayError::StudioNotFound {
+                        studio_id: reconciliation.studio_id,
+                    });
+                }
+                if self.reconciliations.contains_key(&reconciliation.id) {
+                    return Err(ReplayError::DuplicateReconciliation {
+                        reconciliation_id: reconciliation.id,
+                    });
+                }
+
+                let worktree = self
+                    .worktrees
+                    .get(&reconciliation.worktree_id)
+                    .ok_or(ReplayError::WorktreeNotFound {
+                        worktree_id: reconciliation.worktree_id,
+                    })?;
+                if worktree.studio_id != reconciliation.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: reconciliation.studio_id,
+                        actual: worktree.studio_id,
+                    });
+                }
+
+                let task = self
+                    .task_graph
+                    .get_task(reconciliation.task_id)
+                    .ok_or(ReplayError::TaskNotFound {
+                        task_id: reconciliation.task_id,
+                    })?;
+                if task.studio_id != reconciliation.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: reconciliation.studio_id,
+                        actual: task.studio_id,
+                    });
+                }
+
+                if let Some(run_id) = reconciliation.run_id {
+                    if !self.runs.contains_key(&run_id) {
+                        return Err(ReplayError::RunNotFound { run_id });
+                    }
+                }
+
+                let patch_artifact = self
+                    .artifacts
+                    .get(&reconciliation.patch_artifact_id)
+                    .ok_or(ReplayError::DomainViolation(format!(
+                        "Patch artifact {} not found",
+                        reconciliation.patch_artifact_id
+                    )))?;
+                if patch_artifact.studio_id != reconciliation.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: reconciliation.studio_id,
+                        actual: patch_artifact.studio_id,
+                    });
+                }
+
+                self.reconciliations_by_studio
+                    .entry(reconciliation.studio_id)
+                    .or_default()
+                    .insert(reconciliation.id);
+                self.reconciliations
+                    .insert(reconciliation.id, reconciliation.clone());
+            }
+
+            ControlPlaneEvent::ReconciliationStateChanged {
+                reconciliation_id,
+                previous_state,
+                new_state,
+            } => {
+                let rec = self
+                    .reconciliations
+                    .get_mut(reconciliation_id)
+                    .ok_or(ReplayError::ReconciliationNotFound {
+                        reconciliation_id: *reconciliation_id,
+                    })?;
+
+                if envelope.studio_id != rec.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: rec.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                if rec.state != *previous_state {
+                    return Err(ReplayError::StateMismatch {
+                        actual: format!("{:?}", rec.state),
+                        expected: format!("{previous_state:?}"),
+                    });
+                }
+
+                previous_state
+                    .validate_transition_to(*new_state)
+                    .map_err(|e| ReplayError::InvalidTransition {
+                        reason: e.to_string(),
+                    })?;
+
+                rec.state = *new_state;
+                rec.updated_at = now;
+                if new_state.is_terminal() && rec.completed_at.is_none() {
+                    rec.completed_at = Some(now);
+                }
+            }
+
+            ControlPlaneEvent::ReconciliationConflictDetected {
+                reconciliation_id,
+                conflicted_files,
+                reason,
+            } => {
+                let rec = self
+                    .reconciliations
+                    .get_mut(reconciliation_id)
+                    .ok_or(ReplayError::ReconciliationNotFound {
+                        reconciliation_id: *reconciliation_id,
+                    })?;
+
+                if envelope.studio_id != rec.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: rec.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                rec.conflicted_files = conflicted_files.clone();
+                rec.error_message = Some(reason.clone());
+                rec.updated_at = now;
+            }
+
+            ControlPlaneEvent::ReconciliationApplied {
+                reconciliation_id,
+                merge_commit,
+            } => {
+                let rec = self
+                    .reconciliations
+                    .get_mut(reconciliation_id)
+                    .ok_or(ReplayError::ReconciliationNotFound {
+                        reconciliation_id: *reconciliation_id,
+                    })?;
+
+                if envelope.studio_id != rec.studio_id {
+                    return Err(ReplayError::StudioMismatch {
+                        expected: rec.studio_id,
+                        actual: envelope.studio_id,
+                    });
+                }
+
+                rec.merge_commit = merge_commit.clone();
+                rec.updated_at = now;
             }
         }
 
@@ -1782,6 +2222,468 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
     pub fn all_artifacts(&self) -> impl Iterator<Item = &ArtifactRecord> {
         self.state.artifacts.values()
+    }
+
+    pub fn register_artifact_record(
+        &mut self,
+        artifact: ArtifactRecord,
+    ) -> Result<ArtifactRecord, ControlPlaneError> {
+        let studio_id = artifact.studio_id;
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        let task = self
+            .state
+            .task_graph
+            .get_task(artifact.task_id)
+            .ok_or(ControlPlaneError::TaskNotFound(artifact.task_id))?;
+        if task.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: task.studio_id,
+            });
+        }
+
+        let agent = self
+            .state
+            .agents
+            .get(&artifact.producer_agent_id)
+            .ok_or(ControlPlaneError::AgentNotFound(artifact.producer_agent_id))?;
+        if agent.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: agent.studio_id,
+            });
+        }
+
+        if let Some(worktree_id) = artifact.worktree_id {
+            let wt = self
+                .state
+                .worktrees
+                .get(&worktree_id)
+                .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+            if wt.studio_id != studio_id {
+                return Err(ControlPlaneError::StudioMismatch {
+                    expected: studio_id,
+                    actual: wt.studio_id,
+                });
+            }
+        }
+
+        let event = ControlPlaneEvent::ArtifactRegistered {
+            artifact: artifact.clone(),
+        };
+
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(artifact)
+    }
+
+    // ========================================================================
+    // Worktree Management
+    // ========================================================================
+
+    pub fn create_worktree(
+        &mut self,
+        studio_id: StudioId,
+        name: impl Into<String>,
+        repo_path: impl Into<std::path::PathBuf>,
+        worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<WorktreeRecord, ControlPlaneError> {
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        let now = self.clock.now();
+        let worktree = WorktreeRecord::new(
+            studio_id,
+            name,
+            repo_path,
+            worktree_path,
+            base_commit,
+            now,
+        );
+
+        let event = ControlPlaneEvent::WorktreeCreated {
+            worktree: worktree.clone(),
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(worktree)
+    }
+
+    pub fn assign_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        if worktree.state.is_terminal() {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Cannot assign task to worktree {worktree_id} in terminal state {:?}",
+                worktree.state
+            )));
+        }
+
+        let task = self
+            .state
+            .task_graph
+            .get_task(task_id)
+            .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
+        if task.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: task.studio_id,
+            });
+        }
+
+        let agent = self
+            .state
+            .agents
+            .get(&agent_id)
+            .ok_or(ControlPlaneError::AgentNotFound(agent_id))?;
+        if agent.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: agent.studio_id,
+            });
+        }
+
+        if let Some(rid) = run_id {
+            let run = self
+                .state
+                .runs
+                .get(&rid)
+                .ok_or(ControlPlaneError::RunNotFound(rid))?;
+            if run.task_id != task_id || run.agent_id != agent_id {
+                return Err(ControlPlaneError::InvalidOperation(format!(
+                    "Run {rid} does not match assigned task {task_id} and agent {agent_id}"
+                )));
+            }
+        }
+
+        let event = ControlPlaneEvent::WorktreeAssigned {
+            worktree_id,
+            task_id,
+            agent_id,
+            run_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn bind_worktree_thread(
+        &mut self,
+        worktree_id: WorktreeId,
+        thread_id: impl Into<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let thread_id = thread_id.into();
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        if let Some(existing) = &worktree.bound_thread_id {
+            if existing != &thread_id {
+                return Err(ControlPlaneError::WorktreeOwnershipConflict {
+                    worktree_id,
+                    reason: format!(
+                        "Worktree already bound to thread {existing}, cannot rebind to {thread_id}"
+                    ),
+                });
+            }
+        }
+
+        let event = ControlPlaneEvent::WorktreeThreadBound {
+            worktree_id,
+            thread_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn transition_worktree_state(
+        &mut self,
+        worktree_id: WorktreeId,
+        new_state: WorktreeState,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+        let previous_state = worktree.state;
+
+        previous_state.validate_transition_to(new_state)?;
+
+        let event = ControlPlaneEvent::WorktreeStateChanged {
+            worktree_id,
+            previous_state,
+            new_state,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_worktree_change_captured(
+        &mut self,
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: impl Into<String>,
+        head_commit: Option<String>,
+        patch_artifact_id: ArtifactId,
+        stats_artifact_id: Option<ArtifactId>,
+        files_changed: usize,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        if !self.state.artifacts.contains_key(&patch_artifact_id) {
+            return Err(ControlPlaneError::ArtifactNotFound(patch_artifact_id));
+        }
+
+        if let Some(stats_id) = stats_artifact_id {
+            if !self.state.artifacts.contains_key(&stats_id) {
+                return Err(ControlPlaneError::ArtifactNotFound(stats_id));
+            }
+        }
+
+        let event = ControlPlaneEvent::WorktreeChangeCaptured {
+            worktree_id,
+            run_id,
+            base_commit: base_commit.into(),
+            head_commit,
+            patch_artifact_id,
+            stats_artifact_id,
+            files_changed,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn release_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        retained: bool,
+        reason: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        let studio_id = worktree.studio_id;
+
+        let event = ControlPlaneEvent::WorktreeReleased {
+            worktree_id,
+            retained,
+            reason,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn get_worktree(&self, id: WorktreeId) -> Option<&WorktreeRecord> {
+        self.state.worktrees.get(&id)
+    }
+
+    pub fn all_worktrees(&self) -> impl Iterator<Item = &WorktreeRecord> {
+        self.state.worktrees.values()
+    }
+
+    pub fn worktrees_for_studio(&self, studio_id: StudioId) -> Vec<&WorktreeRecord> {
+        self.state
+            .worktrees_by_studio
+            .get(&studio_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.state.worktrees.get(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // ========================================================================
+    // Reconciliation Management
+    // ========================================================================
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_reconciliation(
+        &mut self,
+        studio_id: StudioId,
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        run_id: Option<RunId>,
+        patch_artifact_id: ArtifactId,
+        target_worktree_path: impl Into<std::path::PathBuf>,
+        base_commit: impl Into<String>,
+    ) -> Result<ReconciliationRecord, ControlPlaneError> {
+        if !self.state.studios.contains_key(&studio_id) {
+            return Err(ControlPlaneError::StudioNotFound(studio_id));
+        }
+
+        let worktree = self
+            .state
+            .worktrees
+            .get(&worktree_id)
+            .ok_or(ControlPlaneError::WorktreeNotFound(worktree_id))?;
+        if worktree.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: worktree.studio_id,
+            });
+        }
+
+        let task = self
+            .state
+            .task_graph
+            .get_task(task_id)
+            .ok_or(ControlPlaneError::TaskNotFound(task_id))?;
+        if task.studio_id != studio_id {
+            return Err(ControlPlaneError::StudioMismatch {
+                expected: studio_id,
+                actual: task.studio_id,
+            });
+        }
+
+        if let Some(rid) = run_id {
+            let run = self
+                .state
+                .runs
+                .get(&rid)
+                .ok_or(ControlPlaneError::RunNotFound(rid))?;
+            if run.task_id != task_id {
+                return Err(ControlPlaneError::InvalidOperation(format!(
+                    "Run {rid} does not belong to task {task_id}"
+                )));
+            }
+        }
+
+        if !self.state.artifacts.contains_key(&patch_artifact_id) {
+            return Err(ControlPlaneError::ArtifactNotFound(patch_artifact_id));
+        }
+
+        let now = self.clock.now();
+        let reconciliation = ReconciliationRecord::new(
+            studio_id,
+            worktree_id,
+            task_id,
+            run_id,
+            patch_artifact_id,
+            target_worktree_path,
+            base_commit,
+            now,
+        );
+
+        let event = ControlPlaneEvent::ReconciliationCreated {
+            reconciliation: reconciliation.clone(),
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(reconciliation)
+    }
+
+    pub fn transition_reconciliation_state(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+        new_state: ReconciliationState,
+    ) -> Result<(), ControlPlaneError> {
+        let rec = self
+            .state
+            .reconciliations
+            .get(&reconciliation_id)
+            .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
+        let studio_id = rec.studio_id;
+        let previous_state = rec.state;
+
+        previous_state.validate_transition_to(new_state)?;
+
+        let event = ControlPlaneEvent::ReconciliationStateChanged {
+            reconciliation_id,
+            previous_state,
+            new_state,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_reconciliation_conflict(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+        conflicted_files: Vec<String>,
+        reason: impl Into<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let rec = self
+            .state
+            .reconciliations
+            .get(&reconciliation_id)
+            .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
+        let studio_id = rec.studio_id;
+
+        let event = ControlPlaneEvent::ReconciliationConflictDetected {
+            reconciliation_id,
+            conflicted_files,
+            reason: reason.into(),
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_reconciliation_applied(
+        &mut self,
+        reconciliation_id: ReconciliationId,
+        merge_commit: Option<String>,
+    ) -> Result<(), ControlPlaneError> {
+        let rec = self
+            .state
+            .reconciliations
+            .get(&reconciliation_id)
+            .ok_or(ControlPlaneError::ReconciliationNotFound(reconciliation_id))?;
+        let studio_id = rec.studio_id;
+
+        let event = ControlPlaneEvent::ReconciliationApplied {
+            reconciliation_id,
+            merge_commit,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn get_reconciliation(&self, id: ReconciliationId) -> Option<&ReconciliationRecord> {
+        self.state.reconciliations.get(&id)
+    }
+
+    pub fn all_reconciliations(&self) -> impl Iterator<Item = &ReconciliationRecord> {
+        self.state.reconciliations.values()
+    }
+
+    pub fn reconciliations_for_studio(
+        &self,
+        studio_id: StudioId,
+    ) -> Vec<&ReconciliationRecord> {
+        self.state
+            .reconciliations_by_studio
+            .get(&studio_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.state.reconciliations.get(id))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // ========================================================================

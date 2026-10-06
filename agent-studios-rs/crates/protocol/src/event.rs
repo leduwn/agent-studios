@@ -5,10 +5,15 @@ use crate::agent::{AgentDescriptor, AgentState};
 use crate::approval::{ApprovalRequest, ApprovalState};
 use crate::artifact::ArtifactRecord;
 use crate::cancellation::CancellationScope;
-use crate::id::{AgentId, ApprovalId, EventId, RunId, StudioId, TaskId};
+use crate::id::{
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
+    WorktreeId,
+};
+use crate::reconciliation::{ReconciliationRecord, ReconciliationState};
 use crate::run::{RunRecord, RunState};
 use crate::studio::Studio;
 use crate::task::{TaskRecord, TaskState};
+use crate::worktree::{WorktreeRecord, WorktreeState};
 
 /// Canonical domain event variants emitted by the Agent Studios control plane.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +138,55 @@ pub enum ControlPlaneEvent {
         agent_id: AgentId,
         classification: String,
         safe_error_summary: Option<String>,
+    },
+    WorktreeCreated {
+        worktree: WorktreeRecord,
+    },
+    WorktreeAssigned {
+        worktree_id: WorktreeId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        run_id: Option<RunId>,
+    },
+    WorktreeThreadBound {
+        worktree_id: WorktreeId,
+        thread_id: String,
+    },
+    WorktreeStateChanged {
+        worktree_id: WorktreeId,
+        previous_state: WorktreeState,
+        new_state: WorktreeState,
+    },
+    WorktreeChangeCaptured {
+        worktree_id: WorktreeId,
+        run_id: Option<RunId>,
+        base_commit: String,
+        head_commit: Option<String>,
+        patch_artifact_id: ArtifactId,
+        stats_artifact_id: Option<ArtifactId>,
+        files_changed: usize,
+    },
+    WorktreeReleased {
+        worktree_id: WorktreeId,
+        retained: bool,
+        reason: Option<String>,
+    },
+    ReconciliationCreated {
+        reconciliation: ReconciliationRecord,
+    },
+    ReconciliationStateChanged {
+        reconciliation_id: ReconciliationId,
+        previous_state: ReconciliationState,
+        new_state: ReconciliationState,
+    },
+    ReconciliationConflictDetected {
+        reconciliation_id: ReconciliationId,
+        conflicted_files: Vec<String>,
+        reason: String,
+    },
+    ReconciliationApplied {
+        reconciliation_id: ReconciliationId,
+        merge_commit: Option<String>,
     },
 }
 

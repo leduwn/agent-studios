@@ -1,6 +1,7 @@
 use agent_studios_protocol::error::TransitionError;
 use agent_studios_protocol::id::{
-    AgentId, ApprovalId, ArtifactId, EventId, RunId, StudioId, TaskId,
+    AgentId, ApprovalId, ArtifactId, EventId, ReconciliationId, RunId, StudioId, TaskId,
+    WorktreeId,
 };
 use thiserror::Error;
 
@@ -27,6 +28,24 @@ pub enum ControlPlaneError {
 
     #[error("Artifact {0} not found")]
     ArtifactNotFound(ArtifactId),
+
+    #[error("Worktree {0} not found")]
+    WorktreeNotFound(WorktreeId),
+
+    #[error("Worktree {0} already exists")]
+    DuplicateWorktree(WorktreeId),
+
+    #[error("Worktree ownership conflict for {worktree_id}: {reason}")]
+    WorktreeOwnershipConflict {
+        worktree_id: WorktreeId,
+        reason: String,
+    },
+
+    #[error("Reconciliation {0} not found")]
+    ReconciliationNotFound(ReconciliationId),
+
+    #[error("Reconciliation {0} already exists")]
+    DuplicateReconciliation(ReconciliationId),
 
     #[error("Studio mismatch: entity belongs to {actual}, expected {expected}")]
     StudioMismatch {
@@ -146,6 +165,14 @@ pub enum ReplayError {
     #[error("Artifact already registered: {artifact_id}")]
     DuplicateArtifact { artifact_id: ArtifactId },
 
+    #[error("Worktree already exists: {worktree_id}")]
+    DuplicateWorktree { worktree_id: WorktreeId },
+
+    #[error("Reconciliation already exists: {reconciliation_id}")]
+    DuplicateReconciliation {
+        reconciliation_id: ReconciliationId,
+    },
+
     #[error("Studio not found: {studio_id}")]
     StudioNotFound { studio_id: StudioId },
 
@@ -160,6 +187,14 @@ pub enum ReplayError {
 
     #[error("Approval request not found: {approval_id}")]
     ApprovalNotFound { approval_id: ApprovalId },
+
+    #[error("Worktree not found: {worktree_id}")]
+    WorktreeNotFound { worktree_id: WorktreeId },
+
+    #[error("Reconciliation not found: {reconciliation_id}")]
+    ReconciliationNotFound {
+        reconciliation_id: ReconciliationId,
+    },
 
     #[error("State mismatch: current state is {actual}, event expected {expected}")]
     StateMismatch { actual: String, expected: String },

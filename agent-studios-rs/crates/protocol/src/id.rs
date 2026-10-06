@@ -87,6 +87,11 @@ define_id!(
     EventId,
     "Strongly typed identifier for a Control Plane Event."
 );
+define_id!(WorktreeId, "Strongly typed identifier for a Worktree.");
+define_id!(
+    ReconciliationId,
+    "Strongly typed identifier for a Reconciliation operation."
+);
 
 #[cfg(test)]
 mod tests {

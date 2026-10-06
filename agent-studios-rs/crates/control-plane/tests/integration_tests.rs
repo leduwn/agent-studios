@@ -16,10 +16,14 @@ use agent_studios_protocol::error::TransitionError;
 use agent_studios_protocol::event::{
     CONTROL_PLANE_EVENT_SCHEMA_VERSION, ControlPlaneEvent, EventEnvelope,
 };
-use agent_studios_protocol::id::{AgentId, ApprovalId, ArtifactId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{
+    AgentId, ApprovalId, ArtifactId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
+};
+use agent_studios_protocol::reconciliation::{ReconciliationRecord, ReconciliationState};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::worktree::{WorktreeRecord, WorktreeState};
 
 // ============================================================================
 // FailingEventStore Mock for Failure Injection
@@ -1580,3 +1584,507 @@ fn test_replay_corrupted_strict_agent_and_run_checks() {
     );
     assert!(matches!(res, Err(ReplayError::DomainViolation(_))));
 }
+
+#[test]
+fn test_worktree_lifecycle_full() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Worktree Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Coder Agent", AgentKind::Internal, None)
+        .unwrap();
+    let task = cp
+        .create_task(
+            studio.id,
+            "Mutating Task",
+            "Refactor code",
+            None,
+            Some(agent.id),
+            vec![],
+        )
+        .unwrap();
+    let run = cp.create_run(task.id, agent.id).unwrap();
+
+    // 1. Create worktree
+    let worktree = cp
+        .create_worktree(
+            studio.id,
+            "wt-mutating-1",
+            "C:/repos/primary",
+            "C:/worktrees/wt-mutating-1",
+            "abc1234",
+        )
+        .unwrap();
+    assert_eq!(worktree.state, WorktreeState::Creating);
+    assert_eq!(worktree.studio_id, studio.id);
+
+    // 2. Transition Creating -> Ready
+    cp.transition_worktree_state(worktree.id, WorktreeState::Ready)
+        .unwrap();
+    assert_eq!(
+        cp.get_worktree(worktree.id).unwrap().state,
+        WorktreeState::Ready
+    );
+
+    // 3. Assign task, agent, run
+    cp.assign_worktree(worktree.id, task.id, agent.id, Some(run.id))
+        .unwrap();
+    let wt = cp.get_worktree(worktree.id).unwrap();
+    assert_eq!(wt.assigned_task_id, Some(task.id));
+    assert_eq!(wt.assigned_agent_id, Some(agent.id));
+    assert_eq!(wt.assigned_run_id, Some(run.id));
+
+    // 4. Bind thread
+    cp.bind_worktree_thread(worktree.id, "thread-worker-1")
+        .unwrap();
+    assert_eq!(
+        cp.get_worktree(worktree.id).unwrap().bound_thread_id,
+        Some("thread-worker-1".to_string())
+    );
+
+    // Rebind same thread succeeds
+    cp.bind_worktree_thread(worktree.id, "thread-worker-1")
+        .unwrap();
+
+    // Rebind different thread fails with WorktreeOwnershipConflict
+    let conflict_err = cp
+        .bind_worktree_thread(worktree.id, "thread-worker-2")
+        .unwrap_err();
+    assert!(matches!(
+        conflict_err,
+        ControlPlaneError::WorktreeOwnershipConflict { .. }
+    ));
+
+    // 5. Transition Ready -> InUse
+    cp.transition_worktree_state(worktree.id, WorktreeState::InUse)
+        .unwrap();
+
+    // 6. Record change captured with patch artifact
+    let patch = cp
+        .register_artifact(
+            studio.id,
+            task.id,
+            agent.id,
+            ArtifactKind::Patch,
+            "changes.patch",
+            Some("sha256-patch".into()),
+            "artifacts/patch.diff",
+        )
+        .unwrap();
+
+    cp.record_worktree_change_captured(
+        worktree.id,
+        Some(run.id),
+        "abc1234",
+        Some("def5678".into()),
+        patch.id,
+        None,
+        3,
+    )
+    .unwrap();
+
+    let wt_captured = cp.get_worktree(worktree.id).unwrap();
+    assert_eq!(
+        wt_captured.last_captured_commit,
+        Some("def5678".to_string())
+    );
+    assert_eq!(wt_captured.patch_artifact_id, Some(patch.id));
+
+    // 7. Transition InUse -> ChangeCaptured -> ReconcilePending
+    cp.transition_worktree_state(worktree.id, WorktreeState::ChangeCaptured)
+        .unwrap();
+    cp.transition_worktree_state(worktree.id, WorktreeState::ReconcilePending)
+        .unwrap();
+
+    // 8. Release worktree with retention
+    cp.release_worktree(worktree.id, true, Some("Audit trail retention".into()))
+        .unwrap();
+    let wt_retained = cp.get_worktree(worktree.id).unwrap();
+    assert!(wt_retained.retained);
+    assert_eq!(
+        wt_retained.retained_reason,
+        Some("Audit trail retention".into())
+    );
+    assert!(wt_retained.released_at.is_some());
+
+    // 9. Replay all events -> identical domain state
+    let events = cp.events_for_studio(studio.id, 1).unwrap();
+    let replayed =
+        ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
+    assert_eq!(replayed.all_worktrees().count(), 1);
+    let replayed_wt = replayed.get_worktree(worktree.id).unwrap();
+    assert_eq!(replayed_wt, wt_retained);
+}
+
+#[test]
+fn test_reconciliation_lifecycle_full() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Reconciliation Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Coder Agent", AgentKind::Internal, None)
+        .unwrap();
+    let task = cp
+        .create_task(studio.id, "Task", "", None, Some(agent.id), vec![])
+        .unwrap();
+    let patch = cp
+        .register_artifact(
+            studio.id,
+            task.id,
+            agent.id,
+            ArtifactKind::Patch,
+            "patch.diff",
+            None,
+            "loc",
+        )
+        .unwrap();
+    let worktree = cp
+        .create_worktree(
+            studio.id,
+            "wt-rec",
+            "C:/repos/primary",
+            "C:/worktrees/wt-rec",
+            "base123",
+        )
+        .unwrap();
+
+    // 1. Create reconciliation
+    let rec = cp
+        .create_reconciliation(
+            studio.id,
+            worktree.id,
+            task.id,
+            None,
+            patch.id,
+            "C:/worktrees/integration",
+            "base123",
+        )
+        .unwrap();
+    assert_eq!(rec.state, ReconciliationState::Pending);
+
+    // 2. Transition Pending -> Checking
+    cp.transition_reconciliation_state(rec.id, ReconciliationState::Checking)
+        .unwrap();
+    assert_eq!(
+        cp.get_reconciliation(rec.id).unwrap().state,
+        ReconciliationState::Checking
+    );
+
+    // 3. Detect conflict: Checking -> Conflicted
+    cp.record_reconciliation_conflict(
+        rec.id,
+        vec!["src/main.rs".to_string()],
+        "Patch failed to apply cleanly at hunk #2",
+    )
+    .unwrap();
+    cp.transition_reconciliation_state(rec.id, ReconciliationState::Conflicted)
+        .unwrap();
+
+    let conflicted = cp.get_reconciliation(rec.id).unwrap();
+    assert_eq!(conflicted.state, ReconciliationState::Conflicted);
+    assert_eq!(conflicted.conflicted_files, vec!["src/main.rs"]);
+    assert!(conflicted.state.is_terminal());
+
+    // 4. Replay verifies identical state
+    let events = cp.events_for_studio(studio.id, 1).unwrap();
+    let replayed =
+        ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
+    assert_eq!(replayed.all_reconciliations().count(), 1);
+    let replayed_rec = replayed.get_reconciliation(rec.id).unwrap();
+    assert_eq!(replayed_rec, conflicted);
+}
+
+#[test]
+fn test_reconciliation_applied_success() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Apply Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Coder Agent", AgentKind::Internal, None)
+        .unwrap();
+    let task = cp
+        .create_task(studio.id, "Task", "", None, Some(agent.id), vec![])
+        .unwrap();
+    let patch = cp
+        .register_artifact(
+            studio.id,
+            task.id,
+            agent.id,
+            ArtifactKind::Patch,
+            "patch.diff",
+            None,
+            "loc",
+        )
+        .unwrap();
+    let worktree = cp
+        .create_worktree(
+            studio.id,
+            "wt-apply",
+            "C:/repos/primary",
+            "C:/worktrees/wt-apply",
+            "base123",
+        )
+        .unwrap();
+
+    let rec = cp
+        .create_reconciliation(
+            studio.id,
+            worktree.id,
+            task.id,
+            None,
+            patch.id,
+            "C:/worktrees/integration",
+            "base123",
+        )
+        .unwrap();
+
+    cp.transition_reconciliation_state(rec.id, ReconciliationState::Applying)
+        .unwrap();
+    cp.record_reconciliation_applied(rec.id, Some("merge-sha-999".into()))
+        .unwrap();
+    cp.transition_reconciliation_state(rec.id, ReconciliationState::Applied)
+        .unwrap();
+
+    let applied = cp.get_reconciliation(rec.id).unwrap();
+    assert_eq!(applied.state, ReconciliationState::Applied);
+    assert_eq!(applied.merge_commit, Some("merge-sha-999".to_string()));
+    assert!(applied.completed_at.is_some());
+}
+
+#[test]
+fn test_artifact_versioning_and_worktree_link() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Version Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Coder Agent", AgentKind::Internal, None)
+        .unwrap();
+    let task = cp
+        .create_task(studio.id, "Task", "", None, Some(agent.id), vec![])
+        .unwrap();
+    let run = cp.create_run(task.id, agent.id).unwrap();
+    let worktree = cp
+        .create_worktree(
+            studio.id,
+            "wt-ver",
+            "C:/repos/primary",
+            "C:/worktrees/wt-ver",
+            "base123",
+        )
+        .unwrap();
+
+    // Artifact v1
+    let mut art1 = ArtifactRecord::new(
+        studio.id,
+        task.id,
+        agent.id,
+        ArtifactKind::File,
+        "src/lib.rs",
+        Some("hash-v1".into()),
+        "store/v1",
+        now,
+    );
+    art1.run_id = Some(run.id);
+    art1.worktree_id = Some(worktree.id);
+    art1.version = 1;
+    art1.size_bytes = Some(1024);
+    let art1 = cp.register_artifact_record(art1).unwrap();
+
+    // Artifact v2 superseding v1
+    let mut art2 = ArtifactRecord::new(
+        studio.id,
+        task.id,
+        agent.id,
+        ArtifactKind::File,
+        "src/lib.rs",
+        Some("hash-v2".into()),
+        "store/v2",
+        now,
+    );
+    art2.run_id = Some(run.id);
+    art2.worktree_id = Some(worktree.id);
+    art2.version = 2;
+    art2.supersedes = Some(art1.id);
+    art2.size_bytes = Some(1150);
+    let art2 = cp.register_artifact_record(art2).unwrap();
+
+    assert_eq!(art2.version, 2);
+    assert_eq!(art2.supersedes, Some(art1.id));
+    assert_eq!(art2.worktree_id, Some(worktree.id));
+
+    // Replay preserves versioning
+    let events = cp.events_for_studio(studio.id, 1).unwrap();
+    let replayed =
+        ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new()).unwrap();
+    let r_art2 = replayed.get_artifact(art2.id).unwrap();
+    assert_eq!(r_art2.version, 2);
+    assert_eq!(r_art2.supersedes, Some(art1.id));
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_worktree() {
+    let (sid, _aid, _tid, now, mut events) = make_base_replay_harness();
+    let wid = WorktreeId::new();
+    let mut wt1 = WorktreeRecord::new(sid, "wt1", "repo", "wt_path", "base", now);
+    wt1.id = wid;
+    let mut wt2 = WorktreeRecord::new(sid, "wt2", "repo", "wt_path", "base", now);
+    wt2.id = wid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::WorktreeCreated { worktree: wt1 },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::WorktreeCreated { worktree: wt2 },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(
+        matches!(res, Err(ReplayError::DuplicateWorktree { worktree_id }) if worktree_id == wid)
+    );
+}
+
+#[test]
+fn test_replay_corrupted_worktree_invalid_transition() {
+    let (sid, _aid, _tid, now, mut events) = make_base_replay_harness();
+    let wid = WorktreeId::new();
+    let mut wt = WorktreeRecord::new(sid, "wt", "repo", "wt_path", "base", now);
+    wt.id = wid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::WorktreeCreated { worktree: wt },
+    ));
+
+    // Creating -> InUse is invalid!
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::WorktreeStateChanged {
+            worktree_id: wid,
+            previous_state: WorktreeState::Creating,
+            new_state: WorktreeState::InUse,
+        },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::InvalidTransition { .. })));
+}
+
+#[test]
+fn test_replay_corrupted_worktree_thread_rebind_conflict() {
+    let (sid, _aid, _tid, now, mut events) = make_base_replay_harness();
+    let wid = WorktreeId::new();
+    let mut wt = WorktreeRecord::new(sid, "wt", "repo", "wt_path", "base", now);
+    wt.id = wid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::WorktreeCreated { worktree: wt },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::WorktreeThreadBound {
+            worktree_id: wid,
+            thread_id: "thread-1".into(),
+        },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        6,
+        now,
+        ControlPlaneEvent::WorktreeThreadBound {
+            worktree_id: wid,
+            thread_id: "thread-2".into(), // Conflict!
+        },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(res, Err(ReplayError::DomainViolation(_))));
+}
+
+#[test]
+fn test_replay_corrupted_duplicate_reconciliation() {
+    let (sid, aid, tid, now, mut events) = make_base_replay_harness();
+    let wid = WorktreeId::new();
+    let mut wt = WorktreeRecord::new(sid, "wt", "repo", "wt_path", "base", now);
+    wt.id = wid;
+    let patch = ArtifactRecord::new(
+        sid,
+        tid,
+        aid,
+        ArtifactKind::Patch,
+        "patch.diff",
+        None,
+        "loc",
+        now,
+    );
+    let patch_id = patch.id;
+
+    events.push(EventEnvelope::new(
+        sid,
+        4,
+        now,
+        ControlPlaneEvent::WorktreeCreated { worktree: wt },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        5,
+        now,
+        ControlPlaneEvent::ArtifactRegistered { artifact: patch },
+    ));
+
+    let rid = ReconciliationId::new();
+    let mut rec1 = ReconciliationRecord::new(sid, wid, tid, None, patch_id, "target", "base", now);
+    rec1.id = rid;
+    let mut rec2 = ReconciliationRecord::new(sid, wid, tid, None, patch_id, "target", "base", now);
+    rec2.id = rid;
+
+    events.push(EventEnvelope::new(
+        sid,
+        6,
+        now,
+        ControlPlaneEvent::ReconciliationCreated {
+            reconciliation: rec1,
+        },
+    ));
+    events.push(EventEnvelope::new(
+        sid,
+        7,
+        now,
+        ControlPlaneEvent::ReconciliationCreated {
+            reconciliation: rec2,
+        },
+    ));
+
+    let res = ControlPlane::replay_events(&events, FixedClock::new(now), InMemoryStore::new());
+    assert!(matches!(
+        res,
+        Err(ReplayError::DuplicateReconciliation { reconciliation_id }) if reconciliation_id == rid
+    ));
+}
+
