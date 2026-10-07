@@ -1,7 +1,9 @@
-﻿# Agent Studios — Worktree Isolation, Task Artifacts & Reconciliation
+# Agent Studios — Worktree Isolation, Task Artifacts & Reconciliation
 
 > **Status**: Core Architecture Specification (Milestone M09)
+>
 > **Milestone Status**: **UNDER FINAL REVIEW** (Branch `feat/worktree-task-artifact-orchestration` pushed to `origin`, awaiting merge review)
+>
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -91,13 +93,23 @@ pub struct ExecutionWorkspace {
 
 Agent Studios enforces strict safety guarantees regarding worker workspaces:
 
-### The Safe Retention Rule
-- Managed worktrees containing uncommitted modifications, failed agent attempts, or unmerged artifacts **must never be automatically destroyed**.
-- Destructive Git operations are **strictly forbidden** in automated lifecycle cleanup:
-  - `git reset --hard` (FORBIDDEN)
-  - `git clean -fdx` (FORBIDDEN)
-  - `git worktree remove --force` (FORBIDDEN)
-- **Retention on Failure**: If a task fails or encounters a reconciliation conflict, the worktree is marked as `Retained`. The developer can open the worktree directory directly to inspect, debug, and manually salvage the code.
+### The Full Destructive-Cleanup Prohibition
+Automated lifecycle cleanup must **never** perform destructive Git operations equivalent to any of the following three:
+1. `git reset --hard` (FORBIDDEN in automated lifecycle)
+2. `git clean -fdx` (FORBIDDEN in automated lifecycle)
+3. `git worktree remove --force` (FORBIDDEN in automated lifecycle)
+
+Normal managed-worktree cleanup must **never destroy dirty contents**.
+
+### Canonical Worktree Lifecycle Behavior
+- **Dirty or Unsafe Worktree**:
+  $$\text{dirty / conflicted / failed worktree} \longrightarrow \textbf{Retain Safely}$$
+  If a task fails, times out, or encounters a reconciliation conflict, the worktree is marked as `Retained`. The developer can inspect, debug, and manually salvage code directly from the worktree folder.
+- **Safe Explicit Cleanup**:
+  $$\text{no active turn} \longrightarrow \text{retire owner thread} \longrightarrow \text{wait for termination} \longrightarrow \textbf{safe upstream WorktreeManager removal}$$
+  Worktrees are removed only when cleanly committed or reconciled, with no active threads running.
+- **Explicit User Intent for Discard**:
+  Any future destructive discard feature requires explicit, confirmed user intent/approval and is **not** part of M09 normal automated cleanup.
 
 ---
 
@@ -118,11 +130,18 @@ This captures exact filesystem deltas—including binary files, permission chang
 
 ## 7. Content-Addressed Artifact Store & Version Allocation
 
-1. **SHA-256 Content Addressing**: Generated patch diffs and build deliverables are stored by their cryptographic SHA-256 hash in `.git/agent-studios/artifacts/blobs/<sha256>`.
-2. **Control Plane Version Allocation**:
+### Canonical Architectural Requirements
+1. **Content-Addressed SHA-256 Storage**:
+   Artifacts (unified patch diffs, build outputs) are identified and stored by their cryptographic SHA-256 hash:
+   $$\text{Concept: } \langle\text{artifact-root}\rangle\text{/blobs/sha256/}\langle\text{hash}\rangle$$
+   - Deduplication: Identical patch contents share the same underlying storage blob.
+   - Atomic Persistence: Blobs are written atomically (write to temp file, flush, rename).
+   - Provenance & Lineage: Artifact metadata records source task ID, creator agent ID, parent artifact SHA, and creation timestamp.
+2. **Current Implementation Path**:
+   In the current M09 implementation, artifact blobs are stored under `.git/agent-studios/artifacts/blobs/<sha256>`. This path represents a current implementation detail, **not** a permanent architectural constraint that limits future storage layout evolution.
+3. **Control Plane Authoritative Version Allocation**:
    - The Control Plane authoritatively allocates artifact version numbers ($v1, v2, v3\dots$).
    - Individual workers, executors, or external scripts cannot self-assign version numbers.
-   - Version metadata records creator agent ID, source task ID, parent artifact SHA, and creation timestamp.
 
 ---
 

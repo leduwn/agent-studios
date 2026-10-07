@@ -1,7 +1,9 @@
-﻿# Agent Studios — Skills, MCP & Plugins Architecture
+# Agent Studios — Skills, MCP & Plugins Architecture
 
 > **Status**: Planned Architecture Specification (Target: Milestone M16)
+>
 > **Current Reality**: Upstream Codex (`codex-rs`) natively supports Skills, MCP, and `AGENTS.md`. Surfacing full discovery, GitHub installation, and management within the Agent Studios UI is **PLANNED** for Milestone M16.
+>
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -19,22 +21,51 @@ Agent Studios builds upon the extensible capabilities of OpenAI Codex:
 Skills are modular, reusable instruction and tool packages defined in markdown.
 
 ### A. Format & Compatibility
-- Full compatibility with the upstream OpenAI Codex `SKILL.md` format.
+- **Full Standard Compatibility**: Native compatibility with OpenAI Codex `SKILL.md`, Claude Code `SKILL.md`, and Agent Studios native skills.
 - Frontmatter defines name, description, parameters, tools, and triggers.
 
-### B. Scopes
-Skills are discovered and loaded across three hierarchical scopes:
-1. **Workspace Scope**: Checked into `.agent-studios/skills/` or `.codex/skills/` within the repository. Project-specific and shared via Git.
-2. **User Scope**: Stored in `~/.agent-studios/skills/` or `~/.codex/skills/`. Available across all projects on the developer's machine.
-3. **Built-in Scope**: Packaged directly with Agent Studios (standard refactoring, test generation, git operations).
+### B. Canonical Skill Scopes
+Skills are discovered and loaded across three canonical hierarchical scopes:
+
+1. **Global Scope**:
+   - Location: `~/.agent-studios/skills/`
+   - Available across all projects and sessions on the developer's machine.
+2. **Project Scope**:
+   - Location: `<repo>/.agent-studios/skills/`
+   - Project-specific and shared with the team via Git.
+3. **Agent Scope**:
+   - Location: `<workspace>/.agent-studios/agents/<agent>/skills/`
+   - Scoped specifically to a specialized agent role within a studio or team.
+
+*(Note on Built-in Skills: Built-in skills refer to distribution provenance—standard refactoring, testing, and git operations bundled directly with the application distribution—not a scope level. Built-in skills are exposed through the canonical Global scope.)*
 
 ### C. Installation via GitHub
-Developers can install shared community skills directly via chat or command palette:
+The canonical contract is installing standard `SKILL.md`-compatible skills from ordinary GitHub repositories:
+
+```text
+/skill install https://github.com/user/repo
+```
+
+Optional convenience shorthand for future tooling:
 ```text
 /skill install <owner>/<repo>
 /skill install <owner>/<repo>@<branch-or-tag>
 ```
-Installs the repository into the user or workspace skill store.
+
+#### UI Concept (Planned Milestone M16)
+```text
+Install Skill
+├── GitHub URL (e.g., https://github.com/user/repo)
+├── Local Folder
+└── Registry (Future community catalog)
+```
+
+Target compatibility:
+- Codex `SKILL.md`
+- Claude Code `SKILL.md`
+- Agent Studios native skill
+
+*(This feature is explicitly **PLANNED** for Milestone M16; it is not yet implemented.)*
 
 ### D. Progressive Loading
 To preserve context window capacity, skills are **progressively loaded**:
@@ -54,7 +85,7 @@ Because skills can suggest shell commands and execute tools:
 Agent Studios connects to local and remote MCP servers through Codex's native MCP client.
 
 ### MCP Scopes
-1. **Workspace MCP**: Configured in `.agent-studios/mcp.json`. Enables project-specific servers (e.g., local database query server, dev server inspector).
+1. **Workspace / Project MCP**: Configured in `.agent-studios/mcp.json`. Enables project-specific servers (e.g., local database query server, dev server inspector).
 2. **Global MCP**: Configured in `~/.agent-studios/mcp.json`. Developers connect personal tools (GitHub, Linear, Slack, Sentry, Brave Search).
 
 ---

@@ -115,7 +115,7 @@
 
 ### M10: External Runtime Interface [PLANNED]
 - Define standardized `AgentRuntime` lifecycle interface (prepare, start, submit turn, interrupt, terminate).
-- Establish process containment models (Windows Job Objects, directory confinement, environment sanitization).
+- Establish process containment models (evaluating Windows Job Objects / AppContainer candidates for Windows, directory confinement, environment sanitization; Linux/macOS containment as future exploration).
 - Define structured JSON-RPC / SSE communication protocol for non-Codex agents.
 
 ### M11: OpenCode Runtime Adapter [PLANNED]
@@ -131,7 +131,7 @@
 ### M13: Code-OSS Integration Foundation [PLANNED]
 - Code-OSS source snapshot targeting Windows 11 x64 first.
 - Independent Agent Studios desktop application branding, typography, and monochrome visual language.
-- Native IPC bridge connecting Code-OSS desktop workbench to local Agent Studios App Server.
+- Native IPC bridge (JSON-RPC protocol; physical transport TBD in M13 open design question) connecting Code-OSS desktop workbench to local Agent Studios App Server.
 - Full IDE feature parity (Monaco editor, Explorer, Search, Git, Terminal, Debugger, LSP).
 
 ### M14: Agent Studios Built-in AI Extension [PLANNED]

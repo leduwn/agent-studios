@@ -1,6 +1,7 @@
-﻿# Agent Studios — Upstream References & Architectural Lineage
+# Agent Studios — Upstream References & Architectural Lineage
 
 > **Status**: Core Architecture & Governance Specification
+>
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -38,17 +39,18 @@ At the same time, **Agent Studios maintains a completely distinct and independen
 
 OpenAI Codex is the foundational execution engine powering internal agent threads:
 - **What We Inherit**:
-  - The portable core agent loop, tool dispatch (`exec_command`, `apply_patch`), and interactive approvals.
-  - Native sandbox containment and execution monitoring.
-  - Context history management and turn compaction algorithms.
+  - The portable core agent loop, tool dispatch (`exec_command`, `apply_patch`), and file operations.
+  - Native sandbox containment and interactive approvals.
+  - Context history management, turn compaction algorithms, and interrupt/cancellation.
   - Native support for Model Context Protocol (MCP), Skills (`SKILL.md`), Plugins, hooks, and `AGENTS.md`.
-  - Hierarchical sub-agent spawning via `AgentControl`.
+  - Hierarchical sub-agent spawning via `AgentControl` and agent messaging.
+  - Diagnostics, recovery, image/tool handling, and app-server concepts.
 - **What We Add**:
   - Open multi-provider protocol adapters (Anthropic Messages, Google Gemini, OpenAI Chat Completions, OpenRouter, local models).
   - Deterministic multi-agent Control Plane with DAG validation (Kahn's algorithm).
   - True parallel physical isolation via dedicated Git worktrees.
   - Ephemeral index change capture, content-addressed artifact storage, and patch reconciliation.
-- **Maintenance Invariant**: Upstream modifications to `codex-rs/` are strictly minimized to generic, provider-neutral seams (documented in `CODEX_PATCHES.md`).
+- **Maintenance Invariant**: Upstream modifications to `codex-rs/` are strictly minimized to generic, provider-neutral seams (documented in `CODEX_PATCHES.md`). We do not reduce Codex to merely a provider transport, nor do we position Agent Studios as a Codex clone.
 
 ---
 
@@ -58,13 +60,19 @@ OpenAI Codex is the foundational execution engine powering internal agent thread
 
 OpenCode demonstrates that AI coding tools can be open, flexible, and model-agnostic:
 - **What We Learn from OpenCode**:
-  - First-class Bring-Your-Own-Key (BYOK) without mandatory proprietary account logins.
-  - First-class treatment of local and self-hosted models (Ollama, LM Studio, vLLM).
-  - Fast, responsive, keyboard-driven desktop developer ergonomics.
+  - Multi-provider openness and first-class Bring-Your-Own-Key (BYOK) ergonomics.
+  - Model and provider flexibility, including local and self-hosted models (Ollama, LM Studio, vLLM).
+  - Fast, responsive, keyboard-driven agent desktop developer ergonomics and configuration ideas.
 - **How We Differ**:
-  - OpenCode is a TypeScript/Node.js desktop application; Agent Studios is a native Rust-powered Control Plane integrated with Code-OSS.
-  - Agent Studios provides deterministic DAG scheduling, physical worktree isolation, and artifact reconciliation.
-  - OpenCode is planned as an **external runtime adapter** (Milestone M11), not our internal execution engine.
+  - OpenCode does **not** become the Agent Studios core internal runtime.
+  - OpenCode is planned as an **external runtime adapter** (Milestone M11):
+    ```text
+    Agent Studios Control Plane
+            │
+            ▼
+    OpenCode Runtime Adapter (M11)
+    ```
+  - Agent Studios provides native deterministic DAG scheduling, physical worktree isolation, and artifact reconciliation within a Code-OSS integrated workbench.
 
 ---
 
@@ -74,12 +82,14 @@ OpenCode demonstrates that AI coding tools can be open, flexible, and model-agno
 
 AgentTeams explores multi-agent collaboration in software engineering:
 - **What We Learn from AgentTeams**:
-  - Clear manager-worker task delegation patterns.
+  - Clear manager-worker delegation patterns.
   - The necessity of human-in-the-loop review at critical execution checkpoints.
-  - Specialized agent roles (planner, coder, reviewer, tester).
+  - Multiple execution runtime coordination concepts.
 - **How We Differ**:
-  - Agent Studios rejects turning the IDE into a social-network simulation of bots chattering in chat rooms.
-  - Agent Studios roots all agent coordination in **native Git primitives and compiler feedback**, not conversational consensus.
+  - AgentTeams informs orchestration concepts but is not the target Agent Studios UI.
+  - Agent Studios preserves its own product model:
+    $$\textbf{Agent-first desktop experience} + \textbf{Code-OSS IDE} + \textbf{Deterministic Control Plane}$$
+  - Agent Studios roots all agent coordination in **native Git primitives, compiler feedback, and deterministic task graphs**, not conversational chat room consensus.
 
 ---
 

@@ -1,6 +1,7 @@
-﻿# Agent Studios — Security & Trust Model
+# Agent Studios — Security & Trust Model
 
 > **Status**: Core Architecture Specification
+>
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -71,9 +72,10 @@ Security checks occur at real system execution boundaries:
                         - [ Pending in Approval Inbox ]
                                  │ (Human Approves)
                                  ▼
-                     4. Operating System Sandbox
-                        - Windows Job Object / AppContainer
-                        - Restricted CWD (.git/agent-studios/...)
+                     4. Operating System Sandbox / Containment
+                        - Directory Confinement (worktree root)
+                        - Environment Sanitization
+                        - OS Process Guard (TBD M10+)
                                  │
                                  ▼
                         Real Shell Execution
@@ -85,14 +87,18 @@ Security checks occur at real system execution boundaries:
 
 ## 4. Process Containment & Sandboxing
 
-1. **Windows 11 Containment**:
-   - Shell commands execute inside restricted process trees governed by Windows Job Objects.
-   - Resource limits: Maximum memory limits, process count caps, and CPU priority constraints prevent fork-bomb attacks.
+### Canonical Architectural Requirements
+1. **Windows-First, Portable Core**:
+   Target platform is native Windows 11 x64 (MSVC) while preserving cross-platform core portability.
 2. **Directory Confinement**:
    - Agents are restricted to their allocated `source_cwd` inside `.git/agent-studios/worktrees/<session>/<task_id>/`.
    - Path traversal (`../..`) targeting parent repositories or system root directories is detected and blocked before command execution.
 3. **Environment Sanitization**:
    - Subprocesses inherit a sanitized environment block with system path defaults. User credentials not explicitly mapped to the task are stripped from the environment.
+
+### OS Containment Implementation Status (Open Design Question in M10+)
+- **Windows**: Windows Job Objects and AppContainer are **planned candidates** for external runtimes and process containment in Milestone M10+. They are not locked as implemented facts or permanent architectural constraints today.
+- **Linux & macOS**: Mechanisms such as Linux cgroups/namespaces or macOS sandbox-exec remain **future exploration** for Milestone M10+ and are not prematurely decided.
 
 ---
 

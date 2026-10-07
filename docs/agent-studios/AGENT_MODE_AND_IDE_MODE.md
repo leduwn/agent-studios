@@ -230,12 +230,15 @@ Agent Mode and IDE Mode are two windows into the **same active runtime process**
                                ▼
               ┌─────────────────────────────────┐
               │      Shared Session Kernel      │
-              │  - Session ID                   │
+              │  - Session ID (session_id)      │
               │  - Working Directory (cwd)      │
-              │  - Active Run & Budgets         │
-              │  - TaskGraph & Assigned Agents  │
-              │  - Tool & Command History       │
-              │  - Approval Queue               │
+              │  - Active Run & Budgets (run)   │
+              │  - TaskGraph & State (tasks)    │
+              │  - Assigned Agents (agents)     │
+              │  - Tool History (tool_history)  │
+              │  - Approval Queue (approvals)   │
+              │  - Provider & Model             │
+              │  - Runtime State                │
               │  - Git Worktree Allocations     │
               │  - Content-Addressed Artifacts  │
               │  - Context & AGENTS.md State    │

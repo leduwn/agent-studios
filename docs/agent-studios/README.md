@@ -1,41 +1,91 @@
-﻿# Agent Studios Documentation Hub
+# Agent Studios Documentation Hub
 
 > **The Canonical Architectural Memory of Agent Studios**
+>
 > All architectural specifications, master vision documents, product principles, and subsystem guides reside here.
 
 ---
 
-## ⚠️ Mandatory Instruction for Future Coding Agents
+## 0. Documentation Precedence Hierarchy
+
+When questions or discrepancies arise, resolve them according to this strict, descending precedence hierarchy:
+
+```text
+┌────────────────────────────────────────────────────────┐
+│ 1. MASTER_VISION.md (Highest Authority)                │
+├────────────────────────────────────────────────────────┤
+│ 2. PRODUCT_PRINCIPLES.md (Core Rules & Invariants)     │
+├────────────────────────────────────────────────────────┤
+│ 3. ROADMAP.md (Milestone Order & Target Scope)         │
+├────────────────────────────────────────────────────────┤
+│ 4. Subsystem Specifications (Architecture & Contracts) │
+│    - WORKTREE_TASK_ARTIFACT.md                         │
+│    - INTERNAL_MULTI_AGENT.md                           │
+│    - CONTROL_PLANE.md, etc.                            │
+├────────────────────────────────────────────────────────┤
+│ 5. Implementation Code (Rust, Code-OSS, Scripts)       │
+└────────────────────────────────────────────────────────┘
+```
+
+### Discrepancy Resolution Protocol
+If implementation code and documentation disagree:
+1. **Investigate Direction**: Determine whether code represents a validated new milestone ahead of docs, or whether documentation represents canonical architecture that the code has not yet fully realized.
+2. **Never Silently Rewrite Docs**: Do **not** silently rewrite canonical documentation to match accidental code bugs, temporary hacks, or incomplete implementations.
+3. **Never Degrade Vision**: Do **not** rewrite the product vision to match transient implementation limitations.
+4. **Surface Conflicts**: Stop and explicitly report the discrepancy before altering architecture or mutating invariants.
+
+---
+
+## 1. Future Coding Agent Bootstrap Guide
 
 ```markdown
-<!-- CANONICAL INSTRUCTION FOR ALL CODING AGENTS -->
-For every future Agent Studios milestone:
+<!-- CANONICAL BOOTSTRAP INSTRUCTIONS FOR FUTURE CODING AGENTS -->
+When entering the Agent Studios repository to design, implement, or review code:
 
-Before implementation, read:
-- docs/agent-studios/MASTER_VISION.md
-- docs/agent-studios/PRODUCT_PRINCIPLES.md
-- docs/agent-studios/ROADMAP.md
+1. Verification Preflight:
+   - Check current git branch: `git status`, `git branch --show-current`
+   - Check latest commit SHA: `git rev-parse HEAD`
+   - Confirm branch matches target milestone (e.g. M09 review, M10 start).
+   - Ensure working tree is clean before beginning work.
 
-Then read the subsystem-specific documents relevant to the milestone.
+2. Mandatory Reading Order:
+   a. `docs/agent-studios/MASTER_VISION.md` (Product identity, formula, 30 invariants, terminology)
+   b. `docs/agent-studios/PRODUCT_PRINCIPLES.md` (27 immutable principles)
+   c. `docs/agent-studios/ROADMAP.md` (Current milestone status and sequencing)
+   d. Subsystem-specific specification for the active task (e.g., `WORKTREE_TASK_ARTIFACT.md`)
 
-If the requested implementation conflicts with MASTER_VISION.md or an established
-architectural invariant, stop and report the conflict before changing architecture.
+3. Interpret Architecture Decision Status Correctly:
+   - CANONICAL: Permanent, non-negotiable architectural requirement (regardless of milestone).
+   - IMPLEMENTED: Code exists and is verified in the repository.
+   - PLANNED: Target architecture for a specific future milestone; do not assume code exists.
+   - OPEN DESIGN QUESTION: Actively deferred design choice; do not pick prematurely.
+   - SUPERSEDED: Historical design discarded in favor of current architecture.
+
+4. Invariant Verification:
+   - Verify zero Rust diff when performing documentation-only passes.
+   - Verify zero plaintext secrets in any log, event, or config.
+   - Verify `Blocked != Cancelled` semantics in state handling.
+   - Verify destructive cleanup prohibition (no `git reset --hard`, `git clean -fdx`, `git worktree remove --force`).
+
+5. Conflict Escalation:
+   - If user instructions or task prompts conflict with `MASTER_VISION.md` or established invariants:
+     STOP and explicitly report the conflict to the developer before modifying code or architecture.
 ```
 
 ---
 
-## 1. Master Foundations
+## 2. Master Foundations
 
 | Document | Title & Role |
 | :--- | :--- |
-| [`MASTER_VISION.md`](MASTER_VISION.md) | **Master Product Constitution**: Official product statement, formula, short identity, what Agent Studios is NOT, high-level architecture, progressive disclosure UX, cognitive vs. control plane boundary. |
+| [`MASTER_VISION.md`](MASTER_VISION.md) | **Master Product Constitution**: Official product statement, formula, short identity, what Agent Studios is NOT, high-level architecture, progressive disclosure UX, cognitive vs. control plane boundary, Canonical Terminology Table (28 terms, 9 distinctions), 30 Non-Negotiable Invariants, and Architecture Decision Status index. |
 | [`PRODUCT_PRINCIPLES.md`](PRODUCT_PRINCIPLES.md) | **Product Principles & Ruleset**: The 27 immutable architectural principles governing code, design, and execution. |
 | [`ROADMAP.md`](ROADMAP.md) | **Master Architectural Roadmap**: Complete status of Milestones M01 through M19 (M01–M08 complete, M09 under final review, M10–M19 planned). |
 | [`UPSTREAM_REFERENCES.md`](UPSTREAM_REFERENCES.md) | **Upstream References & Heritage**: Roles of OpenAI Codex, OpenCode, AgentTeams, and Code-OSS. |
 
 ---
 
-## 2. Product Architecture & User Experience
+## 3. Product Architecture & User Experience
 
 | Document | Title & Role |
 | :--- | :--- |
@@ -46,7 +96,7 @@ architectural invariant, stop and report the conflict before changing architectu
 
 ---
 
-## 3. Core Engine & Runtimes
+## 4. Core Engine & Runtimes
 
 | Document | Title & Role | Status |
 | :--- | :--- | :--- |
@@ -58,7 +108,7 @@ architectural invariant, stop and report the conflict before changing architectu
 
 ---
 
-## 4. Platform Integration & Extensions
+## 5. Platform Integration & Extensions
 
 | Document | Title & Role | Status |
 | :--- | :--- | :--- |
@@ -68,7 +118,7 @@ architectural invariant, stop and report the conflict before changing architectu
 
 ---
 
-## 5. Architectural Invariants Index
+## 6. Architectural Invariants Index
 
 Every pull request and modification must preserve these 12 critical invariants:
 

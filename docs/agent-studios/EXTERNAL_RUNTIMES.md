@@ -75,9 +75,9 @@ pub trait AgentRuntime: Send + Sync + 'static {
 
 Because external runtimes execute foreign CLI binaries (Node.js, Python, or Go processes), Agent Studios enforces strict process containment:
 
-1. **Subprocess Sandboxing**:
-   - On Windows: Processes run inside Windows Job Objects with strict CPU, memory, and handle quotas.
-   - On Linux/macOS: Processes execute inside dedicated PID namespaces and cgroups.
+1. **Subprocess Sandboxing (Planned Candidate / Future Exploration in M10+)**:
+   - On Windows: Windows Job Objects and AppContainer are planned candidates for process containment with CPU, memory, and handle quotas.
+   - On Linux/macOS: Linux cgroups/namespaces and macOS sandbox-exec are future exploration for platform containment.
 2. **Directory Confinement**:
    - External processes are strictly rooted in their assigned isolated Git worktree (`cwd`).
    - Access to parent repositories, global directories, or sibling worktrees is blocked at the OS or path-mapping level.

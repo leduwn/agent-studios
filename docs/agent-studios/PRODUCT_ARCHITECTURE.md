@@ -59,7 +59,7 @@ The desktop application is architected around an isolated client-server IPC mode
 └──────────────┼──────────────────────────┼──────────────┘
                │                          │
                └────────────┬─────────────┘
-                            │ Native IPC (JSON-RPC / Named Pipes)
+                            │ Native IPC (JSON-RPC protocol; Transport TBD in M13 - Open Design Question)
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │             Agent Studios App Server                   │
