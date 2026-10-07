@@ -1,226 +1,117 @@
-# Agent Studios Internal Multi-Agent Runtime
+﻿# Agent Studios — Internal Multi-Agent Runtime
 
-This document describes the design, architecture, and verification of the Agent Studios
-internal multi-agent runtime (Milestone M08), implemented in `agent-studios-internal-agent`
-and integrated with `agent-studios-control-plane`, `agent-studios-provider`,
-`agent-studios-runtime-session`, and the upstream Codex engine (`codex-rs`).
+> **Status**: Core Architecture Specification
+> **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
 
-## 1. Overview & Core Architecture
+## 1. Overview & Real Codex Hierarchy
 
-Agent Studios enables multiple AI agents to collaborate within a single Studio workspace.
-Unlike external CLI orchestrators, the internal runtime runs directly inside the Agent Studios
-process, building upon the foundations established across prior milestones:
+The Agent Studios internal multi-agent runtime (`agent-studios-internal-agent`) coordinates teams of specialized AI agents within a single Studio workspace.
+
+Unlike external multi-process CLI wrappers, Agent Studios executes agents directly within the native Codex engine process (`codex-rs`). Sub-agents are organized in a **hierarchical agent tree** spawned via Codex's native `AgentControl` interface:
 
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        AgentStudiosSupervisor                          │
-│                                                                        │
-│   ┌──────────────────────┐              ┌──────────────────────────┐   │
-│   │ Coordinator Planning │              │  Workspace Arbitrator    │   │
-│   │   (Kahn DAG Sort)    │              │ (Exclusive Mutating,     │   │
-│   └──────────┬───────────┘              │  Concurrent ReadOnly)    │   │
-│              │                          └────────────┬─────────────┘   │
-│              ▼                                       ▼                 │
-│   ┌──────────────────────┐              ┌──────────────────────────┐   │
-│   │  ControlPlaneActor   │              │   AgentBudgetTracker     │   │
-│   │   (Single-Writer)    │              │  (Turns, Tools, Duration)│   │
-│   └──────────┬───────────┘              └────────────┬─────────────┘   │
-└──────────────┼───────────────────────────────────────┼─────────────────┘
-               │                                       │
-               ▼                                       ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                       AgentExecutor Backend                            │
-│                                                                        │
-│   ┌──────────────────────┐              ┌──────────────────────────┐   │
-│   │  MockAgentExecutor   │              │    CodexAgentExecutor    │   │
-│   │ (Deterministic Unit) │              │(RuntimeSessionFactory)   │   │
-│   └──────────────────────┘              └────────────┬─────────────┘   │
-└──────────────────────────────────────────────────────┼─────────────────┘
-                                                       │
-                                                       ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                   Codex ThreadManager & AgentControl                   │
-│                                                                        │
-│   - Patch 003: Explicit SpawnRequest.model_runtime_override            │
-│   - Full Codex feature surface: tools, sandbox, MCP, skills, compaction│
-└────────────────────────────────────────────────────────────────────────┘
+               Root Coordinator Thread
+               (AgentControl / Root Session)
+                       │
+       ┌───────────────┴───────────────┐
+       ▼                               ▼
+  Child Worker A                  Child Worker B
+   (Coder Agent)                 (Reviewer Agent)
+   - Dedicated CWD / WT          - Dedicated CWD / WT
+   - ModelRef A                  - ModelRef B
+   - Turn/Tool Budget            - Turn/Tool Budget
 ```
 
-### Key Principles
-
-1. **Independent Agent Specifications**:
-   Each agent in an `InternalTeamSpec` possesses an independent:
-   - **Role & Display Name**: Defined in `InternalAgentSpec`.
-   - **Provider Instance & Model**: Authoritative `ModelRef(ProviderInstanceId, ModelId)`.
-   - **Reasoning Configuration**: `AgentReasoningSelection` (`None`, `Low`, `Medium`, `High`,
-     `XHigh`, `Max`).
-   - **Execution Budget**: `AgentExecutionBudget` limiting turns, tool calls, and wall-clock time.
-   - **Workspace Access Mode**: `WorkspaceAccessMode::ReadOnly` vs `WorkspaceAccessMode::Mutating`.
-
-2. **Strict Codex Feature Inheritance**:
-   Sub-agents execute as first-class Codex threads. They inherit the complete Codex agent loop,
-   native tool dispatch (`exec_command`, `apply_patch`), approvals, sandbox containment,
-   MCP server connections, Skills (`SKILL.md`), Plugins, hooks, `AGENTS.md`, context history
-   compaction, and session persistence without reducing or rewriting Codex primitives.
-
-3. **Zero Plaintext Secrets**:
-   Credentials never touch disk or logs in plaintext. Secret references resolve in-memory via
-   `InMemorySecretResolver` directly to ephemeral HTTP transport headers or query parameters.
+### Native Codex Feature Inheritance
+Sub-agents are first-class Codex threads inheriting the full portable capability set:
+- Native agent loop and tool dispatch (`exec_command`, `apply_patch`).
+- Interactive approvals and sandbox containment.
+- External tool integration via MCP and Skills (`SKILL.md`).
+- Context history management and compaction.
+- Hierarchical instruction inheritance via `AGENTS.md`.
 
 ---
 
-## 2. Upstream Codex Seam: Patch 003
+## 2. Cognitive vs. Deterministic Boundary
 
-To allow sub-agents spawned via Codex's native `AgentControl` to use a different provider or
-model from their parent thread, a third minimal, provider-neutral seam was added to `codex-rs`:
+Agent Studios enforces an absolute separation of concerns between cognitive reasoning and deterministic control:
 
-### Generic Spawn Runtime Override
-
-- **Location**: `codex-rs/core/src/agent/api.rs`, `codex-rs/core/src/agent/control.rs`,
-  `codex-rs/core/src/thread_manager.rs`, `codex-rs/core/src/thread.rs`.
-- **Interface**:
-  ```rust
-  pub struct SpawnRequest {
-      pub prompt: String,
-      pub agent_type: Option<AgentType>,
-      pub model_runtime_override: Option<ModelRuntimeOverride>,
-  }
-  ```
-- **Semantics**:
-  - When `model_runtime_override` is `Some(override)`, the child thread adopts the specified
-    `(SharedModelProvider, SharedModelsManager)` pair.
-  - When `None`, legacy behavior is preserved: the child inherits the parent thread's model
-    runtime override.
-- **Thread Façade**:
-  ```rust
-  impl CodexThread {
-      pub fn agent_control(&self) -> Arc<dyn AgentControl> {
-          self.session_services.agent_control.clone()
-      }
-  }
-  ```
-  Exposes sub-agent spawn capability directly from a running thread without leaking internal
-  session internals.
-
----
-
-## 3. Core Subsystems
-
-### A. Single-Writer ControlPlane Actor (`control_plane_actor.rs`)
-
-The `ControlPlane` maintains transactional state across studios, agents, tasks, runs, and
-approvals. To prevent lock contention and eliminate multi-threaded deadlocks, `ControlPlaneActor`
-runs on a dedicated Tokio background task:
-- All operations are submitted as asynchronous commands via `ControlPlaneHandle`.
-- `ControlPlaneHandle` is cloneable, thread-safe, and provides typed async methods:
-  - `create_studio`, `register_agent_with_id`, `create_task`, `add_task_dependency`,
-    `transition_task_state`, `create_run`, `transition_run_state`, `request_cancellation`,
-    `get_ready_tasks`, `get_studio_tasks`.
-- State transitions are committed atomically via `commit_transaction`.
-
-### B. Workspace Policy Arbitrator (`workspace_policy.rs`)
-
-Multi-agent coordination requires deterministic access control over workspace files:
-- **`WorkspaceAccessMode::ReadOnly`**: Multiple agents may hold concurrent read leases on the
-  same workspace key.
-- **`WorkspaceAccessMode::Mutating`**: Exactly one agent may hold a mutating lease. All other
-  read and mutate requests block or return `InternalAgentError::WorkspaceConflict`.
-- **RAII Leases (`WorkspaceLease`)**: Automatically decrements reader count or clears mutating
-  ownership when dropped, guaranteeing that crashes or cancellations never leave dangling locks.
-
-### C. Execution Budget Tracker (`budget.rs`)
-
-Protects system resources and prevents runaway agent loops:
-- `AgentExecutionBudget`: Configures maximum turns, tool calls, and wall-clock duration in seconds.
-- `AgentBudgetTracker`: Dynamically increments turn and tool call counters during execution and
-  checks elapsed wall-clock time. Returns typed errors:
-  - `InternalAgentError::BudgetExceeded(BudgetLimitType::Turns, ...)`
-  - `InternalAgentError::BudgetExceeded(BudgetLimitType::ToolCalls, ...)`
-  - `InternalAgentError::BudgetExceeded(BudgetLimitType::WallClock, ...)`
-
-### D. Coordinator DAG Planning & Kahn's Validation (`coordinator.rs`)
-
-The team coordinator agent produces a structured execution plan represented by
-`CoordinatorDecision`:
-- **`CoordinatorDecision::Plan { tasks: Vec<PlannedTask> }`**: Directed acyclic graph of tasks.
-- **`CoordinatorDecision::Complete { summary: String }`**: Objective already satisfied.
-- **`CoordinatorDecision::Fail { reason: String }`**: Planning cannot proceed.
-
-`CoordinatorPlanValidator` verifies plan correctness:
-1. **Alias Verification**: Verifies every task's `assigned_alias` exists in `InternalTeamSpec`.
-2. **Key Uniqueness**: Rejects duplicate task keys within the plan.
-3. **Dependency Existence**: Ensures every `depends_on` key references a task in the plan.
-4. **Acyclicity (Kahn's Algorithm)**: Computes in-degrees, extracts zero in-degree nodes, and
-   verifies that all tasks are visited. If cycles or self-dependencies exist, rejects with
-   `InternalAgentError::CyclicDependency`.
-5. **Materialization**: Atomically registers all tasks into the `ControlPlane` with proper
-   dependencies and initial `Ready` or `Blocked` states.
-
-### E. Supervisor & Scheduler Loop (`supervisor.rs`)
-
-`AgentStudiosSupervisor` orchestrates the full lifecycle of a multi-agent team:
-1. **Boot**: Registers coordinator and worker agents into `ControlPlane` with designated IDs.
-2. **Plan**: Prompts coordinator, parses JSON decision, and validates/materializes tasks into DAG.
-3. **Schedule**:
-   - Queries `ControlPlane` for `Ready` tasks.
-   - Acquires workspace leases via `WorkspacePolicyArbitrator`.
-   - Creates a `RunRecord` in `ControlPlane` and transitions task to `Running`.
-   - Executes the task via the configured `AgentExecutor`.
-   - Releases workspace lease immediately on turn completion.
-   - On success: Transitions run and task to `Succeeded`. Dependent tasks automatically unblock
-     to `Ready`.
-   - On failure: Evaluates configured `FailurePolicy`:
-     - `FailFast`: Cancels all pending tasks and issues studio-wide cancellation.
-     - `ContinueIndependent`: Marks failed task as `Failed`; independent tasks continue.
-     - `RetryTask(max)`: Requeues task to `Ready` up to `max` retry attempts.
-
----
-
-## 4. Pluggable Execution Backends (`executor.rs`)
-
-Execution logic is decoupled from orchestration via the `AgentExecutor` trait:
-
-```rust
-#[async_trait]
-pub trait AgentExecutor: Send + Sync + 'static {
-    async fn execute_agent(
-        &self,
-        context: AgentExecutionContext,
-    ) -> Result<AgentExecutionResult, InternalAgentError>;
-}
-```
-
-- **`MockAgentExecutor`**: In-memory executor with configurable role/alias responses, custom
-  handlers, and execution recording. Enables millisecond-fast, deterministic unit testing.
-- **`CodexAgentExecutor`**: Production executor powered by `AgentStudiosRuntimeSessionFactory`.
-  Prepares authoritative runtime overrides for `context.agent_spec.model_ref` and executes
-  turns via Codex `ThreadManager`.
-
----
-
-## 5. Verification & Test Evidence
-
-All 26 tests in `agent-studios-internal-agent` pass with zero warnings:
-
-| Test Suite | Tests | Description |
+| Dimension | Cognitive Coordinator (LLM) | Deterministic Control Plane (Rust Kernel) |
 | :--- | :--- | :--- |
-| `profile_and_team_tests` | 5 | Validates aliases, duplicate ID rejection, reasoning effort, budget builder |
-| `control_plane_actor_tests` | 3 | Actor task dependency unblocking, run lifecycle, concurrent handle access |
-| `workspace_policy_tests` | 3 | Mutator exclusivity, concurrent readers, async acquire with timeout |
-| `budget_tests` | 3 | Enforces turn limits, tool call limits, and unlimited budget semantics |
-| `coordinator_tests` | 7 | Linear DAG, diamond DAG, cycle rejection, self-cycle rejection, materialization |
-| `supervisor_tests` | 3 | Full success workflow, retry policy on flaky worker, fail-fast cancellation |
-| `cross_provider_team_e2e_tests` | 2 | 3-provider team execution (Gemini, Claude, GPT-4o), same-model-slug isolation |
+| **Nature** | Probabilistic, creative, heuristic | Typed, immutable, mathematical, transactional |
+| **Responsibilities** | • Decomposes high-level user goals<br>• Synthesizes architectural plans<br>• Assigns agent roles & model selections<br>• Generates code & conducts heuristic reviews | • Enforces DAG acyclicity (Kahn's algorithm)<br>• Enforces task & agent state transitions<br>• Schedules tasks by priority & readiness<br>• Allocates isolated Git worktrees<br>• Enforces pre-execution tool & turn budgets<br>• Owns artifact versioning & SHA-256 blobs<br>• Persists monotonic event log & replay<br>• Propagates hierarchical cancellation |
+| **Failure Mode** | Hallucination, context drift, bad syntax | Fail-closed errors, rollback, crash retention |
 
-### Cross-Provider E2E Verification Details
+The LLM proposes actions; the Control Plane validates and executes state transitions.
 
-- **Coordinator**: Google Gemini (`ProtocolFamily::GeminiGenerateContent`, `gemini-2.5-pro`)
-  receiving streaming responses via mock endpoint with `x-goog-api-key`.
-- **Coder**: Anthropic Messages (`ProtocolFamily::AnthropicMessages`, `claude-3-7-sonnet-20250219`)
-  receiving streaming responses with `x-api-key`.
-- **Reviewer**: OpenAI Chat Completions (`ProtocolFamily::OpenAiChatCompletions`, `gpt-4o`)
-  receiving streaming responses with `Authorization: Bearer`.
-- **Isolation Guarantee**: Two independent instances configured with the identical model slug
-  `gpt-4o` route strictly to their respective endpoints and secrets based on `ProviderInstanceId`.
+---
+
+## 3. Agent State vs. Task State Invariant
+
+Agent lifecycle and task lifecycle are strictly decoupled:
+
+```text
+AGENT LIFECYCLE:
+Registered ──► Starting ──► Idle ◄────► Busy ──► Stopping ──► Stopped
+                             │
+            Operational: [ Running | Waiting | Blocked |
+                           Retrying | Paused | Failed | Cancelled ]
+
+TASK LIFECYCLE:
+Pending ──► Blocked ◄────► Ready ──► Running ──► Succeeded
+                             │          │
+                             ▼          ├──► Failed
+                         Cancelled      └──► Cancelled
+```
+
+### Crucial Invariants
+1. **Semantic Independence**: An agent can be `Idle` while its assigned task is `Blocked` waiting for upstream dependencies or human approval.
+2. **Blocked is NOT Cancelled**: A task that cannot proceed due to an unfulfilled dependency, patch reconciliation conflict, or waiting approval is `Blocked`, never `Cancelled`. Cancellation permanently revokes intent.
+
+---
+
+## 4. Workspace Access Policy
+
+Multi-agent coordination requires strict access arbitration over workspace directories:
+
+- **`WorkspaceAccessMode::ReadOnly`**: Multiple agents may hold concurrent read leases on the same workspace key.
+- **`WorkspaceAccessMode::Mutating`**: Exactly one agent may hold a mutating lease. Concurrent read or mutate requests are rejected or queued.
+- **Physical Isolation via Worktrees**: In Milestone M09, mutating agents are assigned physically isolated Git worktrees, allowing true parallel mutation without file contention.
+- **RAII Leases (`WorkspaceLease`)**: Automatically releases read or write locks on drop, guaranteeing that thread panics or cancellations never leak locks.
+
+---
+
+## 5. Pre-Execution Tool Budget Enforcement
+
+To prevent runaway agent loops, token exhaustion, and catastrophic command execution, Agent Studios enforces tool budgets **before** tools execute:
+
+### The `AgentStudiosToolLifecycleContributor`
+Codex provides a `ToolLifecycleContributor` extension seam:
+1. **Pre-Execution Check (`authorize_tool_call`)**:
+   - Synchronously checks and increments tool call counters.
+   - If `tool_calls_used >= max_tool_calls`, records `BudgetExceeded("tool_calls")` and returns an authorization error.
+   - **Codex emits `ToolCallOutcome::Blocked` before the tool handler runs**. The tool command is never executed.
+2. **Lifecycle Events (`on_tool_start` / `on_tool_finish`)**:
+   - Emits structured `ControlPlaneEvent::ToolStarted`, `ToolCompleted`, or `ToolFailed` with execution duration and safe error classification.
+   - Plaintext arguments, shell commands, and secrets are strictly excluded from event logs.
+
+---
+
+## 6. Failure Policies
+
+When a worker task fails, the `AgentStudiosSupervisor` evaluates the configured `FailurePolicy`:
+
+1. **`FailFast`**:
+   - Terminates the run immediately.
+   - Cancels all running and pending tasks via `AgentControl::interrupt`.
+   - Issues studio-wide cancellation and records the failure classification.
+2. **`ContinueIndependent`**:
+   - Marks the failed task as `Failed`.
+   - Cancels downstream tasks dependent on the failed task.
+   - Allows completely independent DAG branches to continue execution to completion.
+3. **`RetryTask(max_attempts)`**:
+   - Re-queues the failed task back to `Ready` up to `max_attempts`.
+   - Increments the retry counter and re-schedules the task with clean execution context.
+   - Transitions to `Failed` if retry attempts are exhausted.
