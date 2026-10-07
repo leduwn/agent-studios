@@ -98,8 +98,8 @@ Milestone M14 integrates a native, built-in Code-OSS extension (`agent-studios-v
 ```text
 Code-OSS Workbench (Desktop UI / Extension)
         │
-        │ IPC Boundary (JSON-RPC protocol)
-        │ Transport: TBD (Open Design Question in M13)
+        │ IPC Boundary
+        │ (Transport & Protocol TBD in M13 - Open Design Question)
         ▼
 Agent Studios App Server (Rust)
         │
@@ -107,9 +107,17 @@ Agent Studios App Server (Rust)
 Control Plane & Runtimes
 ```
 
-### IPC Architecture & Open Transport Question
-- **Protocol Contract**: Structured JSON-RPC with bi-directional streaming for event replay and subscriptions.
-- **Exact Transport (OPEN DESIGN QUESTION in M13)**: The choice of physical IPC transport (named pipe, local WebSocket, stdio, or platform-native IPC) remains an open architectural decision to be determined during Milestone M13 architecture work. The architecture constrains behavior (zero-secret wire payloads, monotonic sequence ordering, typed protocol envelopes), not the physical transport.
+### IPC Architecture & Open Transport/Protocol Question (OPEN DESIGN QUESTION in M13)
+- **Canonical Transport-Independent Invariants**:
+  - Typed request/response contracts and typed event envelopes.
+  - Zero-secret wire payloads (tokens and credentials never cross in plaintext).
+  - Deterministic event sequencing (monotonic sequence numbers).
+  - Reconnect and state recovery semantics where required.
+  - Shared-session identity (`session_id`).
+- **Protocol & Physical Transport (OPEN DESIGN QUESTION in M13)**:
+  - The exact choice of physical transport and protocol mechanism remains an open architectural decision to be determined during Milestone M13 architecture work.
+  - Possible transport candidates include: named pipes, local WebSockets, stdio, native Electron/Node IPC, or another typed local IPC mechanism.
+  - JSON-RPC serves as a **candidate / reference protocol** (given compatibility with Codex and app-server patterns), but is **not** a canonical required protocol today. The architecture constrains behavioral invariants, not premature implementation technology.
 - **Extension Contributions**:
   - Contributes the `Agents` view container and sidebar tree views.
   - Contributes editor inline decorations (displaying which agent is editing or has edited specific lines).

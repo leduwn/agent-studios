@@ -8,10 +8,16 @@
 
 ## 0. Documentation Precedence Hierarchy
 
-When questions or discrepancies arise, resolve them according to this strict, descending precedence hierarchy:
+When questions or discrepancies arise, resolve them according to this strict distinction between normative intent and implementation reality:
+
+### A. Normative Product / Architecture Intent
+
+Documentation precedence governs normative product and architecture intent:
 
 ```text
 ┌────────────────────────────────────────────────────────┐
+│ NORMATIVE ARCHITECTURAL INTENT PRECEDENCE              │
+├────────────────────────────────────────────────────────┤
 │ 1. MASTER_VISION.md (Highest Authority)                │
 ├────────────────────────────────────────────────────────┤
 │ 2. PRODUCT_PRINCIPLES.md (Core Rules & Invariants)     │
@@ -23,9 +29,18 @@ When questions or discrepancies arise, resolve them according to this strict, de
 │    - INTERNAL_MULTI_AGENT.md                           │
 │    - CONTROL_PLANE.md, etc.                            │
 ├────────────────────────────────────────────────────────┤
-│ 5. Implementation Code (Rust, Code-OSS, Scripts)       │
+│ 5. Implementation Notes / Task Prompts                 │
 └────────────────────────────────────────────────────────┘
 ```
+
+If a future implementation request conflicts with a CANONICAL invariant in `MASTER_VISION.md`, the coding agent must **STOP and report the conflict** rather than silently changing architecture.
+
+### B. Factual Implementation Reality
+
+Documentation precedence does **not** override factual implementation reality. When determining what the current code actually does, the ground truth is:
+$$\textbf{Reviewed Source Code} \;+\; \textbf{Automated Tests} \;+\; \textbf{Verified Git SHA}$$
+
+> **Core Rule**: Documentation precedence governs normative product and architecture intent. It does not override factual implementation reality. When determining what the current code actually does, inspect the reviewed source and tests at the relevant Git SHA. If implementation and canonical architecture differ, report the discrepancy instead of silently rewriting either side.
 
 ### Discrepancy Resolution Protocol
 If implementation code and documentation disagree:
@@ -48,26 +63,34 @@ When entering the Agent Studios repository to design, implement, or review code:
    - Confirm branch matches target milestone (e.g. M09 review, M10 start).
    - Ensure working tree is clean before beginning work.
 
-2. Mandatory Reading Order:
+2. Distinguish Architecture Intent vs. Current Reality:
+   - "What should the architecture be?"
+     → Inspect canonical docs (MASTER_VISION.md → PRODUCT_PRINCIPLES.md → ROADMAP.md → Subsystems).
+   - "What does the current implementation actually do?"
+     → Inspect reviewed source code and passing tests at the verified Git SHA.
+   - If source implementation violates a canonical invariant:
+     STOP and report. Do not silently modify canonical vision to match accidental implementation.
+
+3. Mandatory Reading Order:
    a. `docs/agent-studios/MASTER_VISION.md` (Product identity, formula, 30 invariants, terminology)
    b. `docs/agent-studios/PRODUCT_PRINCIPLES.md` (27 immutable principles)
    c. `docs/agent-studios/ROADMAP.md` (Current milestone status and sequencing)
    d. Subsystem-specific specification for the active task (e.g., `WORKTREE_TASK_ARTIFACT.md`)
 
-3. Interpret Architecture Decision Status Correctly:
+4. Interpret Architecture Decision Status Correctly:
    - CANONICAL: Permanent, non-negotiable architectural requirement (regardless of milestone).
    - IMPLEMENTED: Code exists and is verified in the repository.
    - PLANNED: Target architecture for a specific future milestone; do not assume code exists.
    - OPEN DESIGN QUESTION: Actively deferred design choice; do not pick prematurely.
    - SUPERSEDED: Historical design discarded in favor of current architecture.
 
-4. Invariant Verification:
+5. Invariant Verification:
    - Verify zero Rust diff when performing documentation-only passes.
    - Verify zero plaintext secrets in any log, event, or config.
    - Verify `Blocked != Cancelled` semantics in state handling.
    - Verify destructive cleanup prohibition (no `git reset --hard`, `git clean -fdx`, `git worktree remove --force`).
 
-5. Conflict Escalation:
+6. Conflict Escalation:
    - If user instructions or task prompts conflict with `MASTER_VISION.md` or established invariants:
      STOP and explicitly report the conflict to the developer before modifying code or architecture.
 ```

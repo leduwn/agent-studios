@@ -131,7 +131,7 @@
 ### M13: Code-OSS Integration Foundation [PLANNED]
 - Code-OSS source snapshot targeting Windows 11 x64 first.
 - Independent Agent Studios desktop application branding, typography, and monochrome visual language.
-- Native IPC bridge (JSON-RPC protocol; physical transport TBD in M13 open design question) connecting Code-OSS desktop workbench to local Agent Studios App Server.
+- Native IPC bridge (candidate/reference protocol: JSON-RPC; exact transport and protocol mechanism TBD in M13 open design question) connecting Code-OSS desktop workbench to local Agent Studios App Server.
 - Full IDE feature parity (Monaco editor, Explorer, Search, Git, Terminal, Debugger, LSP).
 
 ### M14: Agent Studios Built-in AI Extension [PLANNED]

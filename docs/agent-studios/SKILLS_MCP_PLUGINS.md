@@ -24,29 +24,53 @@ Skills are modular, reusable instruction and tool packages defined in markdown.
 - **Full Standard Compatibility**: Native compatibility with OpenAI Codex `SKILL.md`, Claude Code `SKILL.md`, and Agent Studios native skills.
 - Frontmatter defines name, description, parameters, tools, and triggers.
 
-### B. Canonical Skill Scopes
-Skills are discovered and loaded across three canonical hierarchical scopes:
+### B. Orthogonal Taxonomy: Scope vs. Source/Distribution
 
-1. **Global Scope**:
-   - Location: `~/.agent-studios/skills/`
-   - Available across all projects and sessions on the developer's machine.
-2. **Project Scope**:
-   - Location: `<repo>/.agent-studios/skills/`
-   - Project-specific and shared with the team via Git.
-3. **Agent Scope**:
-   - Location: `<workspace>/.agent-studios/agents/<agent>/skills/`
-   - Scoped specifically to a specialized agent role within a studio or team.
+Agent Studios strictly decouples **where/for whom a skill is active** (Scope) from **where the skill came from** (Source / Distribution Provenance):
 
-*(Note on Built-in Skills: Built-in skills refer to distribution provenance—standard refactoring, testing, and git operations bundled directly with the application distribution—not a scope level. Built-in skills are exposed through the canonical Global scope.)*
+```text
+Skill
+├── Scope (Where / for whom the skill is active)
+│   ├── Global  (~/.agent-studios/skills/)
+│   ├── Project (<repo>/.agent-studios/skills/)
+│   └── Agent   (<workspace>/.agent-studios/agents/<agent>/skills/)
+│
+└── Source / Distribution (Where the skill came from)
+    ├── GitHub
+    ├── Local Folder
+    ├── Registry
+    └── Bundled / Built-in (and future source types)
+```
 
-### C. Installation via GitHub
+#### 1. Canonical Skill Scopes (Activation Domain)
+Skills are discovered and activated across three canonical hierarchical scopes:
+- **Global Scope**:
+  - Location: `~/.agent-studios/skills/`
+  - Available across all projects and sessions on the developer's machine.
+- **Project Scope**:
+  - Location: `<repo>/.agent-studios/skills/`
+  - Project-specific and shared with the team via Git.
+- **Agent Scope**:
+  - Location: `<workspace>/.agent-studios/agents/<agent>/skills/`
+  - Scoped specifically to a specialized agent role within a studio or team.
+
+#### 2. Source / Distribution Provenance
+Source provenance describes origin, distribution, and installation channel:
+- **GitHub**: Installed directly from public or private Git repositories.
+- **Local Folder**: Linked or imported from a local filesystem directory.
+- **Registry**: Community or organizational skill catalogs.
+- **Bundled / Built-in**: Core standard capabilities packaged with the Agent Studios distribution.
+
+*(Architectural Invariant: Built-in is a distribution provenance, not a scope. We do **not** define "Built-in = Global Scope" as a canonical invariant. How bundled skills are surfaced into effective scopes—whether global defaults, project overrides, or role presets—is an implementation and policy decision to be formalized during M16 design.)*
+
+### C. Installation via GitHub (Planned Milestone M16)
 The canonical contract is installing standard `SKILL.md`-compatible skills from ordinary GitHub repositories:
 
 ```text
 /skill install https://github.com/user/repo
 ```
 
-Optional convenience shorthand for future tooling:
+Optional convenience shorthand for future tooling (explicitly planned/optional):
 ```text
 /skill install <owner>/<repo>
 /skill install <owner>/<repo>@<branch-or-tag>
@@ -60,12 +84,12 @@ Install Skill
 └── Registry (Future community catalog)
 ```
 
-Target compatibility:
+Target compatibility across formats:
 - Codex `SKILL.md`
 - Claude Code `SKILL.md`
 - Agent Studios native skill
 
-*(This feature is explicitly **PLANNED** for Milestone M16; it is not yet implemented.)*
+*(Note: GitHub skill installation and management UI are explicitly **PLANNED** for Milestone M16; this is not currently implemented in existing code.)*
 
 ### D. Progressive Loading
 To preserve context window capacity, skills are **progressively loaded**:

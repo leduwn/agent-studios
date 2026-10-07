@@ -353,7 +353,7 @@ Every design decision, code modification, and roadmap milestone must adhere to t
 | **Claude Code Runtime Adapter** | **PLANNED** | Adapter wrapping Claude Code CLI (`M12`). |
 | **Code-OSS Shell Integration** | **PLANNED** | Electron host integration and built-in AI extension (`M13–M15`). |
 | **Full Codex Skills / MCP UX** | **PLANNED** | UI discovery and GitHub installation for Skills and MCP (`M16`). |
-| **M13 IPC Transport Implementation** | **OPEN DESIGN QUESTION** | Transport choice (named pipe vs. WebSocket vs. stdio vs. other IPC) to be evaluated during M13 design. |
+| **M13 IPC Transport & Protocol** | **OPEN DESIGN QUESTION** | Exact transport and protocol mechanism (named pipe vs. WebSocket vs. stdio vs. native Electron/Node IPC; JSON-RPC candidate/reference protocol vs. other typed local IPC) to be evaluated during M13 design. |
 | **Process Containment Sandbox Architecture** | **OPEN DESIGN QUESTION** | Specific OS containment mechanics (Windows Job Objects/AppContainer, Linux cgroups, macOS sandbox-exec) to be finalized in M10+. |
 | **Community Skill Signing & Trust Registry** | **OPEN DESIGN QUESTION** | Cryptographic provenance, signatures, and registry verification to be evaluated in M16 design. |
 
