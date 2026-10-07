@@ -327,8 +327,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             let exists = self
                 .control_plane
                 .get_worktree(int_ws.worktree_id)
-                .await
-                .unwrap_or(None)
+                .await?
                 .is_some();
             if !exists {
                 let repo_cwd = self
@@ -338,8 +337,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                 let source_root = if let Some(ref orchestrator) = self.workspace_orchestrator {
                     orchestrator
                         .resolve_repository_root_async(repo_cwd.clone())
-                        .await
-                        .unwrap_or_else(|_| repo_cwd.clone())
+                        .await?
                 } else {
                     repo_cwd.clone()
                 };
@@ -527,7 +525,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                     &self.repo_path,
                                     workspace.root(),
                                 ) {
-                                    let _ = orchestrator
+                                    let release_res = orchestrator
                                         .release_worktree_async(
                                             repo_path.clone(),
                                             root.to_path_buf(),
@@ -535,10 +533,22 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                             None,
                                         )
                                         .await;
-                                    let _ = self
-                                        .control_plane
-                                        .complete_worktree_removal(wt_id, None)
-                                        .await;
+                                    if release_res.is_ok() {
+                                        let _ = self
+                                            .control_plane
+                                            .complete_worktree_removal(wt_id, None)
+                                            .await;
+                                    } else {
+                                        let _ = self
+                                            .control_plane
+                                            .record_worktree_retained(
+                                                wt_id,
+                                                Some(
+                                                    "Physical worktree removal failed".to_string(),
+                                                ),
+                                            )
+                                            .await;
+                                    }
                                 }
                             }
                             continue;

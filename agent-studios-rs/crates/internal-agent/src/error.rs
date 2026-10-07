@@ -99,6 +99,9 @@ pub enum InternalAgentError {
         owner_thread_id: String,
     },
 
+    #[error("Workspace error: {0}")]
+    Workspace(#[from] agent_studios_workspace::WorkspaceError),
+
     #[error("Workspace post-processing error: {0}")]
     WorkspacePostprocessError(String),
 

@@ -451,3 +451,365 @@ fn test_release_worktree_refuses_actively_owned_worktree_and_preserves_dir() {
         "worktree directory must be preserved on disk"
     );
 }
+
+#[test]
+fn test_topology_canonical_repo_and_cwd_separation() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let _base_commit = init_test_git_repo(&repo_dir);
+
+    // Create a subdirectory inside repo
+    let sub_cwd = repo_dir.join("apps").join("web");
+    fs::create_dir_all(&sub_cwd).expect("create sub cwd");
+    let app_file = sub_cwd.join("page.tsx");
+    fs::write(
+        &app_file,
+        "export default function Page() { return null; }\n",
+    )
+    .expect("write page");
+
+    // Commit sub_cwd file
+    let _ = Command::new("git")
+        .current_dir(&repo_dir)
+        .args(["add", "."])
+        .output()
+        .expect("git add");
+    let commit_out = Command::new("git")
+        .current_dir(&repo_dir)
+        .args(["commit", "-m", "add apps/web/page.tsx"])
+        .output()
+        .expect("git commit");
+    assert!(commit_out.status.success());
+
+    let rev_out = Command::new("git")
+        .current_dir(&repo_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let new_base = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    // Create worktree pointing source_cwd to repo/apps/web
+    let managed = orchestrator
+        .create_worktree(&sub_cwd, Some(&new_base))
+        .expect("create worktree with sub cwd");
+
+    // Regression Test H: Validate canonical repo vs repo/apps/web root/cwd separation
+    let canon_repo = dunce::canonicalize(&repo_dir).expect("canon repo");
+    let canon_sub = dunce::canonicalize(&sub_cwd).expect("canon sub");
+
+    assert_eq!(
+        managed.source_root, canon_repo,
+        "source_root must be top-level repo"
+    );
+    assert_eq!(
+        managed.source_cwd, canon_sub,
+        "source_cwd must be repo/apps/web"
+    );
+    assert!(
+        managed.root.starts_with(&managed_root),
+        "root must be under managed_root"
+    );
+    assert_eq!(
+        managed.cwd,
+        managed.root.join("apps").join("web"),
+        "cwd must be managed_root/<id>/apps/web"
+    );
+    assert_ne!(
+        managed.cwd, managed.root,
+        "cwd and root must be decoupled and distinct"
+    );
+    assert!(managed.cwd.exists(), "managed cwd must exist physically");
+    assert!(
+        managed.cwd.join("page.tsx").exists(),
+        "page.tsx must exist in managed cwd"
+    );
+
+    // Clean up
+    orchestrator
+        .release_worktree(&sub_cwd, &managed.root, false, None)
+        .expect("release worktree");
+    assert!(!managed.root.exists());
+}
+
+#[tokio::test]
+async fn test_repository_root_resolution_failure_fails_closed() {
+    let temp = tempdir().expect("tempdir");
+    let non_git_dir = temp.path().join("not_a_git_repo");
+    fs::create_dir_all(&non_git_dir).expect("create non-git dir");
+
+    let ceiling = dunce::canonicalize(temp.path()).unwrap_or(temp.path().to_path_buf());
+    unsafe {
+        std::env::set_var("GIT_CEILING_DIRECTORIES", &ceiling);
+    }
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    // Regression Test I: Synchronous resolution failure propagates typed GitError
+    let sync_res = orchestrator.resolve_repository_root(&non_git_dir);
+    assert!(
+        matches!(sync_res, Err(WorkspaceError::GitError(ref msg)) if msg.contains("git rev-parse --show-toplevel failed")),
+        "expected GitError on non-git dir, got {sync_res:?}"
+    );
+
+    // Regression Test I: Asynchronous resolution failure propagates fail-closed error
+    let async_res = orchestrator
+        .resolve_repository_root_async(non_git_dir.clone())
+        .await;
+    assert!(
+        async_res.is_err(),
+        "expected fail-closed error from async resolution, got {async_res:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("GIT_CEILING_DIRECTORIES");
+    }
+}
+
+#[test]
+fn test_artifact_lineage_deterministic_progression() {
+    let temp = tempdir().expect("tempdir");
+    let artifact_root = temp.path().join("artifacts");
+    let store = ArtifactStore::new(&artifact_root).expect("store new");
+
+    let studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let agent_id = AgentId::new();
+
+    // Regression Test J: v1 -> v2 -> v3 deterministic lineage progression
+    // v1: parent_id / supersedes is None
+    let v1_opt = ArtifactOptions::new().with_version(1);
+    let v1 = store
+        .store_artifact(
+            studio_id,
+            task_id,
+            agent_id,
+            ArtifactKind::Patch,
+            "pipeline.diff",
+            b"diff --git a/a b/a\n+version 1\n",
+            v1_opt,
+        )
+        .expect("store v1");
+    assert_eq!(v1.version, 1);
+    assert_eq!(v1.supersedes, None, "v1 supersedes must be None");
+
+    // v2: supersedes Some(v1.id)
+    let v2_opt = ArtifactOptions::new()
+        .with_version(2)
+        .with_supersedes(Some(v1.id));
+    let v2 = store
+        .store_artifact(
+            studio_id,
+            task_id,
+            agent_id,
+            ArtifactKind::Patch,
+            "pipeline.diff",
+            b"diff --git a/a b/a\n+version 2\n",
+            v2_opt,
+        )
+        .expect("store v2");
+    assert_eq!(v2.version, 2);
+    assert_eq!(v2.supersedes, Some(v1.id), "v2 must supersede v1");
+
+    // v3: supersedes Some(v2.id)
+    let v3_opt = ArtifactOptions::new()
+        .with_version(3)
+        .with_supersedes(Some(v2.id));
+    let v3 = store
+        .store_artifact(
+            studio_id,
+            task_id,
+            agent_id,
+            ArtifactKind::Patch,
+            "pipeline.diff",
+            b"diff --git a/a b/a\n+version 3\n",
+            v3_opt,
+        )
+        .expect("store v3");
+    assert_eq!(v3.version, 3);
+    assert_eq!(v3.supersedes, Some(v2.id), "v3 must supersede v2");
+}
+
+#[test]
+fn test_transactional_reconciliation_failure_preserves_untracked_sentinel() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    // Create integration worktree
+    let integration_wt = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create integration wt");
+
+    // Track a file
+    let tracked_file = integration_wt.root.join("tracked.rs");
+    fs::write(&tracked_file, "pub fn initial() -> i32 { 42 }\n").expect("write tracked");
+    let _ = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["add", "tracked.rs"])
+        .output()
+        .expect("git add");
+    let commit_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["commit", "-m", "commit tracked.rs"])
+        .output()
+        .expect("git commit");
+    assert!(commit_out.status.success());
+
+    let rev_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
+    // Create untracked sentinel file
+    let sentinel_file = integration_wt.root.join("untracked_sentinel.txt");
+    let sentinel_bytes = b"sentinel bytes 99999\n";
+    fs::write(&sentinel_file, sentinel_bytes).expect("write sentinel");
+
+    // Invalid patch that fails to apply cleanly
+    let invalid_patch = b"diff --git a/tracked.rs b/tracked.rs\n--- a/tracked.rs\n+++ b/tracked.rs\n@@ -99,6 +99,6 @@\n-nonexistent line\n+new line\n";
+
+    // Regression Test K: Attempt to apply invalid patch directly
+    let outcome = agent_studios_workspace::apply_patch(
+        &integration_wt.root,
+        invalid_patch,
+        Some("failing commit"),
+    )
+    .expect("apply_patch call");
+
+    // Invariant: Produces ReconciliationOutcome::Failed
+    match outcome {
+        ReconciliationOutcome::Failed { ref error } => {
+            assert!(error.contains("git apply failed"), "error: {error}");
+        }
+        other => panic!("expected Failed outcome, got {other:?}"),
+    }
+
+    // Invariant: pre-HEAD is preserved
+    let post_rev_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let post_head = String::from_utf8_lossy(&post_rev_out.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(
+        post_head, pre_head,
+        "HEAD must match pre_head after rollback"
+    );
+
+    // Invariant: Tracked bytes are preserved
+    let tracked_content = fs::read_to_string(&tracked_file).expect("read tracked");
+    assert_eq!(
+        tracked_content, "pub fn initial() -> i32 { 42 }\n",
+        "tracked file bytes must be preserved"
+    );
+
+    // Invariant: Untracked sentinel file MUST be preserved (never deleted by clean -fd)
+    assert!(
+        sentinel_file.exists(),
+        "untracked sentinel file must remain intact"
+    );
+    let post_sentinel_bytes = fs::read(&sentinel_file).expect("read sentinel");
+    assert_eq!(
+        post_sentinel_bytes, sentinel_bytes,
+        "sentinel file bytes must remain exact"
+    );
+
+    // Clean up
+    orchestrator
+        .release_worktree(&repo_dir, &integration_wt.root, true, Some("test cleanup"))
+        .expect("release");
+}
+
+#[test]
+fn test_release_worktree_ownership_query_failure_fails_closed() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let managed = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create worktree");
+
+    assert!(managed.root.exists());
+
+    // Corrupt codex-thread.json by writing invalid JSON bytes
+    let git_path_out = Command::new("git")
+        .current_dir(&managed.root)
+        .args(["rev-parse", "--git-path", "codex-thread.json"])
+        .output()
+        .expect("rev-parse --git-path");
+    let rel_git_path = String::from_utf8_lossy(&git_path_out.stdout)
+        .trim()
+        .to_string();
+    let thread_meta_path = managed.root.join(rel_git_path);
+    fs::create_dir_all(thread_meta_path.parent().unwrap()).expect("parent dir");
+    fs::write(&thread_meta_path, b"{ corrupted invalid json").expect("write corrupt meta");
+
+    // Regression Test B (unit): Ownership query failure MUST fail closed and refuse removal
+    let res = orchestrator.release_worktree(&repo_dir, &managed.root, false, None);
+
+    assert!(
+        matches!(res, Err(WorkspaceError::InvalidOperation(ref msg)) if msg.contains("ownership query failed")),
+        "expected InvalidOperation on corrupted metadata, got {res:?}"
+    );
+
+    // Invariant: Zero physical deletion
+    assert!(
+        managed.root.exists(),
+        "worktree directory must be preserved on disk when ownership query fails"
+    );
+}
+
+#[test]
+fn test_release_worktree_clean_removal_verifies_root_removed() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let managed = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create worktree");
+
+    assert!(managed.root.exists());
+
+    // Regression Test E (unit): Clean worktree with retain=false removes physical directory
+    orchestrator
+        .release_worktree(&repo_dir, &managed.root, false, None)
+        .expect("clean release");
+
+    assert!(
+        !managed.root.exists(),
+        "worktree directory must be removed from disk"
+    );
+}

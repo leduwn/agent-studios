@@ -635,17 +635,34 @@ impl AgentExecutor for CodexAgentExecutor {
 
             if let Some(orchestrator) = &self.workspace_orchestrator {
                 if let Some(root) = context.execution_workspace.root() {
-                    if let Ok(Some(existing_owner)) = orchestrator.get_owner(root) {
-                        tracker.rollback_turn();
-                        let _ = self
-                            .control_plane
-                            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
-                            .await;
-                        return Err(InternalAgentError::WorktreeOwnershipConflict {
-                            agent_id: context.agent_spec.agent_id,
-                            worktree_root: root.to_path_buf(),
-                            owner_thread_id: existing_owner,
-                        });
+                    match orchestrator.get_owner(root) {
+                        Ok(None) => {}
+                        Ok(Some(existing_owner)) => {
+                            tracker.rollback_turn();
+                            let _ = self
+                                .control_plane
+                                .transition_agent_state(
+                                    context.agent_spec.agent_id,
+                                    AgentState::Idle,
+                                )
+                                .await;
+                            return Err(InternalAgentError::WorktreeOwnershipConflict {
+                                agent_id: context.agent_spec.agent_id,
+                                worktree_root: root.to_path_buf(),
+                                owner_thread_id: existing_owner,
+                            });
+                        }
+                        Err(e) => {
+                            tracker.rollback_turn();
+                            let _ = self
+                                .control_plane
+                                .transition_agent_state(
+                                    context.agent_spec.agent_id,
+                                    AgentState::Idle,
+                                )
+                                .await;
+                            return Err(InternalAgentError::Workspace(e));
+                        }
                     }
                 }
             }
@@ -965,18 +982,30 @@ impl AgentExecutor for CodexAgentExecutor {
 
         if let Some(orchestrator) = &self.workspace_orchestrator {
             if let Some(root) = context.execution_workspace.root() {
-                if let Ok(Some(existing_owner)) = orchestrator.get_owner(root) {
-                    parent_state.budget_tracker.rollback_child_agent();
-                    child_tracker.rollback_turn();
-                    let _ = self
-                        .control_plane
-                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
-                        .await;
-                    return Err(InternalAgentError::WorktreeOwnershipConflict {
-                        agent_id: context.agent_spec.agent_id,
-                        worktree_root: root.to_path_buf(),
-                        owner_thread_id: existing_owner,
-                    });
+                match orchestrator.get_owner(root) {
+                    Ok(None) => {}
+                    Ok(Some(existing_owner)) => {
+                        parent_state.budget_tracker.rollback_child_agent();
+                        child_tracker.rollback_turn();
+                        let _ = self
+                            .control_plane
+                            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                            .await;
+                        return Err(InternalAgentError::WorktreeOwnershipConflict {
+                            agent_id: context.agent_spec.agent_id,
+                            worktree_root: root.to_path_buf(),
+                            owner_thread_id: existing_owner,
+                        });
+                    }
+                    Err(e) => {
+                        parent_state.budget_tracker.rollback_child_agent();
+                        child_tracker.rollback_turn();
+                        let _ = self
+                            .control_plane
+                            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                            .await;
+                        return Err(InternalAgentError::Workspace(e));
+                    }
                 }
             }
         }

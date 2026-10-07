@@ -33,10 +33,10 @@ pub fn check_patch(
         )));
     }
 
-    // Preflight cleanliness check: git status --porcelain
+    // Preflight cleanliness check: git status --porcelain -uno
     let status_out = Command::new("git")
         .current_dir(target_worktree)
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "-uno"])
         .output()?;
     if !status_out.status.success() {
         return Err(WorkspaceError::GitError(format!(
@@ -113,27 +113,67 @@ pub fn apply_patch(
     }
     let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
 
+    // Snapshot pre-existing untracked files to guarantee non-destructive transactional rollback
+    let pre_status = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["status", "--porcelain"])
+        .output()?;
+    let mut pre_existing_untracked = std::collections::HashSet::new();
+    if pre_status.status.success() {
+        for line in String::from_utf8_lossy(&pre_status.stdout).lines() {
+            if let Some(rest) = line.strip_prefix("?? ") {
+                let path_str = rest.trim().trim_matches('"');
+                pre_existing_untracked.insert(path_str.to_string());
+            }
+        }
+    }
+
     let rollback = || -> Result<(), WorkspaceError> {
+        // 1. Reset the index cleanly to pre_head without touching working tree files
         let reset_out = Command::new("git")
             .current_dir(target_worktree)
-            .args(["reset", "--hard", &pre_head])
+            .args(["reset", &pre_head])
             .output()?;
         if !reset_out.status.success() {
             return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
-                "git reset --hard failed: {}",
+                "git reset failed: {}",
                 String::from_utf8_lossy(&reset_out.stderr)
             )));
         }
-        let clean_out = Command::new("git")
+
+        // 2. Safely restore tracked files in working directory to pre_head without touching untracked files
+        let checkout_out = Command::new("git")
             .current_dir(target_worktree)
-            .args(["clean", "-fd"])
+            .args(["checkout", &pre_head, "--", "."])
             .output()?;
-        if !clean_out.status.success() {
+        if !checkout_out.status.success() {
             return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
-                "git clean -fd failed: {}",
-                String::from_utf8_lossy(&clean_out.stderr)
+                "git checkout failed: {}",
+                String::from_utf8_lossy(&checkout_out.stderr)
             )));
         }
+
+        // 3. Remove only new untracked files created by the failed patch, preserving pre-existing untracked files
+        let post_status = Command::new("git")
+            .current_dir(target_worktree)
+            .args(["status", "--porcelain"])
+            .output()?;
+        if post_status.status.success() {
+            for line in String::from_utf8_lossy(&post_status.stdout).lines() {
+                if let Some(rest) = line.strip_prefix("?? ") {
+                    let path_str = rest.trim().trim_matches('"');
+                    if !pre_existing_untracked.contains(path_str) {
+                        let path = target_worktree.join(path_str);
+                        if path.is_file() || path.is_symlink() {
+                            let _ = std::fs::remove_file(&path);
+                        } else if path.is_dir() {
+                            let _ = std::fs::remove_dir_all(&path);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     };
 

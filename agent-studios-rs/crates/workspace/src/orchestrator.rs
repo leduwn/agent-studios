@@ -179,12 +179,22 @@ impl WorkspaceOrchestrator {
             return Ok(());
         }
 
-        if let Ok(Some(owner)) = self.get_owner(root) {
-            return Err(WorkspaceError::InvalidOperation(format!(
-                "cannot remove worktree {} while actively owned by thread {}",
-                root.display(),
-                owner
-            )));
+        match self.get_owner(root) {
+            Ok(None) => {}
+            Ok(Some(owner)) => {
+                return Err(WorkspaceError::InvalidOperation(format!(
+                    "cannot remove worktree {} while actively owned by thread {}",
+                    root.display(),
+                    owner
+                )));
+            }
+            Err(e) => {
+                return Err(WorkspaceError::InvalidOperation(format!(
+                    "cannot remove worktree {}: ownership query failed: {}",
+                    root.display(),
+                    e
+                )));
+            }
         }
 
         self.worktree_manager
