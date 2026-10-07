@@ -24,7 +24,7 @@ pub use reconciliation::{IntegrationWorkspace, ReconciliationRecord, Reconciliat
 pub use run::{RunRecord, RunState};
 pub use studio::Studio;
 pub use task::{DependencyOutputPolicy, TaskBlockReason, TaskRecord, TaskState};
-pub use worktree::{ExecutionWorkspace, WorktreeRecord, WorktreeState};
+pub use worktree::{ExecutionWorkspace, SourceWorkspace, WorktreeRecord, WorktreeState};
 
 #[cfg(test)]
 mod tests {

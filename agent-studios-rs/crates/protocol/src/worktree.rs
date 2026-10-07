@@ -203,6 +203,28 @@ impl ExecutionWorkspace {
     }
 }
 
+/// Typed source workspace distinguishing repository root from execution working directory.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceWorkspace {
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub base_sha: String,
+}
+
+impl SourceWorkspace {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        cwd: impl Into<PathBuf>,
+        base_sha: impl Into<String>,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            cwd: cwd.into(),
+            base_sha: base_sha.into(),
+        }
+    }
+}
+
 /// Typed integration workspace for durable studio reconciliation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrationWorkspace {

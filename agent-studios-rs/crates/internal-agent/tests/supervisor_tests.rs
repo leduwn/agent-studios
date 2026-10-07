@@ -10,6 +10,7 @@ use agent_studios_internal_agent::{
     WorkspaceAccessMode, WorkspacePolicyArbitrator,
 };
 use agent_studios_protocol::id::AgentId;
+use agent_studios_protocol::task::TaskState;
 use agent_studios_provider::id::{ModelId, ProviderInstanceId};
 use agent_studios_provider::model::ModelRef;
 
@@ -234,4 +235,84 @@ async fn test_supervisor_fail_fast_policy() {
     assert_eq!(summary.completed_tasks, 0);
     assert_eq!(summary.failed_tasks, 1);
     assert_eq!(summary.cancelled_tasks, 1);
+}
+
+#[tokio::test]
+async fn test_supervisor_preserves_blocked_tasks_when_runnable_exhausted() {
+    let (supervisor, executor) = setup_test_supervisor().await;
+    let supervisor = supervisor.with_failure_policy(FailurePolicy::ContinueIndependent);
+
+    let plan = CoordinatorDecision::Plan {
+        tasks: vec![
+            PlannedTask {
+                task_key: "task_a".to_string(),
+                title: "Task A".to_string(),
+                description: None,
+                assigned_alias: "coder".to_string(),
+                depends_on: vec![],
+                workspace_access: None,
+                priority: None,
+                ..Default::default()
+            },
+            PlannedTask {
+                task_key: "task_b".to_string(),
+                title: "Task B".to_string(),
+                description: None,
+                assigned_alias: "reviewer".to_string(),
+                depends_on: vec!["task_a".to_string()],
+                workspace_access: None,
+                priority: None,
+                ..Default::default()
+            },
+        ],
+    };
+
+    executor.set_handler(move |ctx| {
+        if ctx.agent_spec.role == "Coordinator" {
+            Ok(AgentExecutionResult {
+                output: serde_json::to_string(&plan).unwrap(),
+                turns_used: 1,
+                tool_calls_used: 0,
+                duration_secs: 0,
+                success: true,
+            })
+        } else if ctx.agent_spec.role == "Developer" {
+            // Task A fails cleanly
+            Ok(AgentExecutionResult {
+                output: "Developer failed".to_string(),
+                turns_used: 1,
+                tool_calls_used: 0,
+                duration_secs: 0,
+                success: false,
+            })
+        } else {
+            Ok(AgentExecutionResult {
+                output: "Reviewer never reached".to_string(),
+                turns_used: 1,
+                tool_calls_used: 0,
+                duration_secs: 0,
+                success: true,
+            })
+        }
+    });
+
+    let studio_id = supervisor.studio_id();
+    let cp = supervisor.control_plane().clone();
+
+    let summary = supervisor
+        .run("Run pipeline with blocked task")
+        .await
+        .unwrap();
+    assert_eq!(summary.total_tasks, 2);
+    assert_eq!(summary.completed_tasks, 0);
+    assert_eq!(summary.failed_tasks, 1);
+    assert_eq!(summary.cancelled_tasks, 0);
+    assert_eq!(summary.blocked_tasks, 1);
+
+    let studio_tasks = cp.get_studio_tasks(studio_id).await.unwrap();
+    let task_b = studio_tasks
+        .iter()
+        .find(|t| t.title == "Task B")
+        .expect("Task B exists");
+    assert_eq!(task_b.state, TaskState::Blocked);
 }

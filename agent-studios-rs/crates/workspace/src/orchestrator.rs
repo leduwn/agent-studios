@@ -179,35 +179,17 @@ impl WorkspaceOrchestrator {
             return Ok(());
         }
 
-        // Clean uncommitted or untracked changes in the worktree before removal
-        if root.exists() {
-            let _ = std::process::Command::new("git")
-                .current_dir(root)
-                .args(["reset", "--hard", "HEAD"])
-                .output();
-            let _ = std::process::Command::new("git")
-                .current_dir(root)
-                .args(["clean", "-fdx"])
-                .output();
+        if let Ok(Some(owner)) = self.get_owner(root) {
+            return Err(WorkspaceError::InvalidOperation(format!(
+                "cannot remove worktree {} while actively owned by thread {}",
+                root.display(),
+                owner
+            )));
         }
 
-        match self.worktree_manager.remove(source_cwd, root) {
-            Ok(()) => Ok(()),
-            Err(remove_err) => {
-                // Fall back to git worktree remove --force if standard remove failed
-                let force_output = std::process::Command::new("git")
-                    .current_dir(source_cwd)
-                    .args(["worktree", "remove", "--force", &root.to_string_lossy()])
-                    .output();
-
-                match force_output {
-                    Ok(output) if output.status.success() => Ok(()),
-                    _ => Err(WorkspaceError::WorktreeRemovalFailed(
-                        remove_err.to_string(),
-                    )),
-                }
-            }
-        }
+        self.worktree_manager
+            .remove(source_cwd, root)
+            .map_err(|e| WorkspaceError::WorktreeRemovalFailed(e.to_string()))
     }
 
     /// Asynchronous wrapper for `release_worktree`.
@@ -322,6 +304,39 @@ impl WorkspaceOrchestrator {
         })
         .await
         .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
+    }
+
+    /// Resolves the repository root of a given directory via `git rev-parse --show-toplevel`.
+    pub fn resolve_repository_root(&self, path: &Path) -> Result<PathBuf, WorkspaceError> {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(path)
+            .output()?;
+        if !output.status.success() {
+            return Err(WorkspaceError::GitError(format!(
+                "git rev-parse --show-toplevel failed in {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let root_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        dunce::canonicalize(Path::new(&root_str)).map_err(|e| {
+            WorkspaceError::PathValidationFailed {
+                path: PathBuf::from(root_str),
+                reason: e.to_string(),
+            }
+        })
+    }
+
+    /// Asynchronous wrapper for `resolve_repository_root`.
+    pub async fn resolve_repository_root_async(
+        &self,
+        path: PathBuf,
+    ) -> Result<PathBuf, WorkspaceError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.resolve_repository_root(&path))
+            .await
+            .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
     }
 
     /// Safely reconciles a patch against an integration worktree.

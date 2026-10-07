@@ -90,6 +90,15 @@ pub enum InternalAgentError {
     )]
     WorkspaceAffinityConflict { agent_id: AgentId },
 
+    #[error(
+        "Worktree ownership conflict for agent {agent_id}: worktree {worktree_root:?} is already owned by thread {owner_thread_id}"
+    )]
+    WorktreeOwnershipConflict {
+        agent_id: AgentId,
+        worktree_root: std::path::PathBuf,
+        owner_thread_id: String,
+    },
+
     #[error("Workspace post-processing error: {0}")]
     WorkspacePostprocessError(String),
 

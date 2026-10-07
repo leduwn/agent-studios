@@ -633,6 +633,23 @@ impl AgentExecutor for CodexAgentExecutor {
                 .transition_agent_state(context.agent_spec.agent_id, AgentState::Starting)
                 .await;
 
+            if let Some(orchestrator) = &self.workspace_orchestrator {
+                if let Some(root) = context.execution_workspace.root() {
+                    if let Ok(Some(existing_owner)) = orchestrator.get_owner(root) {
+                        tracker.rollback_turn();
+                        let _ = self
+                            .control_plane
+                            .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                            .await;
+                        return Err(InternalAgentError::WorktreeOwnershipConflict {
+                            agent_id: context.agent_spec.agent_id,
+                            worktree_root: root.to_path_buf(),
+                            owner_thread_id: existing_owner,
+                        });
+                    }
+                }
+            }
+
             let mut coordinator_config = (*self.config).clone();
             let cwd_path = context.execution_workspace.cwd();
             if !cwd_path.as_os_str().is_empty() {
@@ -730,6 +747,11 @@ impl AgentExecutor for CodexAgentExecutor {
                     .await
                 {
                     let _ = thread.submit(Op::Shutdown).await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        thread.wait_until_terminated(),
+                    )
+                    .await;
                     tracker.rollback_turn();
                     let _ = self
                         .control_plane
@@ -940,6 +962,25 @@ impl AgentExecutor for CodexAgentExecutor {
         child_init.insert((*child_ext_ctx).clone());
 
         let worker_override = prepared_session.into_runtime_override();
+
+        if let Some(orchestrator) = &self.workspace_orchestrator {
+            if let Some(root) = context.execution_workspace.root() {
+                if let Ok(Some(existing_owner)) = orchestrator.get_owner(root) {
+                    parent_state.budget_tracker.rollback_child_agent();
+                    child_tracker.rollback_turn();
+                    let _ = self
+                        .control_plane
+                        .transition_agent_state(context.agent_spec.agent_id, AgentState::Idle)
+                        .await;
+                    return Err(InternalAgentError::WorktreeOwnershipConflict {
+                        agent_id: context.agent_spec.agent_id,
+                        worktree_root: root.to_path_buf(),
+                        owner_thread_id: existing_owner,
+                    });
+                }
+            }
+        }
+
         let spawn_req = SpawnRequest {
             caller: parent_state.thread_id,
             config: child_config,
@@ -947,13 +988,9 @@ impl AgentExecutor for CodexAgentExecutor {
                 text: context.prompt.clone(),
                 text_elements: vec![],
             }]),
-            source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: parent_state.thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: Some(context.agent_spec.display_name.clone()),
-                agent_role: Some(context.agent_spec.role.clone()),
-            }),
+            source: SessionSource::SubAgent(SubAgentSource::Other(
+                context.agent_spec.display_name.clone(),
+            )),
             options: SpawnAgentOptions {
                 parent_thread_id: Some(parent_state.thread_id),
                 ..Default::default()
@@ -1018,6 +1055,11 @@ impl AgentExecutor for CodexAgentExecutor {
                     .await
                 {
                     let _ = child_thread.submit(Op::Shutdown).await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        child_thread.wait_until_terminated(),
+                    )
+                    .await;
                     parent_state.budget_tracker.rollback_child_agent();
                     child_tracker.rollback_turn();
                     let _ = self

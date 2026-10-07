@@ -45,6 +45,7 @@ pub struct SupervisorExecutionSummary {
     pub completed_tasks: usize,
     pub failed_tasks: usize,
     pub cancelled_tasks: usize,
+    pub blocked_tasks: usize,
     pub coordinator_summary: Option<String>,
     pub coordinator_review_status: CoordinatorReviewStatus,
 }
@@ -281,6 +282,7 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                     completed_tasks: 0,
                     failed_tasks: 0,
                     cancelled_tasks: 0,
+                    blocked_tasks: 0,
                     coordinator_summary: Some(summary),
                     coordinator_review_status: CoordinatorReviewStatus::Skipped,
                 });
@@ -329,17 +331,25 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                 .unwrap_or(None)
                 .is_some();
             if !exists {
-                let repo = self
+                let repo_cwd = self
                     .repo_path
                     .clone()
                     .unwrap_or_else(|| int_ws.root.clone());
+                let source_root = if let Some(ref orchestrator) = self.workspace_orchestrator {
+                    orchestrator
+                        .resolve_repository_root_async(repo_cwd.clone())
+                        .await
+                        .unwrap_or_else(|_| repo_cwd.clone())
+                } else {
+                    repo_cwd.clone()
+                };
                 let wt = self
                     .control_plane
                     .create_worktree_with_cwds(
                         self.studio_id,
                         "integration-worktree",
-                        repo.clone(),
-                        repo,
+                        source_root,
+                        repo_cwd,
                         int_ws.root.clone(),
                         int_ws.cwd.clone(),
                         int_ws.base_sha.clone(),
@@ -469,8 +479,8 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                 .create_worktree_with_cwds(
                                     self.studio_id,
                                     format!("wt-task-{}", task.id),
-                                    repo_path.clone(),
-                                    repo_path.clone(),
+                                    managed.source_root.clone(),
+                                    managed.source_cwd.clone(),
                                     managed.root.clone(),
                                     managed.cwd.clone(),
                                     base_commit_to_use.clone(),
@@ -485,8 +495,8 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                 wt_rec.id,
                                 managed.root.clone(),
                                 managed.cwd.clone(),
-                                repo_path.clone(),
-                                repo_path.clone(),
+                                managed.source_root.clone(),
+                                managed.source_cwd.clone(),
                                 base_commit_to_use,
                             );
 
@@ -603,16 +613,18 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                     .len();
 
                 if ready_count == 0 && delayed_retries.is_empty() {
-                    // Clean up remaining blocked or pending tasks
-                    for t in studio_tasks {
-                        if matches!(
-                            t.state,
-                            TaskState::Blocked | TaskState::Pending | TaskState::Retrying
-                        ) {
-                            let _ = self
-                                .control_plane
-                                .transition_task_state(t.id, TaskState::Cancelled)
-                                .await;
+                    if cancelled {
+                        // Clean up remaining blocked or pending tasks on explicit/FailFast cancellation
+                        for t in studio_tasks {
+                            if matches!(
+                                t.state,
+                                TaskState::Blocked | TaskState::Pending | TaskState::Retrying
+                            ) {
+                                let _ = self
+                                    .control_plane
+                                    .transition_task_state(t.id, TaskState::Cancelled)
+                                    .await;
+                            }
                         }
                     }
                     break;
@@ -978,28 +990,37 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                                             }
                                                         }
 
+                                                        let retain_reason =
+                                                            "Mutating task worktree retained on disk".to_string();
                                                         orchestrator
                                                             .release_worktree_async(
-                                                                repo_path.clone(),
+                                                                completion
+                                                                    .workspace
+                                                                    .source_cwd()
+                                                                    .map(std::path::Path::to_path_buf)
+                                                                    .unwrap_or_else(|| repo_path.clone()),
                                                                 root.to_path_buf(),
-                                                                false,
-                                                                None,
+                                                                true,
+                                                                Some(retain_reason.clone()),
                                                             )
                                                             .await
                                                             .map_err(|e| {
                                                                 InternalAgentError::WorkspacePostprocessError(
                                                                     format!(
-                                                                        "Failed to release worktree directory: {e}"
+                                                                        "Failed to retain worktree directory: {e}"
                                                                     ),
                                                                 )
                                                             })?;
                                                         self.control_plane
-                                                            .complete_worktree_removal(wt_id, None)
+                                                            .record_worktree_retained(
+                                                                wt_id,
+                                                                Some(retain_reason),
+                                                            )
                                                             .await
                                                             .map_err(|e| {
                                                                 InternalAgentError::WorkspacePostprocessError(
                                                                     format!(
-                                                                        "Failed to complete worktree removal: {e}"
+                                                                        "Failed to record worktree retained: {e}"
                                                                     ),
                                                                 )
                                                             })?;
@@ -1306,12 +1327,18 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
             _ => (None, CoordinatorReviewStatus::Failed),
         };
 
+        let blocked_tasks = studio_tasks
+            .iter()
+            .filter(|t| t.state == TaskState::Blocked)
+            .count();
+
         Ok(SupervisorExecutionSummary {
             studio_id: self.studio_id,
             total_tasks,
             completed_tasks,
             failed_tasks,
             cancelled_tasks,
+            blocked_tasks,
             coordinator_summary,
             coordinator_review_status,
         })

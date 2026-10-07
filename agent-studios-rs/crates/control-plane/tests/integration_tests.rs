@@ -1943,6 +1943,66 @@ fn test_artifact_versioning_and_worktree_link() {
 }
 
 #[test]
+fn test_artifact_authoritative_lineage_allocation_overrides_caller_specified() {
+    let now = Utc::now();
+    let clock = FixedClock::new(now);
+    let store = InMemoryStore::new();
+    let mut cp = ControlPlane::new(clock, store);
+
+    let studio = cp.create_studio("Studio Lineage").unwrap();
+    let agent = cp
+        .register_agent(
+            studio.id,
+            "Worker",
+            AgentKind::Internal,
+            Some("Role".into()),
+        )
+        .unwrap();
+    let task = cp
+        .create_task(studio.id, "Task 1", "Desc", None, Some(agent.id), vec![])
+        .unwrap();
+
+    // Caller attempts to force arbitrary initial version 99 and fake supersedes
+    let fake_supersedes_id = ArtifactId::new();
+    let mut art1 = ArtifactRecord::new(
+        studio.id,
+        task.id,
+        agent.id,
+        ArtifactKind::File,
+        "src/output.txt",
+        Some("hash-1".into()),
+        "store/1",
+        now,
+    );
+    art1.version = 99;
+    art1.supersedes = Some(fake_supersedes_id);
+
+    let registered1 = cp.register_artifact_record(art1).unwrap();
+    // Invariant: Initial artifact is ALWAYS version 1 and supersedes None
+    assert_eq!(registered1.version, 1);
+    assert_eq!(registered1.supersedes, None);
+
+    // Caller attempts to force arbitrary subsequent version 500 and wrong supersedes
+    let mut art2 = ArtifactRecord::new(
+        studio.id,
+        task.id,
+        agent.id,
+        ArtifactKind::File,
+        "src/output.txt",
+        Some("hash-2".into()),
+        "store/2",
+        now,
+    );
+    art2.version = 500;
+    art2.supersedes = Some(fake_supersedes_id);
+
+    let registered2 = cp.register_artifact_record(art2).unwrap();
+    // Invariant: Subsequent artifact is ALWAYS latest.version + 1 and supersedes Some(latest.id)
+    assert_eq!(registered2.version, 2);
+    assert_eq!(registered2.supersedes, Some(registered1.id));
+}
+
+#[test]
 fn test_replay_corrupted_duplicate_worktree() {
     let (sid, _aid, _tid, now, mut events) = make_base_replay_harness();
     let wid = WorktreeId::new();

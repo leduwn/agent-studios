@@ -8,7 +8,7 @@ use agent_studios_protocol::artifact::ArtifactKind;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId, WorktreeId};
 use agent_studios_protocol::worktree::WorktreeRecord;
 use agent_studios_workspace::{
-    ArtifactOptions, ArtifactStore, ReconciliationOutcome, WorkspaceOrchestrator,
+    ArtifactOptions, ArtifactStore, ReconciliationOutcome, WorkspaceError, WorkspaceOrchestrator,
 };
 use chrono::Utc;
 
@@ -367,5 +367,87 @@ fn test_generate_recovery_report() {
             .iter()
             .any(|f| dunce::canonicalize(f).unwrap_or(f.clone()) == canon_wt3),
         "wt3 must be reported as foreign"
+    );
+}
+
+#[test]
+fn test_release_worktree_refuses_dirty_worktree_and_preserves_dir() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let managed = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create worktree");
+
+    assert!(managed.root.exists());
+
+    // Create untracked/dirty file in worktree
+    let dirty_file = managed.root.join("uncommitted_work.rs");
+    fs::write(&dirty_file, "pub fn dirty() -> bool { true }\n").expect("write dirty file");
+
+    // Attempt to release with retain = false (removal requested)
+    let res = orchestrator.release_worktree(&repo_dir, &managed.root, false, None);
+
+    // Invariant: Removal MUST be refused when worktree has untracked/dirty changes
+    assert!(
+        matches!(res, Err(WorkspaceError::WorktreeRemovalFailed(_))),
+        "expected WorktreeRemovalFailed on dirty worktree, got {res:?}"
+    );
+
+    // Invariant: Directory and dirty file MUST remain intact on disk
+    assert!(
+        managed.root.exists(),
+        "worktree directory must be preserved on disk after refusal"
+    );
+    assert!(
+        dirty_file.exists(),
+        "uncommitted file must be preserved on disk after refusal"
+    );
+}
+
+#[test]
+fn test_release_worktree_refuses_actively_owned_worktree_and_preserves_dir() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let managed = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create worktree");
+
+    assert!(managed.root.exists());
+
+    // Bind active thread owner
+    let active_thread = "thread_active_worker_777";
+    orchestrator
+        .bind_thread(&managed.root, active_thread)
+        .expect("bind thread");
+
+    // Attempt to release with retain = false while owned
+    let res = orchestrator.release_worktree(&repo_dir, &managed.root, false, None);
+
+    // Invariant: Removal MUST be refused while actively owned by a thread
+    assert!(
+        matches!(res, Err(WorkspaceError::InvalidOperation(ref msg)) if msg.contains("actively owned by thread")),
+        "expected InvalidOperation on actively owned worktree, got {res:?}"
+    );
+
+    // Invariant: Directory MUST remain intact on disk
+    assert!(
+        managed.root.exists(),
+        "worktree directory must be preserved on disk"
     );
 }

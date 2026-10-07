@@ -2557,13 +2557,11 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .max_by_key(|a| a.version);
 
         if let Some(latest) = existing_family_latest {
-            let caller_specified_lineage = artifact.version > 1 && artifact.supersedes.is_some();
-            if !caller_specified_lineage {
-                artifact.version = latest.version + 1;
-                artifact.supersedes = Some(latest.id);
-            }
-        } else if artifact.version == 0 {
+            artifact.version = latest.version + 1;
+            artifact.supersedes = Some(latest.id);
+        } else {
             artifact.version = 1;
+            artifact.supersedes = None;
         }
 
         let event = ControlPlaneEvent::ArtifactRegistered {
