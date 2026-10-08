@@ -218,54 +218,6 @@ impl WorkspaceOrchestrator {
         .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
     }
 
-    /// Safely removes a managed worktree previously bound to a retired thread.
-    ///
-    /// Verifies that the worktree's recorded owner matches `expected_retired_thread_id`,
-    /// then safely delegates removal to `WorktreeManager::remove`. Fails closed if owner
-    /// does not match, is missing, query fails, or the worktree has uncommitted modifications.
-    pub fn release_retired_owned_worktree(
-        &self,
-        source_cwd: &Path,
-        root: &Path,
-        expected_retired_thread_id: &str,
-    ) -> Result<(), WorkspaceError> {
-        let current_owner = self.get_owner(root)?;
-        match current_owner {
-            Some(ref owner) if owner == expected_retired_thread_id => {
-                // Owner matches expected retired thread - proceed with safe upstream removal
-                self.worktree_manager
-                    .remove(source_cwd, root)
-                    .map_err(|e| WorkspaceError::WorktreeRemovalFailed(e.to_string()))
-            }
-            Some(foreign_owner) => Err(WorkspaceError::InvalidOperation(format!(
-                "cannot remove retired worktree {}: expected retired owner {}, found owner {}",
-                root.display(),
-                expected_retired_thread_id,
-                foreign_owner
-            ))),
-            None => Err(WorkspaceError::InvalidOperation(format!(
-                "cannot remove retired worktree {}: no owner recorded, expected {}",
-                root.display(),
-                expected_retired_thread_id
-            ))),
-        }
-    }
-
-    /// Asynchronous wrapper for `release_retired_owned_worktree`.
-    pub async fn release_retired_owned_worktree_async(
-        &self,
-        source_cwd: PathBuf,
-        root: PathBuf,
-        expected_retired_thread_id: String,
-    ) -> Result<(), WorkspaceError> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            this.release_retired_owned_worktree(&source_cwd, &root, &expected_retired_thread_id)
-        })
-        .await
-        .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))?
-    }
-
     /// Captures all modifications in `worktree_path` relative to `base_commit` via an ephemeral index.
     pub fn capture_changes(
         &self,

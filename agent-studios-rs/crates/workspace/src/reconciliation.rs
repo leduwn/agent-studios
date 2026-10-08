@@ -286,13 +286,9 @@ where
         });
     }
 
-    let merge_commit = if commit_message.is_some() {
-        Some(candidate_commit)
-    } else {
-        None
-    };
-
-    Ok(ReconciliationOutcome::Applied { merge_commit })
+    Ok(ReconciliationOutcome::Applied {
+        merge_commit: Some(candidate_commit),
+    })
 }
 
 /// Applies a previously checked patch to a target integration worktree.

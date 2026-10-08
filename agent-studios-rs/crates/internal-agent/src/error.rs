@@ -85,6 +85,12 @@ pub enum InternalAgentError {
     #[error("Worker retirement timed out for agent {agent_id}")]
     WorkerRetirementTimeout { agent_id: AgentId },
 
+    #[error("Thread shutdown failed for agent {agent_id}: {error}")]
+    ThreadShutdownFailed { agent_id: AgentId, error: String },
+
+    #[error("Thread shutdown timed out for agent {agent_id}")]
+    ThreadShutdownTimeout { agent_id: AgentId },
+
     #[error(
         "Workspace affinity conflict for agent {agent_id}: worker is currently executing an active turn"
     )]

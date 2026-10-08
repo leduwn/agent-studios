@@ -280,9 +280,20 @@ pub struct CodexAgentExecutor {
 }
 
 impl CodexAgentExecutor {
-    async fn shutdown_and_wait_thread(thread: &Arc<CodexThread>, timeout: Duration) {
-        let _ = thread.submit(Op::Shutdown).await;
-        let _ = tokio::time::timeout(timeout, thread.wait_until_terminated()).await;
+    async fn shutdown_and_wait_thread(
+        agent_id: AgentId,
+        thread: &Arc<CodexThread>,
+        timeout: Duration,
+    ) -> Result<(), InternalAgentError> {
+        thread.submit(Op::Shutdown).await.map_err(|e| {
+            InternalAgentError::ThreadShutdownFailed {
+                agent_id,
+                error: e.to_string(),
+            }
+        })?;
+        tokio::time::timeout(timeout, thread.wait_until_terminated())
+            .await
+            .map_err(|_| InternalAgentError::ThreadShutdownTimeout { agent_id })
     }
     pub fn try_new(
         session_factory: Arc<AgentStudiosRuntimeSessionFactory>,
@@ -356,18 +367,21 @@ impl CodexAgentExecutor {
         if state.active_turn.load(Ordering::SeqCst) {
             return Err(InternalAgentError::WorkspaceAffinityConflict { agent_id });
         }
-        let _ = state.thread.submit(Op::Shutdown).await;
         let shutdown_timeout = Duration::from_secs(5);
-        tokio::select! {
-            _ = state.thread.wait_until_terminated() => {
-                let mut guard = self.running_agents.write().await;
-                guard.remove(&agent_id);
-                Ok(())
-            }
-            _ = tokio::time::sleep(shutdown_timeout) => {
-                Err(InternalAgentError::WorkerRetirementTimeout { agent_id })
-            }
-        }
+        Self::shutdown_and_wait_thread(agent_id, &state.thread, shutdown_timeout)
+            .await
+            .map_err(|e| match e {
+                InternalAgentError::ThreadShutdownTimeout { agent_id } => {
+                    InternalAgentError::WorkerRetirementTimeout { agent_id }
+                }
+                other => other,
+            })?;
+        let mut guard = self.running_agents.write().await;
+        guard.remove(&agent_id);
+        self.thread_manager
+            .remove_thread_if_matches(&state.thread_id, &state.thread)
+            .await;
+        Ok(())
     }
 
     async fn drain_events(
@@ -793,7 +807,15 @@ impl AgentExecutor for CodexAgentExecutor {
                         .bind_thread_async(root.to_path_buf(), thread_id.to_string())
                         .await
                     {
-                        Self::shutdown_and_wait_thread(&thread, Duration::from_secs(5)).await;
+                        let shutdown_res = Self::shutdown_and_wait_thread(
+                            context.agent_spec.agent_id,
+                            &thread,
+                            Duration::from_secs(5),
+                        )
+                        .await;
+                        self.thread_manager
+                            .remove_thread_if_matches(&thread_id, &thread)
+                            .await;
                         tracker.rollback_turn();
                         let _ = self
                             .control_plane
@@ -808,6 +830,7 @@ impl AgentExecutor for CodexAgentExecutor {
                                 )
                                 .await;
                         }
+                        shutdown_res?;
                         return Err(InternalAgentError::ExecutionFailed {
                             agent_id: context.agent_spec.agent_id,
                             error: format!("Failed to bind thread to workspace: {e}"),
@@ -821,7 +844,15 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_worktree_thread(wt_id, thread_id.to_string())
                     .await
                 {
-                    Self::shutdown_and_wait_thread(&thread, Duration::from_secs(5)).await;
+                    let shutdown_res = Self::shutdown_and_wait_thread(
+                        context.agent_spec.agent_id,
+                        &thread,
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                    self.thread_manager
+                        .remove_thread_if_matches(&thread_id, &thread)
+                        .await;
                     tracker.rollback_turn();
                     let _ = self
                         .control_plane
@@ -834,6 +865,7 @@ impl AgentExecutor for CodexAgentExecutor {
                             Some(format!("Failed durable thread binding: {e}")),
                         )
                         .await;
+                    shutdown_res?;
                     return Err(InternalAgentError::ExecutionFailed {
                         agent_id: context.agent_spec.agent_id,
                         error: format!("Failed to record durable thread binding: {e}"),
@@ -1137,7 +1169,15 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_thread_async(root.to_path_buf(), live_agent.thread_id.to_string())
                     .await
                 {
-                    Self::shutdown_and_wait_thread(&child_thread, Duration::from_secs(5)).await;
+                    let shutdown_res = Self::shutdown_and_wait_thread(
+                        context.agent_spec.agent_id,
+                        &child_thread,
+                        Duration::from_secs(5),
+                    )
+                    .await;
+                    self.thread_manager
+                        .remove_thread_if_matches(&live_agent.thread_id, &child_thread)
+                        .await;
                     parent_state.budget_tracker.rollback_child_agent();
                     child_tracker.rollback_turn();
                     let _ = self
@@ -1153,6 +1193,7 @@ impl AgentExecutor for CodexAgentExecutor {
                             )
                             .await;
                     }
+                    shutdown_res?;
                     return Err(InternalAgentError::ExecutionFailed {
                         agent_id: context.agent_spec.agent_id,
                         error: format!("Failed to bind child thread to workspace: {e}"),
@@ -1166,7 +1207,15 @@ impl AgentExecutor for CodexAgentExecutor {
                 .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
                 .await
             {
-                Self::shutdown_and_wait_thread(&child_thread, Duration::from_secs(5)).await;
+                let shutdown_res = Self::shutdown_and_wait_thread(
+                    context.agent_spec.agent_id,
+                    &child_thread,
+                    Duration::from_secs(5),
+                )
+                .await;
+                self.thread_manager
+                    .remove_thread_if_matches(&live_agent.thread_id, &child_thread)
+                    .await;
                 parent_state.budget_tracker.rollback_child_agent();
                 child_tracker.rollback_turn();
                 let _ = self
@@ -1180,6 +1229,7 @@ impl AgentExecutor for CodexAgentExecutor {
                         Some(format!("Failed durable thread binding: {e}")),
                     )
                     .await;
+                shutdown_res?;
                 return Err(InternalAgentError::ExecutionFailed {
                     agent_id: context.agent_spec.agent_id,
                     error: format!("Failed to record durable thread binding: {e}"),

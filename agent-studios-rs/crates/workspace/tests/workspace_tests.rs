@@ -989,7 +989,7 @@ fn test_isolated_reconciliation_candidate_construction_failure_preserves_worktre
 }
 
 #[test]
-fn test_safe_removal_of_retired_owned_worktree() {
+fn test_bound_owner_prevents_removal_and_preserves_worktree_contents() {
     let temp = tempdir().expect("tempdir");
     let repo_dir = temp.path().join("repo");
     fs::create_dir_all(&repo_dir).expect("create repo dir");
@@ -1000,64 +1000,78 @@ fn test_safe_removal_of_retired_owned_worktree() {
     let orchestrator =
         WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
 
-    // 1. Success case: retired owner matches expected thread
-    let wt1 = orchestrator
+    let wt = orchestrator
         .create_worktree(&repo_dir, Some(&base_commit))
-        .expect("create wt1");
+        .expect("create wt");
     orchestrator
-        .bind_thread(&wt1.root, "thread-retired-123")
+        .bind_thread(&wt.root, "thread-active-bound-123")
         .expect("bind thread");
     assert_eq!(
-        orchestrator.get_owner(&wt1.root).unwrap(),
-        Some("thread-retired-123".to_string())
+        orchestrator.get_owner(&wt.root).unwrap(),
+        Some("thread-active-bound-123".to_string())
     );
 
-    orchestrator
-        .release_retired_owned_worktree(&repo_dir, &wt1.root, "thread-retired-123")
-        .expect("safe release retired owned worktree");
+    let test_file = wt.root.join("important_work.rs");
+    fs::write(&test_file, "pub fn preserve_me() {}\n").expect("write test file");
+
+    let res = orchestrator.release_worktree(&repo_dir, &wt.root, false, None);
     assert!(
-        !wt1.root.exists(),
-        "wt1 directory should be removed from disk"
+        matches!(res, Err(WorkspaceError::InvalidOperation(ref msg)) if msg.contains("actively owned by thread")),
+        "expected InvalidOperation due to active owner, got {res:?}"
     );
+    assert!(wt.root.exists(), "worktree directory must remain on disk");
+    assert!(test_file.exists(), "worktree files must be preserved");
+    let content = fs::read_to_string(&test_file).expect("read test file");
+    assert_eq!(content, "pub fn preserve_me() {}\n");
+}
 
-    // 2. Failure case: foreign owner recorded
-    let wt2 = orchestrator
+#[test]
+fn test_reconciliation_applied_reports_merge_commit_when_commit_message_is_none() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let managed = orchestrator
         .create_worktree(&repo_dir, Some(&base_commit))
-        .expect("create wt2");
-    orchestrator
-        .bind_thread(&wt2.root, "thread-other-owner")
-        .expect("bind thread");
+        .expect("create managed worktree");
 
-    let foreign_res =
-        orchestrator.release_retired_owned_worktree(&repo_dir, &wt2.root, "thread-expected-owner");
-    assert!(
-        matches!(foreign_res, Err(WorkspaceError::InvalidOperation(ref msg)) if msg.contains("expected retired owner")),
-        "expected InvalidOperation on foreign owner mismatch, got {foreign_res:?}"
-    );
-    assert!(
-        wt2.root.exists(),
-        "wt2 directory must remain on disk after mismatch"
-    );
+    let feature_file = managed.root.join("new_file.rs");
+    fs::write(&feature_file, "pub fn hello() {}\n").expect("write new_file");
 
-    // 3. Failure case: uncommitted changes in worktree (fails safe without deletion)
-    let wt3 = orchestrator
+    let captured = orchestrator
+        .capture_changes(&managed.root, &base_commit)
+        .expect("capture changes");
+    assert!(!captured.patch_bytes.is_empty());
+
+    let integration_wt = orchestrator
         .create_worktree(&repo_dir, Some(&base_commit))
-        .expect("create wt3");
-    orchestrator
-        .bind_thread(&wt3.root, "thread-retired-dirty")
-        .expect("bind thread");
-    let dirty_file = wt3.root.join("uncommitted.rs");
-    fs::write(&dirty_file, "pub fn dirty() {}\n").expect("write dirty");
+        .expect("create integration worktree");
 
-    let dirty_res =
-        orchestrator.release_retired_owned_worktree(&repo_dir, &wt3.root, "thread-retired-dirty");
-    assert!(
-        matches!(dirty_res, Err(WorkspaceError::WorktreeRemovalFailed(_))),
-        "expected WorktreeRemovalFailed on dirty worktree, got {dirty_res:?}"
-    );
-    assert!(wt3.root.exists(), "dirty wt3 directory must remain on disk");
-    assert!(
-        dirty_file.exists(),
-        "dirty uncommitted file must be preserved"
-    );
+    let outcome = orchestrator
+        .reconcile_patch(&integration_wt.root, &captured.patch_bytes, None)
+        .expect("reconcile patch");
+
+    let merge_commit = match outcome {
+        ReconciliationOutcome::Applied { merge_commit } => {
+            merge_commit.expect("merge_commit must be Some even when commit_message is None")
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    let rev_out = std::process::Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(rev_out.status.success());
+    let current_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
+    assert_eq!(merge_commit, current_head);
+    assert_ne!(merge_commit, base_commit);
 }
