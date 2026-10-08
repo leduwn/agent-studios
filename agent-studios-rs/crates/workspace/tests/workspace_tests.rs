@@ -693,12 +693,15 @@ fn test_transactional_reconciliation_failure_preserves_untracked_sentinel() {
     )
     .expect("apply_patch call");
 
-    // Invariant: Produces ReconciliationOutcome::Failed
+    // Invariant: Produces ReconciliationOutcome::Conflicted or ReconciliationOutcome::Failed
     match outcome {
-        ReconciliationOutcome::Failed { ref error } => {
-            assert!(error.contains("git apply failed"), "error: {error}");
+        ReconciliationOutcome::Conflicted { ref reason, .. } => {
+            assert!(!reason.is_empty(), "conflict reason should not be empty");
         }
-        other => panic!("expected Failed outcome, got {other:?}"),
+        ReconciliationOutcome::Failed { ref error } => {
+            assert!(!error.is_empty(), "failure error should not be empty");
+        }
+        other => panic!("expected Conflicted or Failed outcome, got {other:?}"),
     }
 
     // Invariant: pre-HEAD is preserved
@@ -811,5 +814,250 @@ fn test_release_worktree_clean_removal_verifies_root_removed() {
     assert!(
         !managed.root.exists(),
         "worktree directory must be removed from disk"
+    );
+}
+
+#[test]
+fn test_isolated_reconciliation_preserves_untracked_sentinel_on_success() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let integration_wt = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create integration worktree");
+
+    // Create untracked sentinel file
+    let sentinel_file = integration_wt.root.join("untracked_sentinel.txt");
+    let sentinel_bytes = b"important user data - do not delete or stage\n";
+    fs::write(&sentinel_file, sentinel_bytes).expect("write sentinel");
+
+    // Create valid patch modifying README.md
+    let valid_patch = b"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Initial Workspace\n+New line added by patch\n";
+
+    let outcome = agent_studios_workspace::apply_patch(
+        &integration_wt.root,
+        valid_patch,
+        Some("Apply valid patch cleanly"),
+    )
+    .expect("apply_patch");
+
+    // Invariant: Applied with merge_commit sha
+    match outcome {
+        ReconciliationOutcome::Applied { merge_commit } => {
+            assert!(merge_commit.is_some(), "expected merge_commit SHA");
+        }
+        other => panic!("expected Applied outcome, got {other:?}"),
+    }
+
+    // Invariant: Untracked sentinel file exists with identical content
+    assert!(
+        sentinel_file.exists(),
+        "untracked sentinel must be preserved"
+    );
+    let read_sentinel = fs::read(&sentinel_file).expect("read sentinel");
+    assert_eq!(read_sentinel, sentinel_bytes);
+
+    // Invariant: Untracked sentinel file is NOT in the new HEAD tree
+    let ls_tree_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["ls-tree", "-r", "HEAD", "--name-only"])
+        .output()
+        .expect("git ls-tree");
+    let ls_tree_str = String::from_utf8_lossy(&ls_tree_out.stdout);
+    assert!(
+        !ls_tree_str.contains("untracked_sentinel.txt"),
+        "untracked sentinel must never be staged into commit"
+    );
+
+    // Invariant: README.md working tree is updated
+    let readme_content =
+        fs::read_to_string(integration_wt.root.join("README.md")).expect("read readme");
+    assert!(readme_content.contains("New line added by patch"));
+}
+
+#[test]
+fn test_isolated_reconciliation_mutation_boundary_race_preserves_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let integration_wt = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create integration worktree");
+
+    let pre_rev_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let pre_head = String::from_utf8_lossy(&pre_rev_out.stdout)
+        .trim()
+        .to_string();
+
+    // Valid patch modifying README.md
+    let valid_patch = b"diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # Initial Workspace\n+Concurrent patch line\n";
+
+    // Test hook creates concurrent uncommitted modification immediately before promotion
+    let outcome = agent_studios_workspace::apply_patch_with_pre_promotion_hook(
+        &integration_wt.root,
+        valid_patch,
+        Some("Concurrent race test"),
+        Some(|wt_path: &Path| {
+            fs::write(wt_path.join("README.md"), "# Modified concurrently!\n")
+                .map_err(|e| WorkspaceError::InvalidOperation(e.to_string()))
+        }),
+    )
+    .expect("apply_patch call");
+
+    // Invariant: Pre-promotion revalidation catches dirty integration worktree and fails
+    match outcome {
+        ReconciliationOutcome::Failed { error } => {
+            assert!(
+                error.contains("pre-promotion revalidation failed"),
+                "expected pre-promotion revalidation failure, got: {error}"
+            );
+        }
+        other => panic!("expected Failed outcome due to race check, got {other:?}"),
+    }
+
+    // Invariant: HEAD unchanged
+    let post_rev_out = Command::new("git")
+        .current_dir(&integration_wt.root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("rev-parse");
+    let post_head = String::from_utf8_lossy(&post_rev_out.stdout)
+        .trim()
+        .to_string();
+    assert_eq!(post_head, pre_head, "HEAD must not advance on race failure");
+
+    // Invariant: Concurrent working tree changes are preserved
+    let concurrent_readme =
+        fs::read_to_string(integration_wt.root.join("README.md")).expect("read readme");
+    assert_eq!(concurrent_readme, "# Modified concurrently!\n");
+}
+
+#[test]
+fn test_isolated_reconciliation_candidate_construction_failure_preserves_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    let integration_wt = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create integration worktree");
+
+    let untracked = integration_wt.root.join("keeper.txt");
+    fs::write(&untracked, "safe file\n").expect("write untracked");
+
+    // Corrupted patch that fails git apply --cached
+    let corrupt_patch = b"not a valid git patch header\nrandom corrupt bytes\n";
+    let outcome = orchestrator
+        .reconcile_patch(&integration_wt.root, corrupt_patch, Some("corrupt"))
+        .expect("reconcile_patch");
+
+    assert!(
+        matches!(
+            outcome,
+            ReconciliationOutcome::Conflicted { .. } | ReconciliationOutcome::Failed { .. }
+        ),
+        "expected Conflicted or Failed for corrupt patch, got {outcome:?}"
+    );
+
+    assert!(untracked.exists(), "untracked file must be preserved");
+    let content = fs::read_to_string(&untracked).expect("read untracked");
+    assert_eq!(content, "safe file\n");
+}
+
+#[test]
+fn test_safe_removal_of_retired_owned_worktree() {
+    let temp = tempdir().expect("tempdir");
+    let repo_dir = temp.path().join("repo");
+    fs::create_dir_all(&repo_dir).expect("create repo dir");
+    let base_commit = init_test_git_repo(&repo_dir);
+
+    let managed_root = temp.path().join("managed_worktrees");
+    let artifact_root = temp.path().join("artifacts");
+    let orchestrator =
+        WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator new");
+
+    // 1. Success case: retired owner matches expected thread
+    let wt1 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt1");
+    orchestrator
+        .bind_thread(&wt1.root, "thread-retired-123")
+        .expect("bind thread");
+    assert_eq!(
+        orchestrator.get_owner(&wt1.root).unwrap(),
+        Some("thread-retired-123".to_string())
+    );
+
+    orchestrator
+        .release_retired_owned_worktree(&repo_dir, &wt1.root, "thread-retired-123")
+        .expect("safe release retired owned worktree");
+    assert!(
+        !wt1.root.exists(),
+        "wt1 directory should be removed from disk"
+    );
+
+    // 2. Failure case: foreign owner recorded
+    let wt2 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt2");
+    orchestrator
+        .bind_thread(&wt2.root, "thread-other-owner")
+        .expect("bind thread");
+
+    let foreign_res =
+        orchestrator.release_retired_owned_worktree(&repo_dir, &wt2.root, "thread-expected-owner");
+    assert!(
+        matches!(foreign_res, Err(WorkspaceError::InvalidOperation(ref msg)) if msg.contains("expected retired owner")),
+        "expected InvalidOperation on foreign owner mismatch, got {foreign_res:?}"
+    );
+    assert!(
+        wt2.root.exists(),
+        "wt2 directory must remain on disk after mismatch"
+    );
+
+    // 3. Failure case: uncommitted changes in worktree (fails safe without deletion)
+    let wt3 = orchestrator
+        .create_worktree(&repo_dir, Some(&base_commit))
+        .expect("create wt3");
+    orchestrator
+        .bind_thread(&wt3.root, "thread-retired-dirty")
+        .expect("bind thread");
+    let dirty_file = wt3.root.join("uncommitted.rs");
+    fs::write(&dirty_file, "pub fn dirty() {}\n").expect("write dirty");
+
+    let dirty_res =
+        orchestrator.release_retired_owned_worktree(&repo_dir, &wt3.root, "thread-retired-dirty");
+    assert!(
+        matches!(dirty_res, Err(WorkspaceError::WorktreeRemovalFailed(_))),
+        "expected WorktreeRemovalFailed on dirty worktree, got {dirty_res:?}"
+    );
+    assert!(wt3.root.exists(), "dirty wt3 directory must remain on disk");
+    assert!(
+        dirty_file.exists(),
+        "dirty uncommitted file must be preserved"
     );
 }

@@ -2000,6 +2000,25 @@ fn test_artifact_authoritative_lineage_allocation_overrides_caller_specified() {
     // Invariant: Subsequent artifact is ALWAYS latest.version + 1 and supersedes Some(latest.id)
     assert_eq!(registered2.version, 2);
     assert_eq!(registered2.supersedes, Some(registered1.id));
+
+    // Caller attempts to force arbitrary subsequent version 999 and wrong supersedes for v3
+    let mut art3 = ArtifactRecord::new(
+        studio.id,
+        task.id,
+        agent.id,
+        ArtifactKind::File,
+        "src/output.txt",
+        Some("hash-3".into()),
+        "store/3",
+        now,
+    );
+    art3.version = 999;
+    art3.supersedes = Some(fake_supersedes_id);
+
+    let registered3 = cp.register_artifact_record(art3).unwrap();
+    // Invariant: Subsequent artifact is ALWAYS latest.version + 1 and supersedes Some(latest.id)
+    assert_eq!(registered3.version, 3);
+    assert_eq!(registered3.supersedes, Some(registered2.id));
 }
 
 #[test]

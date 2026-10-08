@@ -250,6 +250,24 @@ impl std::fmt::Debug for RunningAgentState {
     }
 }
 
+/// RAII guard ensuring active_turn atomic boolean is reset to false on drop.
+pub struct ActiveTurnGuard {
+    active_turn: Arc<AtomicBool>,
+}
+
+impl ActiveTurnGuard {
+    pub fn new(active_turn: Arc<AtomicBool>) -> Self {
+        active_turn.store(true, Ordering::SeqCst);
+        Self { active_turn }
+    }
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        self.active_turn.store(false, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 pub struct CodexAgentExecutor {
     thread_manager: Arc<ThreadManager>,
@@ -262,6 +280,10 @@ pub struct CodexAgentExecutor {
 }
 
 impl CodexAgentExecutor {
+    async fn shutdown_and_wait_thread(thread: &Arc<CodexThread>, timeout: Duration) {
+        let _ = thread.submit(Op::Shutdown).await;
+        let _ = tokio::time::timeout(timeout, thread.wait_until_terminated()).await;
+    }
     pub fn try_new(
         session_factory: Arc<AgentStudiosRuntimeSessionFactory>,
         thread_manager: Arc<ThreadManager>,
@@ -488,6 +510,41 @@ impl AgentExecutor for CodexAgentExecutor {
 
         if let Some(mut state) = existing {
             if state.bound_workspace == context.execution_workspace {
+                // Revalidate upstream worktree ownership before turn reservation and dispatch
+                if let Some(root) = context.execution_workspace.root() {
+                    let orchestrator = self.workspace_orchestrator.as_ref().ok_or_else(|| {
+                        InternalAgentError::Workspace(
+                            agent_studios_workspace::WorkspaceError::InvalidOperation(
+                                "missing workspace orchestrator for managed worktree reuse"
+                                    .to_string(),
+                            ),
+                        )
+                    })?;
+                    let expected_thread = state.thread_id.to_string();
+                    match orchestrator.get_owner(root) {
+                        Ok(Some(ref owner)) if owner == &expected_thread => {
+                            // Upstream ownership verified
+                        }
+                        Ok(Some(foreign_owner)) => {
+                            return Err(InternalAgentError::WorktreeOwnershipConflict {
+                                agent_id: context.agent_spec.agent_id,
+                                worktree_root: root.to_path_buf(),
+                                owner_thread_id: foreign_owner,
+                            });
+                        }
+                        Ok(None) => {
+                            return Err(InternalAgentError::WorktreeOwnershipConflict {
+                                agent_id: context.agent_spec.agent_id,
+                                worktree_root: root.to_path_buf(),
+                                owner_thread_id: "none".to_string(),
+                            });
+                        }
+                        Err(e) => {
+                            return Err(InternalAgentError::Workspace(e));
+                        }
+                    }
+                }
+
                 let tracker = if state.parent_agent_id.is_none() {
                     Arc::clone(&state.budget_tracker)
                 } else {
@@ -509,7 +566,7 @@ impl AgentExecutor for CodexAgentExecutor {
                 );
                 state.budget_tracker = Arc::clone(&tracker);
                 state.current_run_id = context.run_id;
-                state.active_turn.store(true, Ordering::SeqCst);
+                let _turn_guard = ActiveTurnGuard::new(Arc::clone(&state.active_turn));
 
                 {
                     let mut guard = self.running_agents.write().await;
@@ -727,7 +784,8 @@ impl AgentExecutor for CodexAgentExecutor {
             let thread_id = new_thread.thread_id;
             let thread = new_thread.thread;
             let agent_control = thread.agent_control();
-            let active_turn = Arc::new(AtomicBool::new(true));
+            let active_turn = Arc::new(AtomicBool::new(false));
+            let _turn_guard = ActiveTurnGuard::new(Arc::clone(&active_turn));
 
             if let Some(orchestrator) = &self.workspace_orchestrator {
                 if let Some(root) = context.execution_workspace.root() {
@@ -735,7 +793,7 @@ impl AgentExecutor for CodexAgentExecutor {
                         .bind_thread_async(root.to_path_buf(), thread_id.to_string())
                         .await
                     {
-                        let _ = thread.submit(Op::Shutdown).await;
+                        Self::shutdown_and_wait_thread(&thread, Duration::from_secs(5)).await;
                         tracker.rollback_turn();
                         let _ = self
                             .control_plane
@@ -763,12 +821,7 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_worktree_thread(wt_id, thread_id.to_string())
                     .await
                 {
-                    let _ = thread.submit(Op::Shutdown).await;
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        thread.wait_until_terminated(),
-                    )
-                    .await;
+                    Self::shutdown_and_wait_thread(&thread, Duration::from_secs(5)).await;
                     tracker.rollback_turn();
                     let _ = self
                         .control_plane
@@ -1075,7 +1128,8 @@ impl AgentExecutor for CodexAgentExecutor {
         };
 
         let child_control = child_thread.agent_control();
-        let active_turn = Arc::new(AtomicBool::new(true));
+        let active_turn = Arc::new(AtomicBool::new(false));
+        let _turn_guard = ActiveTurnGuard::new(Arc::clone(&active_turn));
 
         if let Some(orchestrator) = &self.workspace_orchestrator {
             if let Some(root) = context.execution_workspace.root() {
@@ -1083,12 +1137,7 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_thread_async(root.to_path_buf(), live_agent.thread_id.to_string())
                     .await
                 {
-                    let _ = child_thread.submit(Op::Shutdown).await;
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        child_thread.wait_until_terminated(),
-                    )
-                    .await;
+                    Self::shutdown_and_wait_thread(&child_thread, Duration::from_secs(5)).await;
                     parent_state.budget_tracker.rollback_child_agent();
                     child_tracker.rollback_turn();
                     let _ = self
@@ -1117,7 +1166,7 @@ impl AgentExecutor for CodexAgentExecutor {
                 .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
                 .await
             {
-                let _ = child_thread.submit(Op::Shutdown).await;
+                Self::shutdown_and_wait_thread(&child_thread, Duration::from_secs(5)).await;
                 parent_state.budget_tracker.rollback_child_agent();
                 child_tracker.rollback_turn();
                 let _ = self
@@ -1204,5 +1253,32 @@ impl AgentExecutor for CodexAgentExecutor {
 
     async fn cancel_agent(&self, agent_id: AgentId) -> Result<(), InternalAgentError> {
         Self::cancel_agent(self, agent_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_active_turn_guard_sets_and_clears_on_drop() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(!flag.load(Ordering::SeqCst));
+        {
+            let _guard = ActiveTurnGuard::new(Arc::clone(&flag));
+            assert!(flag.load(Ordering::SeqCst));
+        }
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_active_turn_guard_clears_on_panic_unwind() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = ActiveTurnGuard::new(flag_clone);
+            panic!("simulated turn panic");
+        });
+        assert!(!flag.load(Ordering::SeqCst));
     }
 }

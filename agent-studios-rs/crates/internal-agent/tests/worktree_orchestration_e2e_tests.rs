@@ -2695,6 +2695,205 @@ async fn test_same_workspace_worker_reuse_preserves_thread_id() {
 }
 
 #[tokio::test]
+async fn test_same_workspace_worker_reuse_revalidates_owner_and_fails_closed_on_foreign_owner() {
+    run_with_large_stack(async {
+        let temp = tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("repo");
+        fs::create_dir_all(&repo_dir).expect("create repo dir");
+        let base_commit = init_test_git_repo(&repo_dir);
+
+        let managed_root = temp.path().join("managed_worktrees");
+        let artifact_root = temp.path().join("artifacts");
+        let orchestrator = Arc::new(
+            WorkspaceOrchestrator::new(&managed_root, &artifact_root).expect("orchestrator"),
+        );
+
+        let managed_wt = orchestrator
+            .create_worktree(&repo_dir, Some(&base_commit))
+            .expect("create managed worktree");
+
+        let server = MockServer::start().await;
+        let turn_sse = "data: {\"id\":\"chat-turn\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Turn complete\"},\"finish_reason\":null}]}\n\n\
+                        data: {\"id\":\"chat-turn\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":10,\"total_tokens\":20}}\n\n\
+                        data: [DONE]\n\n";
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(turn_sse),
+            )
+            .mount(&server)
+            .await;
+
+        let secret_resolver = InMemorySecretResolver::new();
+        secret_resolver.insert(
+            SecretReference {
+                backend: SecretBackend::EnvironmentVariable,
+                locator: "TEST_API_KEY".to_string(),
+            },
+            "dummy-api-key",
+        );
+        let secret_resolver = Arc::new(secret_resolver);
+
+        let mut catalog = ProviderCatalog::new();
+        let provider_inst_id = register_provider_and_instance(
+            &mut catalog,
+            "reuse-worker-provider-foreign",
+            "Reuse Worker Provider Foreign",
+            ProtocolFamily::OpenAiChatCompletions,
+            &server.uri(),
+            AuthenticationScheme::BearerToken {
+                secret: SecretReference {
+                    backend: SecretBackend::EnvironmentVariable,
+                    locator: "TEST_API_KEY".to_string(),
+                },
+            },
+        );
+
+        let worker_model_id = ModelId::new("worker-model").unwrap();
+        catalog
+            .register_model(
+                ModelDescriptor::new(
+                    provider_inst_id,
+                    worker_model_id.clone(),
+                    "Worker Model",
+                    ModelCapabilities::default(),
+                    ModelLimits::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let catalog = Arc::new(catalog);
+        let continuation_manager = Arc::new(ContinuationManager::new());
+        let factory = Arc::new(AgentStudiosRuntimeSessionFactory::new(
+            catalog,
+            secret_resolver,
+            continuation_manager,
+        ));
+
+        let codex_home = temp.path().join("codex_home");
+        let config = AgentStudiosCodexRuntimeFactory::create_test_config(&codex_home)
+            .await
+            .expect("test config");
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("dummy"),
+            config.codex_home.to_path_buf(),
+        );
+
+        let writer_tool = Arc::new(TestWorkspaceFileWriterTool::default());
+
+        let mut builder = build_agent_studios_extension_builder::<Config>();
+        builder.tool_contributor(writer_tool);
+        let extensions = Arc::new(builder.build());
+
+        let thread_manager = AgentStudiosCodexRuntimeFactory::build_thread_manager_with_extensions(
+            &config,
+            auth_manager,
+            Some(SessionSource::Exec),
+            extensions,
+        )
+        .await
+        .expect("build thread manager");
+        let thread_manager = Arc::new(thread_manager);
+
+        let clock = SystemClock;
+        let store = InMemoryStore::new();
+        let cp = ControlPlane::new(clock, store);
+        let (cp_handle, _actor_task) = ControlPlaneActor::spawn(cp);
+
+        let studio = cp_handle
+            .create_studio("Reuse Worker Studio Foreign")
+            .await
+            .unwrap();
+
+        let worker_agent_id = AgentId::new();
+        let worker_spec = InternalAgentSpec::new(
+            worker_agent_id,
+            "Worker 1",
+            "worker",
+            ModelRef::new(provider_inst_id, worker_model_id),
+        )
+        .with_workspace_access(WorkspaceAccessMode::Mutating);
+
+        let executor = CodexAgentExecutor::try_new(
+            factory,
+            thread_manager,
+            Arc::new(config),
+            cp_handle.clone(),
+        )
+        .unwrap()
+        .with_workspace_orchestrator(orchestrator.clone());
+
+        let wt_record = cp_handle
+            .create_worktree(
+                studio.id,
+                "reuse-wt-foreign",
+                repo_dir.clone(),
+                managed_wt.root.clone(),
+                base_commit.clone(),
+            )
+            .await
+            .unwrap();
+        cp_handle
+            .transition_worktree_state(wt_record.id, WorktreeState::Ready)
+            .await
+            .unwrap();
+
+        let workspace = ExecutionWorkspace::managed(
+            wt_record.id,
+            managed_wt.root.clone(),
+            managed_wt.cwd.clone(),
+            repo_dir.clone(),
+            repo_dir.clone(),
+            base_commit.clone(),
+        );
+
+        // Turn 1 succeeds
+        let mut ctx1 = AgentExecutionContext::new(studio.id, worker_spec.clone(), "Turn 1");
+        ctx1.execution_workspace = workspace.clone();
+        let res1 = executor.execute_agent(ctx1).await.unwrap();
+        assert!(res1.success);
+
+        // Mutate upstream worktree ownership metadata to simulate foreign ownership
+        let git_path_out = std::process::Command::new("git")
+            .current_dir(&managed_wt.root)
+            .args(["rev-parse", "--git-path", "codex-thread.json"])
+            .output()
+            .expect("rev-parse --git-path");
+        let meta_rel = String::from_utf8_lossy(&git_path_out.stdout)
+            .trim()
+            .to_string();
+        let meta_file = managed_wt.root.join(meta_rel);
+        fs::write(
+            &meta_file,
+            r#"{"version":1,"ownerThreadId":"foreign-thread-999"}"#,
+        )
+        .expect("overwrite owner metadata");
+
+        // Turn 2 on the exact same workspace must fail closed with WorktreeOwnershipConflict
+        let mut ctx2 = AgentExecutionContext::new(studio.id, worker_spec.clone(), "Turn 2");
+        ctx2.execution_workspace = workspace;
+        let res2 = executor.execute_agent(ctx2).await;
+
+        match res2 {
+            Err(InternalAgentError::WorktreeOwnershipConflict {
+                agent_id,
+                worktree_root,
+                owner_thread_id,
+            }) => {
+                assert_eq!(agent_id, worker_agent_id);
+                assert_eq!(worktree_root, managed_wt.root);
+                assert_eq!(owner_thread_id, "foreign-thread-999");
+            }
+            other => panic!("expected WorktreeOwnershipConflict, got {other:?}"),
+        }
+    })
+}
+
+#[tokio::test]
 async fn test_workspace_change_replacement_waits_for_termination_and_spawns_distinct_thread() {
     run_with_large_stack(async {
         let temp = tempdir().expect("tempdir");

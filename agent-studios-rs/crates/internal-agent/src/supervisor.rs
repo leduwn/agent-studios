@@ -534,20 +534,18 @@ impl<E: AgentExecutor + 'static> AgentStudiosSupervisor<E> {
                                         )
                                         .await;
                                     if release_res.is_ok() {
-                                        let _ = self
-                                            .control_plane
+                                        self.control_plane
                                             .complete_worktree_removal(wt_id, None)
-                                            .await;
+                                            .await?;
                                     } else {
-                                        let _ = self
-                                            .control_plane
+                                        self.control_plane
                                             .record_worktree_retained(
                                                 wt_id,
                                                 Some(
                                                     "Physical worktree removal failed".to_string(),
                                                 ),
                                             )
-                                            .await;
+                                            .await?;
                                     }
                                 }
                             }

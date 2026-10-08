@@ -57,7 +57,7 @@ pub fn check_patch(
         return Ok(None);
     }
 
-    // 1. Dry-run check: git apply --check --binary -
+    // Dry-run check: git apply --check --binary -
     let mut check_child = Command::new("git")
         .current_dir(target_worktree)
         .args(["apply", "--check", "--binary", "-"])
@@ -83,12 +83,23 @@ pub fn check_patch(
     Ok(None)
 }
 
-/// Applies a previously checked patch to a target integration worktree and creates an optional commit.
-pub fn apply_patch(
+/// Applies a patch to a target integration worktree using an isolated Git transaction.
+///
+/// Builds a candidate commit in an ephemeral temporary index (`GIT_INDEX_FILE`),
+/// revalidates pre-promotion cleanliness and HEAD equality, and safely fast-forwards
+/// the target worktree via `git merge --ff-only <candidate_commit>`.
+///
+/// Unrelated untracked files are never staged or deleted. Destructive commands
+/// (`git reset --hard`, `git clean`) are never executed.
+pub fn apply_patch_with_pre_promotion_hook<F>(
     target_worktree: &Path,
     patch_data: &[u8],
     commit_message: Option<&str>,
-) -> Result<ReconciliationOutcome, WorkspaceError> {
+    pre_promotion_hook: Option<F>,
+) -> Result<ReconciliationOutcome, WorkspaceError>
+where
+    F: FnOnce(&Path) -> Result<(), WorkspaceError>,
+{
     if !target_worktree.is_dir() {
         return Err(WorkspaceError::InvalidOperation(format!(
             "target worktree {} is not a directory",
@@ -100,7 +111,27 @@ pub fn apply_patch(
         return Ok(ReconciliationOutcome::Applied { merge_commit: None });
     }
 
-    // Snapshot pre-HEAD commit
+    // 1. Preflight cleanliness check: git status --porcelain -uno
+    let status_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["status", "--porcelain", "-uno"])
+        .output()?;
+    if !status_out.status.success() {
+        return Err(WorkspaceError::GitError(format!(
+            "git status failed in target worktree: {}",
+            String::from_utf8_lossy(&status_out.stderr)
+        )));
+    }
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    if !status_str.trim().is_empty() {
+        return Err(WorkspaceError::IntegrationWorkspaceDirty(format!(
+            "target worktree {} has uncommitted changes:\n{}",
+            target_worktree.display(),
+            status_str.trim()
+        )));
+    }
+
+    // 2. Snapshot pre-HEAD commit
     let rev_out = Command::new("git")
         .current_dir(target_worktree)
         .args(["rev-parse", "HEAD"])
@@ -113,73 +144,30 @@ pub fn apply_patch(
     }
     let pre_head = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
 
-    // Snapshot pre-existing untracked files to guarantee non-destructive transactional rollback
-    let pre_status = Command::new("git")
+    // 3. Create isolated temporary directory for ephemeral GIT_INDEX_FILE
+    let temp_dir = tempfile::tempdir()?;
+    let temp_index_file = temp_dir.path().join("reconcile_index");
+
+    // 4. Populate isolated index with pre_head tree: GIT_INDEX_FILE=<temp> git read-tree <pre_head>
+    let read_tree_out = Command::new("git")
         .current_dir(target_worktree)
-        .args(["status", "--porcelain"])
+        .env("GIT_INDEX_FILE", &temp_index_file)
+        .args(["read-tree", &pre_head])
         .output()?;
-    let mut pre_existing_untracked = std::collections::HashSet::new();
-    if pre_status.status.success() {
-        for line in String::from_utf8_lossy(&pre_status.stdout).lines() {
-            if let Some(rest) = line.strip_prefix("?? ") {
-                let path_str = rest.trim().trim_matches('"');
-                pre_existing_untracked.insert(path_str.to_string());
-            }
-        }
+    if !read_tree_out.status.success() {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "git read-tree failed in isolated index: {}",
+                String::from_utf8_lossy(&read_tree_out.stderr)
+            ),
+        });
     }
 
-    let rollback = || -> Result<(), WorkspaceError> {
-        // 1. Reset the index cleanly to pre_head without touching working tree files
-        let reset_out = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["reset", &pre_head])
-            .output()?;
-        if !reset_out.status.success() {
-            return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
-                "git reset failed: {}",
-                String::from_utf8_lossy(&reset_out.stderr)
-            )));
-        }
-
-        // 2. Safely restore tracked files in working directory to pre_head without touching untracked files
-        let checkout_out = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["checkout", &pre_head, "--", "."])
-            .output()?;
-        if !checkout_out.status.success() {
-            return Err(WorkspaceError::ReconciliationRollbackFailed(format!(
-                "git checkout failed: {}",
-                String::from_utf8_lossy(&checkout_out.stderr)
-            )));
-        }
-
-        // 3. Remove only new untracked files created by the failed patch, preserving pre-existing untracked files
-        let post_status = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["status", "--porcelain"])
-            .output()?;
-        if post_status.status.success() {
-            for line in String::from_utf8_lossy(&post_status.stdout).lines() {
-                if let Some(rest) = line.strip_prefix("?? ") {
-                    let path_str = rest.trim().trim_matches('"');
-                    if !pre_existing_untracked.contains(path_str) {
-                        let path = target_worktree.join(path_str);
-                        if path.is_file() || path.is_symlink() {
-                            let _ = std::fs::remove_file(&path);
-                        } else if path.is_dir() {
-                            let _ = std::fs::remove_dir_all(&path);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    };
-
+    // 5. Apply patch to temporary index ONLY: GIT_INDEX_FILE=<temp> git apply --cached --binary -
     let mut apply_child = Command::new("git")
         .current_dir(target_worktree)
-        .args(["apply", "--binary", "-"])
+        .env("GIT_INDEX_FILE", &temp_index_file)
+        .args(["apply", "--cached", "--binary", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -191,50 +179,115 @@ pub fn apply_patch(
 
     let apply_output = apply_child.wait_with_output()?;
     if !apply_output.status.success() {
-        rollback()?;
+        let stderr_str = String::from_utf8_lossy(&apply_output.stderr).to_string();
+        let conflicted_files = extract_conflicted_files(&stderr_str);
+        return Ok(ReconciliationOutcome::Conflicted {
+            conflicted_files,
+            reason: stderr_str,
+        });
+    }
+
+    // 6. Write tree from isolated index: GIT_INDEX_FILE=<temp> git write-tree
+    let write_tree_out = Command::new("git")
+        .current_dir(target_worktree)
+        .env("GIT_INDEX_FILE", &temp_index_file)
+        .args(["write-tree"])
+        .output()?;
+    if !write_tree_out.status.success() {
         return Ok(ReconciliationOutcome::Failed {
             error: format!(
-                "git apply failed after check succeeded: {}",
-                String::from_utf8_lossy(&apply_output.stderr)
+                "git write-tree failed in isolated index: {}",
+                String::from_utf8_lossy(&write_tree_out.stderr)
+            ),
+        });
+    }
+    let tree_sha = String::from_utf8_lossy(&write_tree_out.stdout)
+        .trim()
+        .to_string();
+
+    // 7. Create candidate commit: git commit-tree <tree> -p <pre_head> -m <msg>
+    let commit_msg = commit_message.unwrap_or("Reconcile patch");
+    let commit_tree_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["commit-tree", &tree_sha, "-p", &pre_head, "-m", commit_msg])
+        .output()?;
+    if !commit_tree_out.status.success() {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "git commit-tree failed for candidate commit: {}",
+                String::from_utf8_lossy(&commit_tree_out.stderr)
+            ),
+        });
+    }
+    let candidate_commit = String::from_utf8_lossy(&commit_tree_out.stdout)
+        .trim()
+        .to_string();
+
+    // 8. Deterministic test seam hook (if supplied) to simulate concurrent mutations
+    if let Some(hook) = pre_promotion_hook {
+        hook(target_worktree)?;
+    }
+
+    // 9. Revalidate integration worktree immediately before promotion
+    let current_rev_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()?;
+    if !current_rev_out.status.success() {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "git rev-parse HEAD revalidation failed: {}",
+                String::from_utf8_lossy(&current_rev_out.stderr)
+            ),
+        });
+    }
+    let current_head = String::from_utf8_lossy(&current_rev_out.stdout)
+        .trim()
+        .to_string();
+    if current_head != pre_head {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "Reconciliation pre-promotion revalidation failed: HEAD moved concurrently from {pre_head} to {current_head}"
             ),
         });
     }
 
-    let merge_commit = if let Some(msg) = commit_message {
-        let add_out = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["add", "-A", "--", "."])
-            .output()?;
-        if !add_out.status.success() {
-            rollback()?;
-            return Ok(ReconciliationOutcome::Failed {
-                error: format!(
-                    "git add failed during reconciliation commit: {}",
-                    String::from_utf8_lossy(&add_out.stderr)
-                ),
-            });
-        }
+    let status_recheck_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["status", "--porcelain", "-uno"])
+        .output()?;
+    if !status_recheck_out.status.success() {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "git status pre-promotion revalidation failed: {}",
+                String::from_utf8_lossy(&status_recheck_out.stderr)
+            ),
+        });
+    }
+    let status_recheck_str = String::from_utf8_lossy(&status_recheck_out.stdout);
+    if !status_recheck_str.trim().is_empty() {
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!(
+                "Reconciliation pre-promotion revalidation failed: integration worktree became dirty:\n{}",
+                status_recheck_str.trim()
+            ),
+        });
+    }
 
-        let commit_out = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["commit", "-m", msg])
-            .output()?;
-        if !commit_out.status.success() {
-            rollback()?;
-            return Ok(ReconciliationOutcome::Failed {
-                error: format!(
-                    "git commit failed during reconciliation: {}",
-                    String::from_utf8_lossy(&commit_out.stderr)
-                ),
-            });
-        }
+    // 10. Safe promotion: git merge --ff-only <candidate_commit>
+    let merge_out = Command::new("git")
+        .current_dir(target_worktree)
+        .args(["merge", "--ff-only", &candidate_commit])
+        .output()?;
+    if !merge_out.status.success() {
+        let stderr_str = String::from_utf8_lossy(&merge_out.stderr).to_string();
+        return Ok(ReconciliationOutcome::Failed {
+            error: format!("git merge --ff-only failed: {stderr_str}"),
+        });
+    }
 
-        let rev_out = Command::new("git")
-            .current_dir(target_worktree)
-            .args(["rev-parse", "HEAD"])
-            .output()?;
-        let sha = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
-        if sha.is_empty() { None } else { Some(sha) }
+    let merge_commit = if commit_message.is_some() {
+        Some(candidate_commit)
     } else {
         None
     };
@@ -242,21 +295,53 @@ pub fn apply_patch(
     Ok(ReconciliationOutcome::Applied { merge_commit })
 }
 
+/// Applies a previously checked patch to a target integration worktree.
+pub fn apply_patch(
+    target_worktree: &Path,
+    patch_data: &[u8],
+    commit_message: Option<&str>,
+) -> Result<ReconciliationOutcome, WorkspaceError> {
+    apply_patch_with_pre_promotion_hook(
+        target_worktree,
+        patch_data,
+        commit_message,
+        None::<fn(&Path) -> Result<(), WorkspaceError>>,
+    )
+}
+
+/// Safely reconciles a patch against a dedicated integration worktree with an optional test hook.
+pub fn reconcile_patch_with_pre_promotion_hook<F>(
+    target_worktree: &Path,
+    patch_data: &[u8],
+    commit_message: Option<&str>,
+    pre_promotion_hook: Option<F>,
+) -> Result<ReconciliationOutcome, WorkspaceError>
+where
+    F: FnOnce(&Path) -> Result<(), WorkspaceError>,
+{
+    if let Some(conflict) = check_patch(target_worktree, patch_data)? {
+        return Ok(conflict);
+    }
+    apply_patch_with_pre_promotion_hook(
+        target_worktree,
+        patch_data,
+        commit_message,
+        pre_promotion_hook,
+    )
+}
+
 /// Safely reconciles a patch against a dedicated integration worktree.
-///
-/// Steps:
-/// 1. Run `git apply --check --binary -` to verify patch applicability without modifying files.
-/// 2. If check fails: return `Conflicted` with extracted conflicted files and unmodified worktree.
-/// 3. If check succeeds: run `git apply --binary -` and optionally commit changes.
 pub fn reconcile_patch(
     target_worktree: &Path,
     patch_data: &[u8],
     commit_message: Option<&str>,
 ) -> Result<ReconciliationOutcome, WorkspaceError> {
-    if let Some(conflict) = check_patch(target_worktree, patch_data)? {
-        return Ok(conflict);
-    }
-    apply_patch(target_worktree, patch_data, commit_message)
+    reconcile_patch_with_pre_promotion_hook(
+        target_worktree,
+        patch_data,
+        commit_message,
+        None::<fn(&Path) -> Result<(), WorkspaceError>>,
+    )
 }
 
 /// Parses git apply error messages to discover which files conflicted.
