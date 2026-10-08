@@ -295,6 +295,43 @@ impl CodexAgentExecutor {
             .await
             .map_err(|_| InternalAgentError::ThreadShutdownTimeout { agent_id })
     }
+
+    async fn shutdown_wait_and_remove_confirmed_thread(
+        &self,
+        agent_id: AgentId,
+        thread_id: ThreadId,
+        thread: &Arc<CodexThread>,
+        timeout: Duration,
+    ) -> Result<(), InternalAgentError> {
+        Self::shutdown_and_wait_thread(agent_id, thread, timeout).await?;
+        self.thread_manager
+            .remove_thread_if_matches(&thread_id, thread)
+            .await;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn should_remove_thread_after_shutdown(
+        shutdown_res: &Result<(), InternalAgentError>,
+    ) -> bool {
+        shutdown_res.is_ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_shutdown_and_decide_removal<F>(
+        shutdown_res: Result<(), InternalAgentError>,
+        mut remove_action: F,
+    ) -> Result<bool, InternalAgentError>
+    where
+        F: FnMut(),
+    {
+        if Self::should_remove_thread_after_shutdown(&shutdown_res) {
+            remove_action();
+            Ok(true)
+        } else {
+            Err(shutdown_res.unwrap_err())
+        }
+    }
     pub fn try_new(
         session_factory: Arc<AgentStudiosRuntimeSessionFactory>,
         thread_manager: Arc<ThreadManager>,
@@ -807,15 +844,6 @@ impl AgentExecutor for CodexAgentExecutor {
                         .bind_thread_async(root.to_path_buf(), thread_id.to_string())
                         .await
                     {
-                        let shutdown_res = Self::shutdown_and_wait_thread(
-                            context.agent_spec.agent_id,
-                            &thread,
-                            Duration::from_secs(5),
-                        )
-                        .await;
-                        self.thread_manager
-                            .remove_thread_if_matches(&thread_id, &thread)
-                            .await;
                         tracker.rollback_turn();
                         let _ = self
                             .control_plane
@@ -830,7 +858,13 @@ impl AgentExecutor for CodexAgentExecutor {
                                 )
                                 .await;
                         }
-                        shutdown_res?;
+                        self.shutdown_wait_and_remove_confirmed_thread(
+                            context.agent_spec.agent_id,
+                            thread_id,
+                            &thread,
+                            Duration::from_secs(5),
+                        )
+                        .await?;
                         return Err(InternalAgentError::ExecutionFailed {
                             agent_id: context.agent_spec.agent_id,
                             error: format!("Failed to bind thread to workspace: {e}"),
@@ -844,15 +878,6 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_worktree_thread(wt_id, thread_id.to_string())
                     .await
                 {
-                    let shutdown_res = Self::shutdown_and_wait_thread(
-                        context.agent_spec.agent_id,
-                        &thread,
-                        Duration::from_secs(5),
-                    )
-                    .await;
-                    self.thread_manager
-                        .remove_thread_if_matches(&thread_id, &thread)
-                        .await;
                     tracker.rollback_turn();
                     let _ = self
                         .control_plane
@@ -865,7 +890,13 @@ impl AgentExecutor for CodexAgentExecutor {
                             Some(format!("Failed durable thread binding: {e}")),
                         )
                         .await;
-                    shutdown_res?;
+                    self.shutdown_wait_and_remove_confirmed_thread(
+                        context.agent_spec.agent_id,
+                        thread_id,
+                        &thread,
+                        Duration::from_secs(5),
+                    )
+                    .await?;
                     return Err(InternalAgentError::ExecutionFailed {
                         agent_id: context.agent_spec.agent_id,
                         error: format!("Failed to record durable thread binding: {e}"),
@@ -1169,15 +1200,6 @@ impl AgentExecutor for CodexAgentExecutor {
                     .bind_thread_async(root.to_path_buf(), live_agent.thread_id.to_string())
                     .await
                 {
-                    let shutdown_res = Self::shutdown_and_wait_thread(
-                        context.agent_spec.agent_id,
-                        &child_thread,
-                        Duration::from_secs(5),
-                    )
-                    .await;
-                    self.thread_manager
-                        .remove_thread_if_matches(&live_agent.thread_id, &child_thread)
-                        .await;
                     parent_state.budget_tracker.rollback_child_agent();
                     child_tracker.rollback_turn();
                     let _ = self
@@ -1193,7 +1215,13 @@ impl AgentExecutor for CodexAgentExecutor {
                             )
                             .await;
                     }
-                    shutdown_res?;
+                    self.shutdown_wait_and_remove_confirmed_thread(
+                        context.agent_spec.agent_id,
+                        live_agent.thread_id,
+                        &child_thread,
+                        Duration::from_secs(5),
+                    )
+                    .await?;
                     return Err(InternalAgentError::ExecutionFailed {
                         agent_id: context.agent_spec.agent_id,
                         error: format!("Failed to bind child thread to workspace: {e}"),
@@ -1207,15 +1235,6 @@ impl AgentExecutor for CodexAgentExecutor {
                 .bind_worktree_thread(wt_id, live_agent.thread_id.to_string())
                 .await
             {
-                let shutdown_res = Self::shutdown_and_wait_thread(
-                    context.agent_spec.agent_id,
-                    &child_thread,
-                    Duration::from_secs(5),
-                )
-                .await;
-                self.thread_manager
-                    .remove_thread_if_matches(&live_agent.thread_id, &child_thread)
-                    .await;
                 parent_state.budget_tracker.rollback_child_agent();
                 child_tracker.rollback_turn();
                 let _ = self
@@ -1229,7 +1248,13 @@ impl AgentExecutor for CodexAgentExecutor {
                         Some(format!("Failed durable thread binding: {e}")),
                     )
                     .await;
-                shutdown_res?;
+                self.shutdown_wait_and_remove_confirmed_thread(
+                    context.agent_spec.agent_id,
+                    live_agent.thread_id,
+                    &child_thread,
+                    Duration::from_secs(5),
+                )
+                .await?;
                 return Err(InternalAgentError::ExecutionFailed {
                     agent_id: context.agent_spec.agent_id,
                     error: format!("Failed to record durable thread binding: {e}"),
@@ -1330,5 +1355,70 @@ mod tests {
             panic!("simulated turn panic");
         });
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_shutdown_removal_decision_only_on_ok() {
+        let agent_id = AgentId::new();
+        let ok_res: Result<(), InternalAgentError> = Ok(());
+        assert!(CodexAgentExecutor::should_remove_thread_after_shutdown(
+            &ok_res
+        ));
+
+        let timeout_res: Result<(), InternalAgentError> =
+            Err(InternalAgentError::ThreadShutdownTimeout { agent_id });
+        assert!(!CodexAgentExecutor::should_remove_thread_after_shutdown(
+            &timeout_res
+        ));
+
+        let failed_res: Result<(), InternalAgentError> =
+            Err(InternalAgentError::ThreadShutdownFailed {
+                agent_id,
+                error: "shutdown rejected".to_string(),
+            });
+        assert!(!CodexAgentExecutor::should_remove_thread_after_shutdown(
+            &failed_res
+        ));
+    }
+
+    #[test]
+    fn test_confirm_shutdown_removes_thread_only_on_success() {
+        let agent_id = AgentId::new();
+
+        let mut removed = false;
+        let res = CodexAgentExecutor::confirm_shutdown_and_decide_removal(Ok(()), || {
+            removed = true;
+        });
+        assert!(res.is_ok());
+        assert!(removed);
+
+        let mut removed = false;
+        let res = CodexAgentExecutor::confirm_shutdown_and_decide_removal(
+            Err(InternalAgentError::ThreadShutdownTimeout { agent_id }),
+            || {
+                removed = true;
+            },
+        );
+        assert!(matches!(
+            res,
+            Err(InternalAgentError::ThreadShutdownTimeout { .. })
+        ));
+        assert!(!removed);
+
+        let mut removed = false;
+        let res = CodexAgentExecutor::confirm_shutdown_and_decide_removal(
+            Err(InternalAgentError::ThreadShutdownFailed {
+                agent_id,
+                error: "submission failed".to_string(),
+            }),
+            || {
+                removed = true;
+            },
+        );
+        assert!(matches!(
+            res,
+            Err(InternalAgentError::ThreadShutdownFailed { .. })
+        ));
+        assert!(!removed);
     }
 }
