@@ -1,4 +1,6 @@
-# Agent Studios — Provider Core Architecture (M03)
+﻿# Agent Studios — Provider Core Architecture (M03)
+
+> **Precedence Note**: This subsystem specification is governed by [`MASTER_VISION.md`](MASTER_VISION.md) and [`PRODUCT_PRINCIPLES.md`](PRODUCT_PRINCIPLES.md). In the event of any discrepancy, `MASTER_VISION.md` is authoritative.
 
 ## 1. Architectural Philosophy
 

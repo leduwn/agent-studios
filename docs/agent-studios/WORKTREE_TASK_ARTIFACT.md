@@ -1,79 +1,209 @@
-# Agent Studios: Worktree, Task & Artifact Orchestration
+# Agent Studios — Worktree Isolation, Task Artifacts & Reconciliation
 
-This document details the architecture, lifecycle state machines, and operational invariants for
-isolated workspace execution, ephemeral change-set capture, content-addressed artifact persistence,
-and safe patch reconciliation (Milestone M09).
+> **Status**: Core Architecture Specification (Milestone M09)
+>
+> **Milestone Status**: **COMPLETED** (Integrated into `main`)
+>
+> **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
 
-## 1. Architecture & Design Principles
+## 1. Overview & Architectural Motivation
 
-Milestone M09 extends Agent Studios multi-agent orchestration with isolated Git worktree execution,
-thread affinity, ephemeral change capture, and atomic artifact storage without duplicating upstream
-Git worktree infrastructure or circumventing the Control Plane.
+In multi-agent software engineering, allowing parallel agents to execute shell commands and file mutations in the same physical directory causes file contention, clobbered edits, corrupted Git indexes, and race conditions.
+
+Milestone M09 establishes complete physical isolation for mutating workers using **native Git worktrees**, combined with **ephemeral index change capture**, **content-addressed artifact storage**, and **deterministic patch reconciliation**.
 
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                        AgentStudiosSupervisor                          │
-│                                                                        │
-│   ┌──────────────────────┐              ┌──────────────────────────┐   │
-│   │ Coordinator Planning │              │   Workspace Arbitrator   │   │
-│   │  (ReadOnly / Mutate) │              │  (worktree-{id} Leases)  │   │
-│   └──────────┬───────────┘              └────────────┬─────────────┘   │
-│              │                                       │                 │
-│              ▼                                       ▼                 │
-│   ┌──────────────────────┐              ┌──────────────────────────┐   │
-│   │  ControlPlaneActor   │              │   WorkspaceOrchestrator  │   │
-│   │ (Worktrees/Artifacts)│              │  (codex_worktree::Manager│   │
-│   └──────────┬───────────┘              └────────────┬─────────────┘   │
-└──────────────┼───────────────────────────────────────┼─────────────────┘
-               │                                       │
-               ▼                                       ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                       CodexAgentExecutor Backend                       │
-│                                                                        │
-│   - Thread-Worktree 1:1 Affinity (codex-thread.json via bind_thread)   │
-│   - Non-Teleporting Worker Invariant (stable ThreadId + Config.cwd)    │
-│   - Parallel Mutating Workers on Dedicated Isolated Worktrees          │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│               Lifecycle Completion & Post-Task Integration             │
-│                                                                        │
-│   1. Ephemeral Index Change Capture (GIT_INDEX_FILE, git read-tree)    │
-│   2. Content-Addressed ArtifactStore (SHA-256 blobs, atomic rename)    │
-│   3. Safe Patch Reconciliation (git apply --check --binary dry-run)   │
-│   4. Integration Worktree Merge or Conflict (Conflict != Failure)      │
-│   5. Worktree Retention Policy (Preserve dirty worktree on crash)      │
-└────────────────────────────────────────────────────────────────────────┘
+               Git Repository Root (`source_root`)
+                         │
+        ┌────────────────┼────────────────┐
+        │                │                │
+        ▼                ▼                ▼
+Integration WT     Worker WT 1       Worker WT 2
+ (Integration)    (Feature Auth)    (Feature UI)
+        │                │                │
+        │         Ephemeral Index  Ephemeral Index
+        │          Change Capture   Change Capture
+        │                │                │
+        │                ▼                ▼
+        │         Patch Artifact   Patch Artifact
+        │           (SHA-256)        (SHA-256)
+        │                │                │
+        └────────────────┼────────────────┘
+                         │
+                         ▼
+             Patch Reconciliation Engine
+              (git apply --check / 3way)
+                         │
+             ┌───────────┴───────────┐
+             ▼                       ▼
+      Reconciliation           Reconciliation
+         Success                  Conflict
+             │                       │
+             ▼                       ▼
+      Clean Integration      TaskState::Blocked
+      Artifact Promoted      (Conflict Retained)
 ```
-
-### Core Invariants
-
-1. **Upstream Reuse**: Wraps `codex_worktree::WorktreeManager`, `codex_worktree::ManagedWorktree`,
-   and `codex_worktree::bind_thread`. Does NOT shell out directly to `git worktree add` or maintain
-   a bespoke worktree implementation.
-2. **Worktree-Thread 1:1 Affinity**: A worktree is owned by at most one Codex thread, verified via
-   `codex-thread.json` metadata. Re-binding the same thread is idempotent; binding a different thread
-   fails with conflict.
-3. **Non-Teleporting Worker Invariant**: A Codex thread's working directory (`Config.cwd`) is immutable
-   once spawned. A worker cannot be teleported between worktrees. Reusing worker threads is permitted
-   strictly when `existing.bound_workspace == requested.workspace_path`. If workspace differs, old
-   worker is retired and a new thread is spawned with fresh `ThreadId` and new worktree.
-4. **Per-Workspace Concurrency Arbitration**: Replaces M08 global single-writer lock with per-worktree
-   leases (`format!("worktree-{}", wt_id)`). Multiple mutating tasks execute concurrently in parallel
-   when allocated distinct dedicated worktrees.
-5. **Ephemeral Change Capture**: Staged changes are computed using isolated temporary Git index files
-   (`GIT_INDEX_FILE`), leaving the active worktree `.git/index` pristine.
-6. **Conflict Isolation**: Reconciliation applies exclusively to a dedicated integration worktree.
-   Reconciliation conflict does NOT fail the task: `TaskState = Succeeded`, `ReconciliationState = Conflicted`.
-7. **Dirty Worktree Retention**: Worktrees with uncommitted changes or task failures are retained on
-   disk with `retained = true` for developer inspection and never deleted automatically.
 
 ---
 
-## 2. Worktree & Reconciliation State Machines
+## 2. Worktree Isolation & Physical Containment
+
+1. **Dedicated Worktree Allocation**: Mutating workers are provisioned dedicated Git worktrees under `.git/agent-studios/worktrees/<session>/<task_id>/` via `codex-worktree::WorktreeManager`.
+2. **Branch Isolation**: Each worktree operates on a dedicated temporary branch (`agent-studios/<task_id>`).
+3. **True Native Tools**: Because agents reside in real Git worktrees, native compilers, test runners, linters, and Git commands execute without mocking or virtual filesystem emulation.
+
+---
+
+## 3. The Thread / CWD / Worktree Invariant
+
+A fundamental architectural rule of Agent Studios:
+
+$$\textbf{Codex Thread Execution Identity} \equiv (\textbf{ThreadId}, \textbf{CWD}, \textbf{Allocated Worktree})$$
+
+- A running Codex thread's working directory (`cwd`) is **inextricably bound** to its allocated worktree path.
+- **Threads do not teleport between worktrees**: Dynamically mutating a thread's `cwd` across worktree boundaries during an active turn is strictly forbidden.
+- When an agent completes a task or transitions to a different workspace, the old child thread is shut down, the worktree is safely retained or released, and a new child thread is initialized with the target workspace path.
+
+---
+
+## 4. `ExecutionWorkspace`: `source_root` vs. `source_cwd`
+
+To handle sub-projects, monorepos, and nested package directories correctly, the `ExecutionWorkspace` decouples repository root from execution directory:
+
+```rust
+pub struct ExecutionWorkspace {
+    /// The physical root of the Git repository (.git container)
+    pub source_root: PathBuf,
+    /// The specific sub-directory where agent commands and tools run
+    pub source_cwd: PathBuf,
+    /// The allocated isolated worktree (if mutating)
+    pub worktree: Option<WorktreeHandle>,
+}
+```
+
+- **`source_root`**: Used for global Git commands, worktree additions, branch management, and patch reconciliation.
+- **`source_cwd`**: Used as the starting directory for tool calls, compiler commands, and language server initialization.
+- **Relative Offset Invariant**: When an isolated worktree is created, `source_cwd` is mapped to the identical relative sub-path within the new worktree root.
+
+---
+
+## 5. Safe Worktree Retention (Zero Destructive Cleanup)
+
+Agent Studios enforces strict safety guarantees regarding worker workspaces:
+
+### The Full Destructive-Cleanup Prohibition
+Automated lifecycle cleanup must **never** perform destructive Git operations equivalent to any of the following three:
+1. `git reset --hard` (FORBIDDEN in automated lifecycle)
+2. `git clean -fdx` (FORBIDDEN in automated lifecycle)
+3. `git worktree remove --force` (FORBIDDEN in automated lifecycle)
+
+Normal managed-worktree cleanup must **never destroy dirty contents**.
+
+### Canonical Worktree Lifecycle Behavior
+- **Dirty or Unsafe Worktree**:
+  $$\text{dirty / conflicted / failed worktree} \longrightarrow \textbf{Retain Safely}$$
+  If a task fails, times out, or encounters a reconciliation conflict, the worktree is marked as `Retained`. The developer can inspect, debug, and manually salvage code directly from the worktree folder.
+- **Safe Explicit Cleanup**:
+  $$\text{no active turn} \longrightarrow \text{retire owner thread} \longrightarrow \text{wait for termination} \longrightarrow \textbf{safe upstream WorktreeManager removal}$$
+  Worktrees are removed only when cleanly committed or reconciled, with no active threads running.
+- **Explicit User Intent for Discard**:
+  Any future destructive discard feature requires explicit, confirmed user intent/approval and is **not** part of M09 normal automated cleanup.
+
+---
+
+## 6. Ephemeral Index Change Capture
+
+Capturing changes from a worker worktree must never dirty or disrupt the user's active Git index.
+
+Agent Studios utilizes an **ephemeral Git index**:
+1. Sets `GIT_INDEX_FILE` to a temporary, private index file path.
+2. Runs `git read-tree HEAD` to seed the ephemeral index from the baseline commit.
+3. Runs `git add -A` to stage all modifications, additions, and deletions in the worker worktree into the ephemeral index.
+4. Generates a binary-safe patch using `git diff --cached --binary`.
+5. Removes the temporary `GIT_INDEX_FILE` on completion.
+
+This captures exact filesystem deltas—including binary files, permission changes, and untracked new files—without touching the working tree's primary `.git/index`.
+
+---
+
+## 7. Content-Addressed Artifact Store & Version Allocation
+
+### Canonical Architectural Requirements
+1. **Content-Addressed SHA-256 Storage**:
+   Artifacts (unified patch diffs, build outputs) are identified and stored by their cryptographic SHA-256 hash:
+   $$\text{Concept: } \langle\text{artifact-root}\rangle\text{/blobs/sha256/}\langle\text{hash}\rangle$$
+   - Deduplication: Identical patch contents share the same underlying storage blob.
+   - Atomic Persistence: Blobs are written atomically (write to temp file, flush, rename).
+   - Provenance & Lineage: Artifact metadata records source task ID, creator agent ID, parent artifact SHA, and creation timestamp.
+2. **Current Implementation Path**:
+   In the current M09 implementation, artifact blobs are stored under `.git/agent-studios/artifacts/blobs/<sha256>`. This path represents a current implementation detail, **not** a permanent architectural constraint that limits future storage layout evolution.
+3. **Control Plane Authoritative Version Allocation**:
+   - The Control Plane authoritatively allocates artifact version numbers ($v1, v2, v3\dots$).
+   - Individual workers, executors, or external scripts cannot self-assign version numbers.
+
+---
+
+## 8. Deterministic Patch Reconciliation
+
+Once a worker produces a patch artifact, the reconciliation engine merges the delta into the integration workspace:
+
+```text
+Worker Patch Artifact
+        │
+        ▼
+Validation Pass: `git apply --check --binary`
+        │
+   ┌────┴────────────────────────┐
+   ▼                             ▼
+Applies Cleanly              Conflicted
+   │                             │
+   ▼                             ▼
+`git apply --binary`      3-Way Merge Fallback:
+   │                      `git apply --3way`
+   │                             │
+   │                      ┌──────┴──────┐
+   │                      ▼             ▼
+   │                   Resolved     Unresolved
+   │                      │             │
+   └──────────┬───────────┘             │
+              ▼                         ▼
+      ReconciledOutput         TaskState::Blocked
+      (Artifact Merged)       (Conflict Recorded)
+```
+
+---
+
+## 9. `ReconciledOutput` Contract
+
+When reconciliation succeeds, the engine returns a typed `ReconciledOutput`:
+
+```rust
+pub struct ReconciledOutput {
+    pub artifact_id: ArtifactId,
+    pub content_sha256: Sha256Hash,
+    pub target_branch: String,
+    pub applied_files: Vec<PathBuf>,
+    pub stats: PatchStats,
+}
+```
+
+This output is staged for final integration and committed to the Control Plane event log via `ControlPlaneEvent::PatchReconciled`.
+
+---
+
+## 10. Invariant: `Blocked != Cancelled` in Reconciliation
+
+If a patch cannot be reconciled due to conflicting changes applied by a preceding task:
+1. The task transitions to **`TaskState::Blocked(BlockedReason::ReconciliationConflict)`**.
+2. The task is **NEVER** marked as `Cancelled` or `Failed`.
+3. The worker worktree is safely retained.
+4. The Control Plane queues a reconciliation resolution task for human review or Coordinator re-basing.
+
+---
+
+## 11. Worktree & Reconciliation State Machines
 
 ### Worktree State Machine (`WorktreeState`)
 
@@ -158,58 +288,10 @@ Git worktree infrastructure or circumventing the Control Plane.
 
 ---
 
-## 3. Ephemeral Git Index Change-Set Capture
-
-To guarantee that computing patches never mutates the worktree's live `.git/index` or races with
-active agent tools:
-
-1. Creates an isolated temporary directory containing a transient `temp_git_index` file.
-2. Sets `GIT_INDEX_FILE` environment variable pointing to the temporary index file.
-3. Initializes the index from base commit tree: `git read-tree <base_sha>`.
-4. Stages all current untracked and modified files: `git add -A -- .`.
-5. Computes a binary-safe patch:
-   ```bash
-   git diff --cached --binary --full-index --no-ext-diff <base_sha> -- .
-   ```
-6. Discards temporary index directory.
-
----
-
-## 4. Content-Addressed Artifact Store
-
-The `ArtifactStore` provides content-addressed, deduplicated, and crash-safe storage:
-
-- **Directory Layout**: `<artifact-root>/blobs/sha256/<hash>`.
-- **Atomic Writes**: Blobs are written to a temporary sibling file in `<artifact-root>/tmp/`,
-  flushed to disk, and atomically renamed to final destination.
-- **Deduplication**: If the destination hash already exists, writing is skipped and the existing
-  blob is referenced.
-- **Artifact Records**: Rich metadata tracks `studio_id`, `task_id`, `producer_agent_id`,
-  `kind` (`File`, `Patch`, `Log`, `Report`, `Plan`, `Other`), `version`, `worktree_id`, `run_id`,
-  and `size_bytes`.
-
----
-
-## 5. Safe Patch Reconciliation
-
-Reconciliation applies captured patches to a dedicated integration worktree:
-
-1. **Two-Phase Application**:
-   - Phase 1 (Dry-Run): `git apply --check --binary <patch>` checks compatibility without writing.
-   - Phase 2 (Apply): If check succeeds, `git apply --binary <patch>` modifies files, followed by
-     `git add -A` and `git commit` to seal merge commit.
-2. **Conflict Detection**:
-   - If `git apply --check` fails, stderr is parsed to extract conflicted files.
-   - Reconciliation state is updated to `Conflicted`.
-   - Workspace files remain completely untouched.
-   - Task execution remains `Succeeded` (conflict is an integration state, not worker failure).
-
----
-
-## 6. Verification & Test Evidence
+## 12. Verification & Test Evidence
 
 | Test Suite | Location | Verification Highlights |
 | :--- | :--- | :--- |
 | `workspace_tests` | `crates/workspace/tests/` | Path validation escaping managed root, atomic artifact write and deduplication, end-to-end worktree lifecycle with capture, thread binding, clean reconciliation, and conflicting reconciliation. |
-| `worktree_orchestration_e2e_tests` | `crates/internal-agent/tests/` | Parallel mutating workers with peak concurrency 2 executing simultaneously on distinct worktrees, dirty worktree retention on crash, and conflict does not fail task invariant. |
+| `worktree_orchestration_e2e_tests` | `crates/internal-agent/tests/` | Parallel mutating workers with peak concurrency 2 executing simultaneously on distinct worktrees, dirty worktree retention on crash, conflict does not fail task invariant, and orphan-thread safety invariant. |
 | `read_model_tests` | `crates/orchestration/tests/` | Projections for `ArtifactIndex`, `WorktreeSnapshot`, `TaskTimelineProjection`, and enriched `TaskGraphSnapshot`. |

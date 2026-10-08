@@ -1,16 +1,140 @@
-# Agent Studios: Orchestration Observability & Read Models
+# Agent Studios — Orchestration Observability Specification
 
-This document details the read models, projection architecture, timeline event sourcing, and
-deterministic indexing for tasks, worktrees, artifacts, and agents in Agent Studios (Milestone M09).
+> **Status**: Core UX & Architecture Specification
+>
+> **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
 
-## 1. Overview & Architecture
+## 1. Overview & Observability Philosophy
 
-Agent Studios uses an event-sourced control plane where state mutations are recorded as durable
-`ControlPlaneEvent` envelopes with monotonically increasing sequence numbers. The orchestration
-layer builds specialized, point-in-time query projections and read models for developer dashboards,
-CLI monitoring, and automated supervisor policy decisions.
+Agent Studios rejects both extremes of AI agent interfaces:
+1. **The Opaque Chatbot**: A single chat input that silently runs commands behind the scenes with zero architectural visibility.
+2. **The Sci-Fi Swarm Dashboard**: An overwhelming, noisy SaaS dashboard with glowing neon nodes, buzzing chat rooms, and simulated agent banter.
+
+Instead, Agent Studios provides **orchestration observability as a quiet, precise, developer-grade lens**:
+- Read models are projected deterministically from the Control Plane event stream.
+- Structured agent telemetry is exposed without terminal scraping.
+- Visualizations use quiet monochrome styling.
+- Secrets are zeroized and never leak into inspectable state.
+
+---
+
+## 2. Event-Sourced Read Models (`agent-studios-orchestration`)
+
+The `agent-studios-orchestration` crate consumes raw `ControlPlaneEvent` envelopes and maintains synchronized read-model snapshots:
+
+```rust
+pub struct OrchestrationStateProjection {
+    pub task_graph: TaskGraphSnapshot,
+    pub agents: HashMap<AgentId, AgentSummary>,
+    pub runs: HashMap<RunId, RunSummary>,
+    pub active_approvals: Vec<ApprovalInboxItem>,
+    pub worktrees: HashMap<WorktreeId, WorktreeSnapshot>,
+    pub artifacts: ArtifactIndexSnapshot,
+}
+```
+
+### Deterministic Invariants
+- **Zero Polling**: Projections update reactively via Tokio broadcast subscription.
+- **Ordered Determinism**: Task lists and agent lists are sorted by canonical keys (`created_at`, `TaskId`, alphabetical alias) so renders are 100% stable across reloads.
+- **Replay Parity**: Replaying 1,000 historical events produces the exact same projection as receiving 1,000 live events.
+
+---
+
+## 3. Interactive Task Graph UX Specification
+
+The interactive **Task Graph** visualizes the active plan and dependency structure:
+
+```text
+        Architecture
+             │
+      ┌──────┴──────┐
+      ▼             ▼
+   Backend       Frontend
+      │             │
+      └──────┬──────┘
+             ▼
+           Testing
+             │
+             ▼
+           Review
+```
+
+### Interactive Capabilities
+- **Viewport Manipulation**: Smooth pan, pinch/wheel zoom, fit to viewport, center selected node, reset camera, mini-map navigator.
+- **Keyboard Traversal**: Arrow keys traverse dependency edges; Tab navigates nodes; Enter opens node details.
+- **Auto-Layout Engine**: Hierarchical directed acyclic graph layout (Sugiyama / top-to-bottom or left-to-right) preserving edge directionality without crossing spaghetti.
+- **Focus & Follow**: Auto-focus follows the currently running task; filter by status (`Ready`, `Running`, `Blocked`, `Succeeded`, `Failed`, `Cancelled`).
+
+### Subtle Animated Connectors
+Connectors along dependency edges provide quiet, informative visual cues:
+- **Task Start**: Gentle progressive pulse along incoming edge.
+- **Worker Assignment**: Brief node border accent when a worker agent binds to the task.
+- **Dependency Unblocking**: Subtle forward pulse when an upstream dependency transitions to `Succeeded`.
+- **Artifact Handoff**: Small packet indicator moving from task to integration workspace.
+- **Approval Waiting**: Steady, soft amber indicator on node waiting for human decision.
+- **Strict Visual Restraint**: No glowing lasers, neon borders, or pulsating cyberpunk rings. Monochrome and quiet.
+
+---
+
+## 4. The Approval Inbox
+
+Human-in-the-loop approvals are centralized in the **Approval Inbox**:
+
+```text
+┌────────────────────────────────────────────────────────┐
+│ APPROVAL INBOX (1 PENDING)                             │
+├────────────────────────────────────────────────────────┤
+│ ⚠ Tool Execution Request                               │
+│ Agent: Coder (Worker 1)                                │
+│ Task:  Backend Authentication                          │
+│ Tool:  exec_command                                    │
+│ Command: `npm install @auth/core`                      │
+│ CWD:   .git/agent-studios/worktrees/feat-auth/         │
+│ Reason: Required for session token handling            │
+│                                                        │
+│ [ Approve Once ]  [ Approve for Run ]  [ Deny ]        │
+└────────────────────────────────────────────────────────┘
+```
+
+### Principles
+- **No Background Blocking**: A pending approval blocks only the requesting task; independent tasks continue running.
+- **Granular Actions**: Approve once, approve for the remainder of the active run, or deny with a custom reason message returned to the agent.
+- **Zero Plaintext Secrets**: Any command containing resolved environment secrets displays obfuscated tokens (`***`).
+
+---
+
+## 5. Structured Agent Activity (No Terminal Scraping)
+
+Agent Studios explicitly rejects parsing raw stdout or scraping terminal ANSI sequences to deduce agent state:
+
+- Tool starts, completions, and errors are emitted as typed `ControlPlaneEvent::ToolStarted`, `ToolCompleted`, and `ToolFailed`.
+- The Activity Feed renders structured entries:
+  - Timestamp, Agent Alias, Tool Name, Duration (ms), Outcome status.
+- File diffs are displayed using native Monaco diff viewer components driven by structured patch deltas, not raw terminal diff dumps.
+
+---
+
+## 6. Context Inspector & Zero Plaintext Secrets
+
+The **Context Inspector** allows developers to inspect the active token window and state of any agent:
+
+1. **System Prompt & Role**: Base system instructions and active role guidelines.
+2. **`AGENTS.md` Context**: Repository guidelines discovered from the workspace hierarchy.
+3. **Active Skills & Tools**: Loaded MCP tools and Skills (`SKILL.md`).
+4. **Token Usage & Compaction**: Total context window, prompt tokens, completion tokens, cached tokens, and history compaction status.
+
+### Zero Secrets Guarantee
+- Environment variables containing API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, custom headers) are **never visible** in the Context Inspector.
+- Secret references are displayed strictly as `SecretRef(ENV: ANTHROPIC_API_KEY) [CONFIGURED]`.
+- Plaintext credentials never touch inspector memory, JSON serializations, or client UI trees.
+
+---
+
+## 7. Concrete Read Models & Timeline Projections (Milestone M09)
+
+The `agent-studios-orchestration` crate maintains specialized, point-in-time read models for developer dashboards, CLI monitoring, and supervisor policy decisions:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -43,10 +167,6 @@ CLI monitoring, and automated supervisor policy decisions.
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 2. Worktree & Artifact Read Models
-
 ### `WorktreeSnapshot`
 Captures point-in-time status of all workspaces managed by `WorkspaceOrchestrator` within a Studio:
 - `studio_id`: Owning Studio identifier.
@@ -66,10 +186,7 @@ Content-addressed index tracking all artifacts across tasks and workspaces:
 - `by_agent`: Index `HashMap<AgentId, Vec<ArtifactId>>`.
 - `total_bytes`: Aggregate byte size of all stored blobs.
 
----
-
-## 3. Enriched Task Graph Projection (`TaskGraphSnapshot`)
-
+### Enriched Task Graph Projection (`TaskGraphSnapshot`)
 Extends the dependency DAG with correlated workspace and output metadata:
 - `studio_id`: Owning Studio identifier.
 - `tasks`: Full list of `TaskRecord` items.
@@ -79,10 +196,7 @@ Extends the dependency DAG with correlated workspace and output metadata:
 - `task_artifacts`: Generated artifacts per task `HashMap<TaskId, Vec<ArtifactId>>`.
 - `task_reconciliations`: Associated reconciliations per task `HashMap<TaskId, Vec<ReconciliationId>>`.
 
----
-
-## 4. Chronological Task Timeline (`TaskTimelineProjection`)
-
+### Chronological Task Timeline (`TaskTimelineProjection`)
 Reconstructs the full lifecycle narrative of a single task from historical events:
 
 ```rust
@@ -99,26 +213,10 @@ pub struct TaskTimelineProjection {
 }
 ```
 
-### Timeline Item Kinds (`TimelineItemKind`)
-1. `TaskCreated`: Task registered in dependency graph.
-2. `TaskStateChanged`: Transition across `Pending`, `Ready`, `Running`, `Succeeded`, `Failed`, etc.
-3. `TaskRetryScheduled`: Task failed with remaining retry budget.
-4. `RunCreated` / `RunStateChanged`: Execution attempt initialized or updated.
-5. `WorktreeAssigned`: Managed worktree allocated for task.
-6. `WorktreeThreadBound`: Worker `ThreadId` bound to worktree.
-7. `WorktreeChangeCaptured`: Ephemeral Git index diff captured.
-8. `WorktreeReleased`: Worktree removed or retained.
-9. `ArtifactRegistered`: Content-addressed artifact blob persisted.
-10. `ReconciliationCreated`: Integration worktree patch operation queued.
-11. `ReconciliationStateChanged`: Progression through `Checking` or `Applying`.
-12. `ReconciliationConflictDetected`: Dry-run `git apply --check` failed; conflict recorded.
-13. `ReconciliationApplied`: Patch cleanly applied and committed to integration branch.
+Timeline items cover `TaskCreated`, `TaskStateChanged`, `TaskRetryScheduled`, `RunCreated`/`RunStateChanged`, `WorktreeAssigned`, `WorktreeThreadBound`, `WorktreeChangeCaptured`, `WorktreeReleased`, `ArtifactRegistered`, `ReconciliationCreated`/`ReconciliationStateChanged`, `ReconciliationConflictDetected`, and `ReconciliationApplied`.
 
----
-
-## 5. Event Ordering & Gapless Replay Guarantees
-
+### Event Ordering & Gapless Replay Guarantees
 All projections enforce strict replay and subscription invariants via `SequenceTracker`:
-- **Monotonic Sequences**: Sequence numbers are strictly strictly increasing with zero duplicate or skipped events.
+- **Monotonic Sequences**: Sequence numbers are strictly increasing with zero duplicate or skipped events.
 - **Gap Detection**: If an event arrives with `sequence > expected`, `SequenceTracker` returns `SequenceError::GapDetected` and triggers caught-up stream replay.
 - **Fail-Closed Validation**: Projections reject invalid transitions or corrupted studio ownership.

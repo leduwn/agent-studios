@@ -1,327 +1,167 @@
-# Agent Studios Architectural Roadmap
+# Agent Studios — Master Architectural Roadmap (M01 – M19)
 
-This roadmap defines the strategic progression for building Agent Studios upon the Codex upstream baseline. Milestones reflect architectural progression; uncompleted milestones remain prospective and directional.
+> **Status**: Authoritative Milestone Progression
+> **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
 
-### M01: Bootstrap Codex Upstream (Completed)
+## Executive Summary & Milestone Progress Matrix
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                          MILESTONE PROGRESS                            │
+├─────────┬────────────────────────────────────────┬─────────────────────┤
+│ Target  │ Capability Domain                      │ Implementation State│
+├─────────┼────────────────────────────────────────┼─────────────────────┤
+│ M01     │ Bootstrap Codex Upstream               │ [COMPLETED]         │
+│ M02     │ Deterministic Control Plane Foundation │ [COMPLETED]         │
+│ M03     │ Provider Core & Model Registry         │ [COMPLETED]         │
+│ M04     │ Codex Bridge / Responses Compatibility │ [COMPLETED]         │
+│ M05/5.1 │ Chat Completions Protocol Adapter      │ [COMPLETED]         │
+│ M06     │ Anthropic Messages Protocol Adapter    │ [COMPLETED]         │
+│ M07     │ Google Gemini generateContent Adapter  │ [COMPLETED]         │
+│ M07.5   │ Runtime Transport & SSE Streaming      │ [COMPLETED]         │
+│ M07.6   │ Runtime Session Factory & Thread E2E   │ [COMPLETED]         │
+│ M08/8.1 │ Internal Multi-Agent Runtime Hardening │ [COMPLETED]         │
+│ M09     │ Worktree, Task & Artifact Orchestration│ [COMPLETED]         │
+│ M10     │ External Runtime Interface Specification│ [PLANNED]           │
+│ M11     │ OpenCode CLI Runtime Adapter           │ [PLANNED]           │
+│ M12     │ Claude Code CLI Runtime Adapter        │ [PLANNED]           │
+│ M13     │ Code-OSS Shell Integration Foundation   │ [PLANNED]           │
+│ M14     │ Agent Studios Built-in AI Extension    │ [PLANNED]           │
+│ M15     │ Unified Agent Mode / IDE Mode Workbench│ [PLANNED]           │
+│ M16     │ Full Codex Feature Surface (Skills/MCP)│ [PLANNED]           │
+│ M17     │ Windows Native Packaging & Installer   │ [PLANNED]           │
+│ M18     │ Hardening, Stress & Security Audit     │ [PLANNED]           │
+│ M19     │ Production Windows Stable Release      │ [PLANNED]           │
+└─────────┴────────────────────────────────────────┴─────────────────────┘
+```
+
+---
+
+## Detailed Milestone Specifications
+
+### M01: Bootstrap Codex Upstream [COMPLETED]
 - Import Codex baseline as a clean source snapshot (`d25c114d494ddb693290b76bf5e5f64ecbdb38fc`, 2026-10-02) with clean Git root history.
 - Record exact upstream baseline SHA in machine-readable `upstream/codex.lock.json`.
 - Maintain required Codex license notices and attribution in `LICENSE`, `NOTICE`, and `UPSTREAM.md`.
 - Validate Windows native baseline compilation (`cargo build -p codex-cli`).
-- Establish snapshot-based upstream synchronization architecture and maintenance workflows.
 
-### M02: Agent Studios Control-Plane Foundation (Completed)
+### M02: Deterministic Control Plane Foundation [COMPLETED]
 - Scaffold core control plane library crate (`agent-studios-control-plane`) and protocol types (`agent-studios-protocol`).
 - Define deterministic state structures: TaskGraph DAG engine, Agent lifecycle, Run execution, Approvals, Artifacts, and Event envelopes.
-- Implement staged transactional pipeline (`commit_transaction`) and atomic batch persistence (ALL-or-ZERO) with sequence continuity and regression protection.
-- Strict event replay engine with full domain validation and corruption rejection (19 corruption test cases + duplicate entity guardrails).
+- Implement staged transactional pipeline (`commit_transaction`) and atomic batch persistence (ALL-or-ZERO) with sequence continuity.
+- Strict event replay engine with full domain validation and corruption rejection.
 - Hierarchical cancellation propagation and pre-execution dependency readiness checks.
-- Eliminated all mutable store/state escape hatches (`store_mut` removed).
 
-### M03: Provider Core & Model Registry (Completed on `main`)
-
+### M03: Provider Core & Model Registry [COMPLETED]
 - Establish `agent-studios-provider` crate.
-- Decouple `ProviderDefinition` (vendor/gateway metadata) from `ProviderInstance` (concrete configured endpoint + credentials).
+- Decouple `ProviderDefinition` (vendor metadata) from `ProviderInstance` (concrete configured endpoint + credentials).
 - Establish wire protocol decoupling via `ProtocolFamily` (`OpenAiResponses`, `OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`, `Custom`).
-- Implement zero-plaintext secret architecture using `SecretReference` and `SecretBackend` (EnvironmentVariable, OsCredentialStore, External).
-- Enforce strict endpoint security: forbid URL userinfo/credentials, forbid URL fragments, reject sensitive static headers (`Authorization`, `x-api-key`, etc.).
-- Introduce tristate `CapabilitySupport` (`Unknown`, `Unsupported`, `Supported`) across 10 distinct model capabilities to prevent false-negative capability assumptions.
-- Provide `ModelDescriptor`, non-zero `ModelLimits`, and composite `ModelRef` (`provider_instance_id` + `model_id`) for deterministic provider-neutral routing.
-- Implement `ProviderRegistry`, `ModelRegistry`, and coordinating facade `ProviderCatalog` with safe removal invariants (rejection on in-use instances/definitions).
-- Implement exportable `ProviderCatalogSnapshot` with atomic, staged import validation.
-- *(Note: Provider Core models metadata and configuration only; network requests and LLM drivers arrive in subsequent milestones.)*
+- Implement zero-plaintext secret architecture using `SecretReference` and `SecretBackend`.
+- Introduce tristate `CapabilitySupport` across 10 distinct model capabilities to eliminate false-negative assumptions.
+- Provide `ModelDescriptor`, non-zero `ModelLimits`, and composite `ModelRef` (`provider_instance_id` + `model_id`).
 
-### M04: Codex Runtime ↔ Provider Core Bridge / OpenAI Responses Compatibility (Completed on `main`)
-
+### M04: Codex Runtime Bridge / Responses Compatibility [COMPLETED]
 - Establish `agent-studios-codex-bridge` crate connecting `ProviderCatalog` and `ModelRef` to Codex `ModelProviderInfo`.
-- Strictly decouple bridge from Codex runtime modifications (`codex-rs/` untouched, zero diff against `main`).
-- Generate ephemeral `CodexResponsesBinding` runtime product (never stored in persistent configuration).
-- Enforce protocol gating on `ProtocolFamily::OpenAiResponses` (Codex runtime natively only supports Responses API; rejects other wire APIs with typed errors).
-- Zero-plaintext credential resolution: maps environment variable references to `env_key` or `env_http_headers` without reading process environment values.
-- Guard against unsupported secret backends (`OsCredentialStore`, `External`) and query parameter authentication.
-- Model capability safety: explicit `Unsupported` for `tool_calling` or `streaming` fails; `Unknown` capabilities tracked in `CodexCompatibilityReport.unverified_capabilities`.
-- Deterministic instance keying (`agent-studios-<provider-instance-uuid>`), enabling multi-instance coexistence (e.g. 9Router Local vs 9Router VPS with identical model IDs).
-- Deterministic model catalog URL resolution and strict static header sanitization.
+- Decouple bridge from Codex runtime modifications (`codex-rs/` untouched).
+- Generate ephemeral `CodexResponsesBinding` runtime product.
+- Enforce protocol gating on `ProtocolFamily::OpenAiResponses`.
+- Zero-plaintext credential mapping without reading process environment values.
 
-### M05: Chat Completions Protocol Adapter (Completed on `feat/chat-completions-adapter`)
+### M05 & M05.1: Chat Completions Protocol Adapter [COMPLETED]
+- Establish `agent-studios-protocol-adapters` crate.
+- Pure protocol translation between Codex Responses API semantics and standard OpenAI Chat Completions wire protocol.
+- Zero network transport, zero secrets, zero provider brand branching.
+- Correctness hardening: turn continuation (`finish_reason == "tool_calls"` maps to `end_turn = false`), response ID/model continuity, buffering fragmented tool arguments, and lossless tool output conversion.
 
-- Establish `agent-studios-protocol-adapters` crate (`agent-studios-protocol-adapters`).
-- Implement pure protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and standard OpenAI Chat Completions wire protocol (`POST /v1/chat/completions`).
-- Zero network transport (`reqwest` and async Tokio runtime omitted; pure synchronous data transformation).
-- Zero secrets handling (no credential resolution or API key consumption).
-- Zero provider brand branching (translates against canonical OpenAI Chat wire protocol).
-- Request translation: model ID preservation, instructions mapped to leading system message, developer role normalized to system role, message history preservation, multimodal inline data URLs, function calls mapped to `tool_calls`, tool outputs mapped to `role = "tool"` with mandatory `tool_call_id`, tool definition schema conversion (flat Responses format converted to nested function format), structured output `response_format` (`json_schema`), typed warning model for dropped Responses-only fields, and strict security rejection of `access_programs`.
-- Streaming translation (`ChatCompletionStreamTranslator`): deterministic event emission (`Created`, `OutputItemAdded`, `OutputTextDelta`, `ToolCallInputDelta`, `OutputItemDone`, `Completed`), fragmented/interleaved tool call reconstruction across parallel tool indices, finish reason validation (`stop`, `tool_calls`, rejecting `length` and `content_filter`), single choice constraint (`choice.index == 0`), token usage mapping, and SSE line decoding.
-- Full verification: 17 unit and integration tests across 3 test suites, zero clippy warnings with `-D warnings`, zero modifications to upstream `codex-rs/`.
+### M06: Anthropic Messages Protocol Adapter [COMPLETED]
+- Implement `agent-studios-protocol-adapters::anthropic` module translating to Anthropic Messages wire protocol (`POST /v1/messages` and SSE stream events).
+- Top-level `system` block extraction, non-zero `max_tokens` validation, multimodal image parsing, and coalesced tool execution results.
+- Transactional continuation state replay preserving thinking tokens and cryptographic signatures across multi-turn loops.
 
-### M05.1: Chat Completions Correctness Hardening (Completed on `feat/chat-completions-adapter`)
+### M07: Google Gemini generateContent Protocol Adapter [COMPLETED]
+- Implement `agent-studios-protocol-adapters::gemini` translating to Google Gemini `generateContent` / `streamGenerateContent` wire protocol.
+- System instruction mapping, multimodal inline data (images and audio), regex tool validation, and opaque thought signature replay.
+- Deterministic synthetic call ID generation and effective cached token accounting.
 
-- Strict Codex turn continuation: `finish_reason == "tool_calls" | "function_call"` sets `ResponseEvent::Completed.end_turn = Some(false)` to trigger upstream tool execution; `finish_reason == "stop"` sets `end_turn = Some(true)`.
-- Response ID and model continuity: enforces non-empty response ID on first chunk (`MissingResponseId`), rejects ID mismatch across chunks (`ResponseIdMismatch`), and guarantees model continuity across stream (`ResponseModelMismatch`).
-- Strict terminal state machine: fails closed with `AlreadyCompleted` on any call to `feed_chunk`, `finish`, or `feed_done` after completion; fails with `MissingFinishReason` on stream EOF without terminal finish reason.
-- Elimination of synthetic tool identity: buffers argument fragments (`pending_argument_fragments`) until both `id` and `name` are received, then emits `OutputItemAdded(FunctionCall)` followed by queued `ToolCallInputDelta` fragments in original sequence; incomplete tool calls at finish fail with `IncompleteToolCall`.
-- Tool identity immutability and type validation: rejects conflicting ID or function name updates (`ToolCallIdentityMismatch`), and rejects non-function stream tool calls (`UnsupportedToolCallType`).
-- Lossless tool output translation: validates `FunctionCallOutputBody::ContentItems` and fails closed on non-text payloads (`UnsupportedToolOutputContent`).
-- Fail-closed request parsing: rejects encrypted `AgentMessage` (`UnsupportedEncryptedAgentMessage`), unsupported `ResponseItem` variants (`UnsupportedResponseItem`), invalid roles (`InvalidRole`), and non-standard `tool_choice` strings (`UnsupportedToolChoice`). Emits `NormalizedImageDetail` warning when normalizing `ImageDetail::Original` to `"high"`.
-- Usage validation & deterministic lifecycle: rejects negative token values (`InvalidUsage`), rejects text resumption after tool call execution (`InvalidStreamState`), and enforces exactly-once item lifecycle.
-- Full regression suite: 30 new hardening tests in `correctness_hardening_tests.rs` (47 total tests in crate), zero clippy warnings, zero modifications to `codex-rs/`.
+### M07.5: Runtime Provider Transport Foundation [COMPLETED]
+- Pluggable model inference backend seam in `codex-rs` (Patch 001).
+- `agent-studios-runtime-transport` crate with in-memory secret zeroization (`SecretString`).
+- Incremental SSE decoding and transactional continuation state machine.
+- Protocol drivers connecting adapters to live HTTP SSE endpoints.
+- `RuntimeRouter` implementing `codex_model_provider::ModelInferenceBackend`.
 
-### M06: Anthropic Messages Protocol Adapter (Completed on `feat/anthropic-messages-adapter`)
+### M07.6: Runtime Session Factory & Thread E2E [COMPLETED]
+- Generic Codex seam (`ModelRuntimeOverride` handle in `codex-rs`, Patch 002).
+- `agent-studios-runtime-session` crate with `StaticModelsManager` and `PreparedRuntimeSession`.
+- Full decoupling of custom providers from mandatory OpenAI accounts and synthetic discovery.
+- Comprehensive end-to-end WireMock integration suite across all 4 wire protocols.
 
-- Implement `agent-studios-protocol-adapters::anthropic` module providing pure protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and Anthropic Messages wire protocol (`POST /v1/messages` and SSE stream events).
-- Zero network transport (`reqwest`, hyper, Tokio runtime, Anthropic SDKs omitted; pure in-memory transformation).
-- Zero secret handling (no API key, header, or credential resolution).
-- Zero provider brand branching (translates against canonical Anthropic Messages wire specification).
-- Pure Codex isolation (`codex-rs/` remains unmodified; zero diff with `origin/main`).
-- Request translation (`translate_request`):
-  - Top-level `system` block extraction: leading developer/system messages converted to system text blocks; interleaved system messages after conversational turns rejected fail-closed with `UnsupportedSystemHistoryPlacement`.
-  - Non-zero `max_tokens` validation (`max_tokens == 0` fails with `InvalidMaxTokens(0)`).
-  - Multimodal inputs: inline base64 image data URLs parsed into `AnthropicContentBlock::Image` with MIME validation (`image/jpeg`, `image/png`, `image/gif`, `image/webp`); unsupported MIME types reject with `UnsupportedImageMime`.
-  - Tool calls & results: function calls mapped to `tool_use` blocks; consecutive tool execution outputs coalesced into a single user message containing multiple `tool_result` blocks with `is_error` status mapping.
-  - Tool naming validation against Anthropic regex `^[a-zA-Z0-9_-]{1,64}$`.
-  - Tool choice mapping: `"auto"`, `"none"`, `"required"` (`"any"`), and named tool choice; propagates `disable_parallel_tool_use`; emits `ForcedToolChoiceUnverified` warning if target tool is missing.
-  - Structured outputs: maps Codex `TextControls.format` (`json_schema`) into `output_config.format`.
-  - Reasoning effort mapping: exact semantic mapping for `Low`, `Medium`, `High`, `XHigh`, `Max`; fail-closed on `None`, `Minimal`, `Ultra`, `Persistent`, `Custom` with `UnsupportedReasoningEffort`.
-  - Prompt cache injection policies: `None`, `LastUserMessage`, `ToolsAndSystem`, `AutomaticBreakpoint`.
-  - Thinking policies: `Disabled`, `Adaptive`, `BudgetTokens`.
-  - Continuation state & cryptographic signatures: restores native thinking blocks and cryptographic signatures (`anthropic-reasoning-{message_id}-{block_index}`) from `AnthropicContinuationState` for multi-turn loops. Rejects missing state with `MissingContinuationState`; emits `CrossProviderReasoningOmitted` for foreign reasoning IDs.
-  - Security fail-closed: security-sensitive `access_programs` rejected with `UnsupportedSecurityFeature`.
-  - Typed warning model for dropped Responses-only parameters (`store`, `service_tier`, `include`, `client_metadata`, `stream_options`, `prompt_cache_key`).
-- Streaming translation (`AnthropicStreamTranslator`):
-  - Lifecycle state machine: `Initial` -> `Started` -> `ActiveContentBlock` -> `OutputItemDone` -> `Completed`.
-  - Event decoding: `message_start` -> `Created`, `ServerModel`; `content_block_start` -> `OutputItemAdded`; `content_block_delta` -> `OutputTextDelta`, `ToolCallInputDelta`, `ReasoningContentDelta`; `content_block_stop` -> `OutputItemDone`; `message_delta` -> token accumulation & stop reason; `message_stop` -> `Completed`.
-  - Turn continuation: `stop_reason == "tool_use"` maps to `end_turn: Some(false)` to trigger Codex agent tool execution loops; `stop_reason == "end_turn" | "stop_sequence"` maps to `end_turn: Some(true)`.
-  - Fail-closed truncation and limits: `max_tokens` (`MaxTokensExceeded`), `model_context_window_exceeded` (`ContextWindowExceeded`), `refusal` (`ModelRefusal`), `pause_turn` (`TurnPaused`).
-  - Native thinking block and signature capture into `AnthropicContinuationState`.
-  - Robust SSE line and chunk buffering supporting SSE event frames and raw JSON lines.
-  - Negative token delta validation and open block rejection on stream termination.
-- Test verification: 27 new tests across 3 test suites (`anthropic_request_tests.rs`, `anthropic_stream_tests.rs`, `anthropic_roundtrip_tests.rs`); 74 total passing tests across `agent-studios-protocol-adapters`.
+### M08 & M08.1: Internal Multi-Agent Runtime & Hardening [COMPLETED]
+- Establish `agent-studios-internal-agent` crate.
+- Codex spawn runtime override seams (Patch 003 & Patch 004).
+- Independent agent specs (`InternalAgentSpec`, `InternalTeamSpec`) and single-writer actor (`ControlPlaneActor`).
+- Workspace access policy arbitrator (`WorkspacePolicyArbitrator`, `WorkspaceLease`).
+- Pre-execution tool budget contributor (`AgentStudiosToolLifecycleContributor`).
+- Structured coordinator DAG planning with Kahn's algorithm acyclicity validation.
+- Supervisors with configurable failure policies (`FailFast`, `ContinueIndependent`, `RetryTask`).
 
-### M07: Google Gemini generateContent Protocol Adapter (Completed on `feat/gemini-generate-content-adapter`)
+### M09: Worktree, Task & Artifact Orchestration [COMPLETED]
+- **Completed on `main`**: Fast-forwarded and integrated into `main` (`04650b52cc0af06d14d16771d3f7a9b9910024bf`).
+- **M09.1 (Isolated Execution Workspaces)**: Unified workspace orchestrator wrapping upstream `codex-worktree::WorktreeManager`. Dedicates isolated Git worktrees and temporary branches to mutating workers.
+- **M09.2 (Ephemeral Index Change Capture & Content-Addressed Store)**: Ephemeral index change capture via private `GIT_INDEX_FILE` without dirtying working index. Content-addressed artifact store indexing diffs by SHA-256 in `.git/agent-studios/artifacts/blobs/`. Control Plane authoritative version allocation.
+- **M09.3 (Deterministic Patch Reconciliation & Final Gate)**: Reconciliation engine validating patches via `git apply --check` and applying to integration workspaces. Safe worktree retention (zero destructive `git reset --hard` or `git clean -fdx`). Non-conflated state transitions (`Blocked(ReconciliationConflict)` != `Cancelled`). Full end-to-end WireMock integration passing all quality gates.
+- **M09.7 (Orphan-Thread Safety Fix)**: Enforces safe thread shutdown and removal invariant (`shutdown_and_wait_thread.await?` before `remove_thread_if_matches`), preventing untracked orphan threads on timeout or failure.
 
-- Implement `agent-studios-protocol-adapters::gemini` module providing pure in-memory protocol translation between Codex Responses API semantics (`codex_api::ResponsesApiRequest`, `codex_api::ResponseEvent`) and Google Gemini `generateContent` / `streamGenerateContent` wire protocol (`models/{model}:generateContent` and `streamGenerateContent`).
-- Pure in-memory protocol translation: zero network transport (`reqwest`, `hyper`, asynchronous Tokio runtime, or Google SDKs omitted).
-- Zero secret handling: no API keys, Google Cloud IAM tokens, or OAuth credentials consumed or resolved.
-- Preserved path-based model parameterization: model ID returned verbatim in `GeminiRequestTranslation.model` without `models/` prefix.
-- Upstream Codex isolation: `codex-rs/` remains completely unmodified (`git diff origin/main -- codex-rs` is empty).
-- Request translation (`translate_request`):
-  - System instructions: top-level `instructions` and leading `system`/`developer` turns mapped into `request.system_instruction`; interleaved system turns fail closed with `UnsupportedSystemHistoryPlacement`.
-  - Conversational roles: `user` -> `user`, `assistant` -> `model`; unsupported roles fail closed with `UnsupportedRole`.
-  - Multimodal inputs: inline data URLs for supported images (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) and audio (`audio/wav`, `audio/mp3`, `audio/mpeg`, `audio/aac`, `audio/ogg`, `audio/flac`) mapped to `GeminiPart::inline_data`. External file references and audio URLs fail closed with `UnsupportedContent`.
-  - Tool mapping: regex validation against Gemini tool naming contract `^[a-zA-Z0-9_.-]{1,128}$`; parameters schema preserved.
-  - Strict tool semantics: `strict: true` tools promote tool choice mode to `VALIDATED`; mixed strict/non-strict tools promote entire set with `StrictToolScopePromoted` warning.
-  - Tool choice mapping: `""` -> omitted / `VALIDATED`, `"auto"` -> `Auto` / `VALIDATED`, `"none"` -> `None` (retaining tool definitions), `"required"` -> `Any`.
-  - Sequential tool calling rejection: `parallel_tool_calls: false` when tools are active fails closed with `SequentialToolCallingNotEnforceable`.
-  - Structured outputs: maps `TextControls.format` (`json_schema`) into `response_mime_type = "application/json"` and `response_schema`.
-  - Thinking policies: `ExactReasoningEffort` (`Minimal`, `Low`, `Medium`, `High`), `LegacyBudget(u64)`. Non-standard tiers fail closed with `UnsupportedReasoningEffort`.
-  - Turn coalescing: adjacent function outputs coalesced into single `user` Content turn; adjacent tool calls coalesced into single `model` Content turn.
-  - Opaque thought signature replay: restores native thinking parts and cryptographic signatures from `GeminiContinuationState`.
-  - Fail-closed security features: `access_programs` rejected immediately with `UnsupportedSecurityFeature`.
-- Streaming event translation (`GeminiStreamTranslator`):
-  - Stream identity & model continuity: validates non-empty `responseId` on first chunk, enforces response ID and model version continuity across chunks.
-  - Single candidate enforcement: rejects multiple candidates fail-closed with `MultipleCandidatesUnsupported`.
-  - Safety & prompt feedback: blocks on prompt feedback `blockReason` or candidate safety ratings (`SafetyBlocked`).
-  - Delta streaming: emits `OutputTextDelta` for text parts, `ReasoningContentDelta` for reasoning parts with thought signature buffering.
-  - Atomic function call streaming: emits complete `OutputItemAdded(FunctionCall)`, `ToolCallInputDelta`, and `OutputItemDone(FunctionCall)`.
-  - Deterministic call ID generation: when provider omits call ID, generates `gemini-call-{response_id}-{candidate_index}-{part_index}`, records mapping in `GeminiContinuationState`, and omits `id` on wire `functionResponse`.
-  - Turn continuation: finish reason `"STOP"` maps to `end_turn: false` if tool calls were emitted, or `end_turn: true` otherwise.
-  - Fail-closed terminal reasons: `MAX_TOKENS` (`MaxTokensExceeded`), `SAFETY` (`SafetyBlocked`), `RECITATION` (`RecitationBlocked`), `LANGUAGE` (`UnsupportedLanguage`), `BLOCKLIST` / `PROHIBITED_CONTENT` / `SPII` (`ContentBlocked`), `MALFORMED_FUNCTION_CALL` (`MalformedFunctionCall`).
-  - Effective input token accounting: `input_tokens = promptTokenCount` (includes cached tokens), `cached_input_tokens = cachedContentTokenCount`, `total_tokens = totalTokenCount`. Rejects negative token counts.
-- Full verification: 57 tests across 4 test suites (`gemini_request_tests.rs`, `gemini_stream_tests.rs`, `gemini_roundtrip_tests.rs`, `gemini_hardening_tests.rs`); 150 total passing tests in `agent-studios-protocol-adapters`.
+### M10: External Runtime Interface [PLANNED]
+- Define standardized `AgentRuntime` lifecycle interface (prepare, start, submit turn, interrupt, terminate).
+- Establish process containment models (evaluating Windows Job Objects / AppContainer candidates for Windows, directory confinement, environment sanitization; Linux/macOS containment as future exploration).
+- Define structured JSON-RPC / SSE communication protocol for non-Codex agents.
 
-### M07.5: Runtime Provider Transport Foundation (Completed on `feat/runtime-provider-transport`)
+### M11: OpenCode Runtime Adapter [PLANNED]
+- Implement runtime adapter wrapping OpenCode CLI and server sessions.
+- Map OpenCode provider configurations to Agent Studios `ProviderCatalog` instances.
+- Translate OpenCode session steps into Control Plane `Task` and `Run` entities.
 
-- Pluggable model inference backend seam in `codex-rs`:
-  - `ModelInferenceBackend` trait and `ModelInferenceContext` in `codex-model-provider`.
-  - Optional `inference_backend: Option<Arc<dyn ModelInferenceBackend>>` in `ModelProvider` (defaults to `None`).
-  - Native dispatch branch in `codex-core::ModelClient::stream_custom_inference`, routing custom backend streams while preserving 100% of Codex agent loop semantics, tool approval gates, compaction, and telemetry.
-  - Documented in `docs/agent-studios/CODEX_PATCHES.md`.
-- `agent-studios-runtime-transport` crate:
-  - Zero-plaintext secret management: `SecretString` implementing `zeroize::ZeroizeOnDrop` with redacted Debug, Display, and Serialize.
-  - Dynamic secret resolution: `SecretResolver` trait with `InMemorySecretResolver` and `EnvSecretResolver`.
-  - Authentication resolution: `ResolvedAuth` supporting `BearerToken`, `ApiKeyHeader`, and `QueryParameter` schemes.
-  - Incremental SSE decoding: `SseParser` and `SseStream` handling multi-line data, comment stripping, and byte chunk buffering.
-  - Transactional continuation state machine: `ContinuationManager` and `ContinuationTransaction` with commit-on-completion and guaranteed rollback-on-error semantics.
-  - Protocol drivers: `ChatCompletionsDriver`, `AnthropicDriver`, and `GeminiDriver` connecting protocol adapters to live HTTP SSE endpoints.
-  - `RuntimeRouter`: implements `codex_model_provider::ModelInferenceBackend` for provider-neutral dispatch.
-- Verification & Integration testing:
-  - 11 unit tests covering secrets, auth, SSE parsing, and continuation transactions.
-  - 6 end-to-end `wiremock` integration tests covering Chat Completions streaming, Anthropic Messages streaming with continuation state persistence, Gemini streamGenerateContent streaming, transactional rollback on HTTP error, cancellation propagation via interrupt channel, and concurrent thread state isolation.
-
-### M07.6: Provider Runtime Assembly & Codex Thread Injection (Completed on `feat/provider-runtime-session-factory`)
-
-- Generic Codex seam (`codex-rs`):
-  - `ModelRuntimeOverride` handle encapsulating `(SharedModelProvider, SharedModelsManager)` tuple in `codex-core`, re-exported via `codex-core-api`.
-  - Injected via `StartThreadOptions` and `ThreadSpawnRequest` into `SessionSpawnArgs` and `Session::spawn_internal`.
-  - Early `models_manager` resolution before `ModelClientSession` construction preventing split-brain session states.
-  - Strict provider/models manager pairing ensuring metadata and inference target match.
-  - Conditional runtime inheritance across child sessions, subagents, delegate tasks, and forks.
-  - Custom backend safety invariants: force `RemoteCompactionSupport::Unsupported` and disable WebSockets/prewarm.
-- `agent-studios-runtime-session` crate:
-  - `StaticModelsManager`: zero-discovery static catalog wrapping `codex_models_manager::manager::StaticModelsManager` with in-memory metadata.
-  - `model_descriptor_to_model_info`: maps descriptor limits, display name, visibility, and reasoning presets (`Low`, `Medium`, `High`) to `ModelInfo`.
-  - `PreparedRuntimeSession`: wraps `ModelRuntimeOverride`, deterministic `model_provider_id`, `selected_model`, and `available_models`.
-  - `prepare_start_thread_options` / `apply_to_start_thread_options`: configures thread options and disables provider model fallback.
-  - `AgentStudiosRuntimeSessionFactory`:
-    - Native `OpenAiResponses` path: resolves via `CodexProviderBridge` with `inference_backend = None`.
-    - Custom protocol path (`OpenAiChatCompletions`, `AnthropicMessages`, `GeminiGenerateContent`): session-scoped `RuntimeRouter` as `ModelInferenceBackend`.
-    - Session-scoped route isolation preventing collisions on shared model IDs across concurrent sessions.
-- Integration tests:
-  - Verified native Responses bridge, Anthropic Messages, Gemini generateContent, Chat Completions, zero discovery, error handling, and session isolation.
-
-### M07.6.1: Runtime Session Semantics & Full Thread E2E (Completed on `feat/provider-runtime-session-factory`)
-
-- Authoritative `ModelRef` Contract:
-  - Made `ModelRef(ProviderInstanceId, ModelId)` the mandatory, authoritative primary input to `prepare_runtime_session`.
-  - Eliminated arbitrary or alphabetical default model fallbacks; session execution is strictly bound to user-selected model key.
-- `PreparedRuntimeSession` Metadata & Introspection:
-  - Stored immutable `ModelRef` and `ProtocolFamily` inside `PreparedRuntimeSession`.
-  - Exposed accessors: `model_ref()`, `provider_instance_id()`, `protocol()`, `selected_model()`, `model_provider_id()`, `available_models()`.
-  - Implemented secret-free `Debug` formatting redacting internal implementation pointers.
-- Scrubbed `ModelInfo` Metadata & Fallback Elimination:
-  - Prevented synthetic default metadata from `model_info_from_slug`:
-    - If `limits.context_window_tokens` is `None`, context limits are set strictly to `None` (preventing synthetic 272k fallback).
-    - Checked conversion with `i64::try_from(ctx)` returning `RuntimeSessionError::ModelMetadataOutOfRange` on overflow.
-    - Explicit input modalities: always includes `Text`; includes `Image` only if `vision_input == Supported`; includes `Audio` only if `audio_input == Supported`.
-    - Scrubbed synthetic `Low/Medium/High` reasoning levels: set `supported_reasoning_levels = vec![]` and `default_reasoning_level = None`.
-    - Preserved host instructions (`include_skills_usage_instructions = true`, etc.) while clearing `used_fallback_model_metadata = false` and `supports_search_tool = false`.
-- Custom Provider Login Independence:
-  - Injected `auth_manager = None` for custom protocols into `create_model_provider_with_inference_backend` and `StaticModelsManager::new`.
-  - Fully decoupled custom providers from Codex account auth loops, login flows, and token refresh interceptors.
-- Protocol Adapters Tool Namespace Unpacking:
-  - In `request.rs` across ChatCompletions, Anthropic Messages, and Gemini adapters, unpacked nested namespace tool groups (`{"type": "namespace", "tools": [...]}`) into flat function definitions.
-  - Gracefully skipped Responses API server-hosted tools (`web_search`, `tool_search`) during translation to function-calling wire formats.
-- Comprehensive Thread E2E Integration Suite (`thread_e2e_tests.rs`):
-  - Real `ThreadManager` start and turn execution against local wiremock endpoints across all 4 supported protocols (OpenAI Responses native bridge, OpenAI Chat Completions, Anthropic Messages, and Google Gemini generateContent).
-  - Validated that custom backend is used, `/models` discovery is never called, no login is required, and failure in custom protocol never falls back silently to `/responses`.
-  - Inspected outbound wire requests verifying natural Codex host tools (`exec_command`, `apply_patch`, etc.) are preserved.
-  - Verified child and fork runtime inheritance: internal sessions (`SessionSource::Internal`) inherit parent override when provider IDs match, and isolate when provider IDs differ.
-- UI Localization Note:
-  - UI provider and model selection interfaces require full i18n localization support (English and Vietnamese) in desktop/Code-OSS milestones (M13+).
-
-### M08: Internal Multi-Agent Runtime (Completed on `feat/internal-multi-agent-runtime`)
-
-- Establish `agent-studios-internal-agent` crate (`agent-studios-internal-agent`).
-- Generic Codex spawn runtime override seam (Patch 003):
-  - `model_runtime_override: Option<ModelRuntimeOverride>` added to `SpawnRequest`.
-  - Threaded through `AgentControl::spawn`, `spawn_agent_internal`, `spawn_new_thread_with_source`,
-    `spawn_forked_thread`, and `fork_thread_with_source`.
-  - Explicit child override takes precedence over parent inheritance; `None` retains existing
-    parent-thread inheritance.
-  - `CodexThread::agent_control(&self) -> Arc<dyn AgentControl>` clean façade.
-- Multi-agent specifications & profiles:
-  - `InternalAgentSpec`: independent role, display name, authoritative `ModelRef`, reasoning configuration
-    (`AgentReasoningSelection`), budget (`AgentExecutionBudget`), and workspace mode (`WorkspaceAccessMode`).
-  - `InternalTeamSpec`: team structure with coordinator and workers, alias uniqueness validation,
-    and agent lookup by alias or ID.
-- Single-writer ControlPlane actor (`ControlPlaneActor`, `ControlPlaneHandle`):
-  - Dedicated background Tokio actor owning `ControlPlane` exclusively to guarantee atomic state
-    transactions (`commit_transaction`) and deterministic FIFO event ordering without lock contention.
-  - Added `register_agent_with_id` in `ControlPlane` engine and actor.
-  - Task state machine enhancement in `agent-studios-protocol`: permitted `Running -> Ready` and
-    `Paused -> Ready` for task retries and requeuing.
-- Workspace access policy arbitrator (`WorkspacePolicyArbitrator`, `WorkspaceLease`):
-  - Enforces single `Mutating` lease exclusivity or parallel concurrent `ReadOnly` leases per workspace
-    key with RAII automatic release on drop.
-- Execution budget enforcement (`AgentBudgetTracker`):
-  - Enforces configurable bounds on turn count, tool call count, and wall-clock execution duration,
-    returning typed errors on budget exhaustion.
-- Structured coordinator DAG planning & validation:
-  - `CoordinatorDecision` (`Plan`, `Complete`, `Fail`) and `PlannedTask`.
-  - `CoordinatorPlanValidator`: acyclicity verification using Kahn's topological sort algorithm,
-    task key uniqueness, dependency existence, and atomic materialization into `ControlPlane`.
-- Supervisor orchestration engine (`AgentStudiosSupervisor`):
-  - Coordinates team boot, planning, materialization, task dependency resolution, lease acquisition,
-    run lifecycle tracking, and failure policies (`FailFast`, `ContinueIndependent`, `RetryTask`).
-- Pluggable execution backends:
-  - `AgentExecutor` trait decoupling execution from scheduling.
-  - `MockAgentExecutor` for deterministic unit testing.
-  - `CodexAgentExecutor` using `AgentStudiosRuntimeSessionFactory` for real thread runtime sessions.
-- Comprehensive test coverage (26 tests in crate):
-  - `profile_and_team_tests`: alias validation, duplicate rejection, reasoning effort, budget builder.
-  - `control_plane_actor_tests`: lifecycle, dependency unblocking, run states, concurrent handles.
-  - `workspace_policy_tests`: mutator exclusivity, concurrent readers, timeout acquisition.
-  - `budget_tests`: turn limits, tool call limits, unlimited budget.
-  - `coordinator_tests`: linear DAG, diamond DAG, cycle rejection, self-cycle rejection,
-    dependency validation, materialization.
-  - `supervisor_tests`: full success workflow, retry policy, fail-fast cascading cancellation.
-  - `cross_provider_team_e2e_tests`: full multi-agent execution with 3 distinct mock servers
-    (Coordinator on Gemini 2.5 Pro, Coder on Claude 3.7 Sonnet, Reviewer on GPT-4o), secret isolation,
-    and same-model-slug cross-instance isolation.
-
-### M09: Worktree, Task & Artifact Orchestration (Completed on `feat/worktree-task-artifact-orchestration`)
-
-- Establish `agent-studios-workspace` crate wrapping upstream `codex_worktree::WorktreeManager`.
-- Worktree & reconciliation domain state machines:
-  - `WorktreeRecord` & `WorktreeState` (`Creating`, `Ready`, `InUse`, `ChangeCaptured`, `ReconcilePending`, `Reconciled`, `Conflicted`, `Retained`, `Removing`, `Removed`, `Failed`).
-  - `ReconciliationRecord` & `ReconciliationState` (`Pending`, `Checking`, `Applying`, `Applied`, `Conflicted`, `Failed`, `Cancelled`).
-  - 10 new domain events in `agent-studios-protocol` with strict replay validation.
-- Non-teleporting worker invariant & thread affinity:
-  - Enforced 1:1 binding between Codex `ThreadId` and managed worktree via `codex_worktree::bind_thread` and `codex-thread.json`.
-  - Immutable thread working directory (`Config.cwd`); worker reuse allowed strictly when requested workspace equals bound workspace.
-- Per-workspace concurrency arbitration:
-  - Replaced global single-writer lock with per-worktree leases (`worktree-{worktree_id}`), unlocking concurrent mutating task execution across distinct worktrees.
-- Ephemeral Git index change-set capture:
-  - Isolated temporary Git index via `GIT_INDEX_FILE` computes binary diffs without mutating worktree index.
-- Content-addressed `ArtifactStore`:
-  - Atomic writing, deduplication, and SHA-256 blob storage (`<artifact-root>/blobs/sha256/<hash>`).
-- Safe patch reconciliation engine:
-  - Two-phase application on dedicated integration worktree (`git apply --check --binary` dry-run).
-  - Clean conflict detection leaving workspace untouched (`TaskState = Succeeded`, `ReconciliationState = Conflicted`).
-  - Dirty workspace retention policy on task failure or cancellation.
-- Observability read models & projections:
-  - `ArtifactIndex`: point-in-time index of artifacts by kind, task, worktree, and agent with total byte tracking.
-  - `WorktreeSnapshot`: active and retained worktrees, task and thread bindings.
-  - `TaskTimelineProjection`: chronological timeline of task events, runs, worktree bindings, change captures, artifacts, and reconciliations.
-  - Enriched `TaskGraphSnapshot`: task dependency DAG correlated with assigned worktrees, generated artifacts, and reconciliations.
-- Full verification:
-  - All workspace unit tests, E2E parallel mutating orchestration tests, and read model projection tests passing.
-
-### M10: External Runtime Interface
-- Define standard `AgentRuntime` interface (lifecycle, communication, supervision, capabilities).
-- Establish process-level process containment and IPC protocol.
-
-### M11: OpenCode Runtime Adapter
-- Implement runtime adapter for OpenCode CLI sessions.
-- Map input/output streams and tool interactions to Agent Studios control plane events.
-
-### M12: Claude Code Runtime Adapter
+### M12: Claude Code Runtime Adapter [PLANNED]
 - Implement runtime adapter wrapping Claude Code CLI.
-- Handle session resumption, approval delegation, and output streaming.
+- Map Claude Code sub-agent loops and tool interactions into Control Plane events.
+- Enforce Agent Studios pre-execution tool budgets and approvals over Claude Code tool calls.
 
-### M13: Code-OSS Integration Foundation
-- Maintained Code-OSS source snapshot/fork targeting Windows x64 first.
-- Independent Agent Studios branding and layout configuration.
-- Built-in extension loading mechanism and native Agent Studios runtime IPC.
-- Preserve normal IDE behavior (Explorer, search, source control, terminal, debugger, LSP).
-- Initiate custom iconography and visual identity pass (icon design deferred until M13).
+### M13: Code-OSS Integration Foundation [PLANNED]
+- Code-OSS source snapshot targeting Windows 11 x64 first.
+- Independent Agent Studios desktop application branding, typography, and monochrome visual language.
+- Native IPC bridge (candidate/reference protocol: JSON-RPC; exact transport and protocol mechanism TBD in M13 open design question) connecting Code-OSS desktop workbench to local Agent Studios App Server.
+- Full IDE feature parity (Monaco editor, Explorer, Search, Git, Terminal, Debugger, LSP).
 
-### M14: Agent Studios Built-in AI Extension
-- Default Agent Studios chat interface replacing the AI surface normally occupied by Copilot.
-- Direct routing to Agent Studios / Codex runtime (no `@agentstudios` prefix required, no Copilot dependency).
-- Full operational parity: inspect/edit files, `apply_patch`, integrated terminal commands, test/build execution.
-- Interactive approvals, diffs, provider/model controls, and task queue visibility.
+### M14: Agent Studios Built-in AI Extension [PLANNED]
+- Native built-in Code-OSS extension contributing the single `Agents` Activity Bar item and sidebar.
+- Structured views: Current Run, Tasks checklist, Approval Inbox, Artifacts index, Timeline feed.
+- Editor inline decorations and context menu commands.
 
-### M15: Unified Agent / IDE Workbench
-- Dual layout system: IDE-focused layout and Agent-focused layout.
-- One shared underlying runtime session (identical session ID, working directory, tool history, worktrees, active tasks).
-- Instant switching between layouts without state loss or process interruption.
-- Equal Codex capabilities available in both views.
+### M15: Unified Agent Mode / IDE Mode Workbench [PLANNED]
+- Dual presentation surfaces over one shared underlying runtime session.
+- Agent Mode: Conversation-first, progressive orchestration disclosure startup experience.
+- IDE Mode: Full Code-OSS professional workbench.
+- Instant, zero-loss mode toggling sharing `session_id`, `cwd`, active runs, tasks, agents, tool history, worktrees, and approvals.
 
-### M16: Full Codex Feature Surface
-- Comprehensive Codex capability integration: Skills (`SKILL.md`), Plugins, MCP servers, hooks, `AGENTS.md`.
-- Advanced multi-agent orchestration: Git worktrees, subagents, multi-agent primitives, budget caps.
-- Fine-grained approval and sandboxing controls.
-- Integrated diagnostics, session replay, and runtime telemetry.
+### M16: Full Codex Feature Surface [PLANNED]
+- Comprehensive Codex capability integration surfaced in desktop UI:
+  - Skills (`SKILL.md`) with GitHub installation (`/skill install`).
+  - Model Context Protocol (MCP) servers across workspace and global scopes.
+  - Plugins, lifecycle hooks (`pre_turn`, `post_task`, `on_reconciliation`).
+  - Hierarchical repository instruction discovery (`AGENTS.md`).
 
-### M17: Packaging, Installer & Auto-Updater
-- Configure Windows native installers (MSI / NSIS / WiX).
-- Implement background update checks and secure patching channels.
+### M17: Packaging, Installer & Auto-Updater [PLANNED]
+- Native Windows 11 x64 installers (MSI / NSIS).
+- Code signing and secure update delivery channels.
+- Portable release builds for macOS and Linux.
 
-### M18: Hardening & End-to-End Integration Testing
-- Comprehensive multi-agent stress tests, worktree conflict benchmarks, and recovery drills.
-- Windows security audit and memory profiling.
+### M18: Hardening, Stress & Security Audit [PLANNED]
+- Multi-agent stress testing, high-concurrency DAG execution, and worktree conflict benchmarks.
+- Comprehensive security audit of credential resolution and process sandboxing.
+- Memory leak and long-session stability profiling.
 
-### M19: Windows Stable Release
-- Final polish, user documentation, and initial Windows x64 public distribution.
+### M19: Production Windows Stable Release [PLANNED]
+- Final user documentation, localization verification (English & Vietnamese), and public distribution.

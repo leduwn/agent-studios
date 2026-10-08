@@ -1,4 +1,6 @@
-# Agent Studios IDE Architecture: Code-OSS Foundation
+﻿# Agent Studios IDE Architecture: Code-OSS Foundation
+
+> **Precedence Note**: This subsystem specification is governed by [`MASTER_VISION.md`](MASTER_VISION.md) and [`PRODUCT_PRINCIPLES.md`](PRODUCT_PRINCIPLES.md). In the event of any discrepancy, `MASTER_VISION.md` is authoritative.
 
 ## 1. Architectural Decision: Code-OSS Foundation
 
@@ -14,7 +16,7 @@ Building a production-grade code editor from scratch or wrapping Monaco Editor i
 - **Ecosystem**: Standard VS Code extension architecture and workspace configuration.
 
 ### Implementation Timeline:
-- **Milestone M06 (Current)**: Architecture locked into documentation. No Code-OSS code imported.
+- **Current Architecture**: Code-OSS foundation locked as permanent IDE core. No Code-OSS code imported until backend kernel stabilization.
 - **Milestone M13**: First maintained Code-OSS source snapshot/fork imported, targeting Windows x64.
 
 ---

@@ -1,4 +1,6 @@
-# Agent Studios Architecture Specification
+﻿# Agent Studios Architecture Specification
+
+> **Precedence Note**: This subsystem specification is governed by [`MASTER_VISION.md`](MASTER_VISION.md) and [`PRODUCT_PRINCIPLES.md`](PRODUCT_PRINCIPLES.md). In the event of any discrepancy, `MASTER_VISION.md` is authoritative.
 
 ## 1. Product Overview
 
