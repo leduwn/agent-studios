@@ -15,9 +15,9 @@ impl RuntimeImplementationId {
         let s = s.into();
         let trimmed = s.trim();
         if trimmed.is_empty() {
-            return Err(RuntimeError::InvalidId {
-                reason: "RuntimeImplementationId cannot be empty".to_string(),
-            });
+            return Err(RuntimeError::invalid_id(
+                "RuntimeImplementationId cannot be empty",
+            ));
         }
 
         // Validate character set: ASCII alphanumeric, '-', '_'
@@ -25,11 +25,9 @@ impl RuntimeImplementationId {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
-            return Err(RuntimeError::InvalidId {
-                reason: format!(
-                    "RuntimeImplementationId '{trimmed}' contains invalid characters (allowed: [a-zA-Z0-9_-])"
-                ),
-            });
+            return Err(RuntimeError::invalid_id(format!(
+                "RuntimeImplementationId '{trimmed}' contains invalid characters (allowed: [a-zA-Z0-9_-])"
+            )));
         }
 
         Ok(Self(trimmed.to_string()))
@@ -114,18 +112,14 @@ impl FromStr for RuntimeInstanceId {
     type Err = RuntimeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw = s
-            .strip_prefix(INSTANCE_PREFIX)
-            .ok_or_else(|| RuntimeError::InvalidId {
-                reason: format!(
-                    "RuntimeInstanceId '{s}' must start with prefix '{INSTANCE_PREFIX}'"
-                ),
-            })?;
+        let raw = s.strip_prefix(INSTANCE_PREFIX).ok_or_else(|| {
+            RuntimeError::invalid_id(format!(
+                "RuntimeInstanceId '{s}' must start with prefix '{INSTANCE_PREFIX}'"
+            ))
+        })?;
         Uuid::parse_str(raw)
             .map(Self)
-            .map_err(|e| RuntimeError::InvalidId {
-                reason: format!("Invalid RuntimeInstanceId '{s}': {e}"),
-            })
+            .map_err(|e| RuntimeError::invalid_id(format!("Invalid RuntimeInstanceId '{s}': {e}")))
     }
 }
 
@@ -189,16 +183,14 @@ impl FromStr for RuntimeSessionId {
     type Err = RuntimeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw = s
-            .strip_prefix(SESSION_PREFIX)
-            .ok_or_else(|| RuntimeError::InvalidId {
-                reason: format!("RuntimeSessionId '{s}' must start with prefix '{SESSION_PREFIX}'"),
-            })?;
+        let raw = s.strip_prefix(SESSION_PREFIX).ok_or_else(|| {
+            RuntimeError::invalid_id(format!(
+                "RuntimeSessionId '{s}' must start with prefix '{SESSION_PREFIX}'"
+            ))
+        })?;
         Uuid::parse_str(raw)
             .map(Self)
-            .map_err(|e| RuntimeError::InvalidId {
-                reason: format!("Invalid RuntimeSessionId '{s}': {e}"),
-            })
+            .map_err(|e| RuntimeError::invalid_id(format!("Invalid RuntimeSessionId '{s}': {e}")))
     }
 }
 
@@ -218,5 +210,42 @@ impl<'de> Deserialize<'de> for RuntimeSessionId {
     {
         let s = String::deserialize(deserializer)?;
         Self::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Opaque typed reference for an external runtime configuration document or identifier.
+#[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct RuntimeConfigRef(String);
+
+impl RuntimeConfigRef {
+    pub fn new(s: impl Into<String>) -> Result<Self, RuntimeError> {
+        let s = s.into();
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::InvalidConfiguration {
+                reason: crate::error::SanitizedRuntimeMessage::new(
+                    "RuntimeConfigRef cannot be empty",
+                ),
+            });
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RuntimeConfigRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for RuntimeConfigRef {
+    type Err = RuntimeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
     }
 }

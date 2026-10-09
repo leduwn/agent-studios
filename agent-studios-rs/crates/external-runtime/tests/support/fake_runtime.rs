@@ -5,15 +5,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::capabilities::{RuntimeCapabilities, RuntimeCapability};
-use crate::discovery::DiscoveredRuntime;
-use crate::error::RuntimeError;
-use crate::event::{RuntimeEvent, RuntimeEventKind};
-use crate::handle::{RuntimeSessionHandle, RuntimeStartRequest};
-use crate::id::{RuntimeImplementationId, RuntimeSessionId};
-use crate::input::RuntimeInput;
-use crate::lifecycle::RuntimeLifecycleState;
-use crate::traits::AgentRuntime;
+use agent_studios_external_runtime::capabilities::{RuntimeCapabilities, RuntimeCapability};
+use agent_studios_external_runtime::discovery::DiscoveredRuntimeInstance;
+use agent_studios_external_runtime::error::RuntimeError;
+use agent_studios_external_runtime::event::{RuntimeEvent, RuntimeEventKind};
+use agent_studios_external_runtime::handle::{
+    RuntimeSessionHandle, RuntimeSessionRef, RuntimeStartRequest,
+};
+use agent_studios_external_runtime::id::{
+    RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId,
+};
+use agent_studios_external_runtime::input::RuntimeInput;
+use agent_studios_external_runtime::lifecycle::RuntimeLifecycleState;
+use agent_studios_external_runtime::traits::AgentRuntime;
 
 /// Recorded invocations on the fake runtime for test assertions.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,25 +25,25 @@ pub enum FakeCallRecord {
     Discover,
     Capabilities,
     Start {
-        instance_id: String,
+        instance_id: RuntimeInstanceId,
         prompt: Option<String>,
     },
     Send {
-        session_id: RuntimeSessionId,
+        session_ref: RuntimeSessionRef,
         input: RuntimeInput,
     },
     Interrupt {
-        session_id: RuntimeSessionId,
+        session_ref: RuntimeSessionRef,
     },
     Resume {
-        session_id: RuntimeSessionId,
+        session_ref: RuntimeSessionRef,
         input: Option<RuntimeInput>,
     },
     Stop {
-        session_id: RuntimeSessionId,
+        session_ref: RuntimeSessionRef,
     },
     Status {
-        session_id: RuntimeSessionId,
+        session_ref: RuntimeSessionRef,
     },
 }
 
@@ -55,10 +59,12 @@ struct FakeSessionState {
 
 /// In-process fake runtime implementing `AgentRuntime` for testing and contract verification.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct FakeAgentRuntime {
     implementation_id: RuntimeImplementationId,
     display_name: String,
     capabilities: Arc<RwLock<RuntimeCapabilities>>,
+    instances: Arc<RwLock<Vec<DiscoveredRuntimeInstance>>>,
     sessions: Arc<RwLock<HashMap<RuntimeSessionId, FakeSessionState>>>,
     calls: Arc<RwLock<Vec<FakeCallRecord>>>,
     fail_discovery: Arc<RwLock<Option<String>>>,
@@ -69,6 +75,7 @@ pub struct FakeAgentRuntime {
     fail_stop: Arc<RwLock<Option<String>>>,
 }
 
+#[allow(dead_code)]
 impl FakeAgentRuntime {
     /// Creates a fake runtime with full default capabilities.
     pub fn new(implementation_id: impl Into<String>) -> Self {
@@ -90,11 +97,21 @@ impl FakeAgentRuntime {
             .with_subagents(true)
             .with_usage_reporting(true);
 
+        let impl_id = RuntimeImplementationId::new(implementation_id)
+            .expect("valid fake runtime implementation id");
+        let default_inst_id = RuntimeInstanceId::generate();
+        let default_instance = DiscoveredRuntimeInstance::available(
+            default_inst_id,
+            impl_id.clone(),
+            "Default Fake Instance",
+            caps.clone(),
+        );
+
         Self {
-            implementation_id: RuntimeImplementationId::new(implementation_id)
-                .expect("valid fake runtime implementation id"),
+            implementation_id: impl_id,
             display_name: "In-Process Fake Agent Runtime".to_string(),
             capabilities: Arc::new(RwLock::new(caps)),
+            instances: Arc::new(RwLock::new(vec![default_instance])),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             calls: Arc::new(RwLock::new(Vec::new())),
             fail_discovery: Arc::new(RwLock::new(None)),
@@ -106,10 +123,28 @@ impl FakeAgentRuntime {
         }
     }
 
+    /// Sets explicit instances returned by discovery.
+    pub async fn set_instances(&self, instances: Vec<DiscoveredRuntimeInstance>) {
+        let mut guard = self.instances.write().await;
+        *guard = instances;
+    }
+
+    /// Adds an instance returned by discovery.
+    pub async fn add_instance(&self, instance: DiscoveredRuntimeInstance) {
+        let mut guard = self.instances.write().await;
+        guard.push(instance);
+    }
+
     /// Sets custom capabilities for testing missing or minimal profiles.
     pub async fn set_capabilities(&self, capabilities: RuntimeCapabilities) {
         let mut guard = self.capabilities.write().await;
         *guard = capabilities;
+    }
+
+    /// Injects discovery failure.
+    pub async fn set_fail_discovery(&self, reason: Option<String>) {
+        let mut guard = self.fail_discovery.write().await;
+        *guard = reason;
     }
 
     /// Injects startup failure.
@@ -227,6 +262,61 @@ impl FakeAgentRuntime {
             })?;
         Ok(session.recorded_events.clone())
     }
+
+    fn validate_session_ref<'a>(
+        &self,
+        session: &RuntimeSessionRef,
+        sessions: &'a HashMap<RuntimeSessionId, FakeSessionState>,
+    ) -> Result<&'a FakeSessionState, RuntimeError> {
+        if session.implementation_id != self.implementation_id {
+            return Err(RuntimeError::SessionImplementationMismatch {
+                expected: self.implementation_id.clone(),
+                actual: session.implementation_id.clone(),
+                session_id: session.session_id,
+            });
+        }
+        let stored = sessions
+            .get(&session.session_id)
+            .ok_or(RuntimeError::SessionNotFound {
+                session_id: session.session_id,
+            })?;
+        if stored.handle.instance_id != session.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: stored.handle.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+        Ok(stored)
+    }
+
+    fn validate_session_ref_mut<'a>(
+        &self,
+        session: &RuntimeSessionRef,
+        sessions: &'a mut HashMap<RuntimeSessionId, FakeSessionState>,
+    ) -> Result<&'a mut FakeSessionState, RuntimeError> {
+        if session.implementation_id != self.implementation_id {
+            return Err(RuntimeError::SessionImplementationMismatch {
+                expected: self.implementation_id.clone(),
+                actual: session.implementation_id.clone(),
+                session_id: session.session_id,
+            });
+        }
+        let stored =
+            sessions
+                .get_mut(&session.session_id)
+                .ok_or(RuntimeError::SessionNotFound {
+                    session_id: session.session_id,
+                })?;
+        if stored.handle.instance_id != session.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: stored.handle.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+        Ok(stored)
+    }
 }
 
 #[async_trait]
@@ -235,22 +325,16 @@ impl AgentRuntime for FakeAgentRuntime {
         &self.implementation_id
     }
 
-    async fn discover(&self) -> Result<DiscoveredRuntime, RuntimeError> {
+    async fn discover(&self) -> Result<Vec<DiscoveredRuntimeInstance>, RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Discover);
 
         if let Some(reason) = self.fail_discovery.read().await.as_ref() {
-            return Err(RuntimeError::DiscoveryFailed {
-                reason: reason.clone(),
-            });
+            return Err(RuntimeError::discovery_failed(reason.clone()));
         }
 
-        let caps = self.capabilities.read().await.clone();
-        Ok(DiscoveredRuntime::available(
-            self.implementation_id.clone(),
-            self.display_name.clone(),
-            caps,
-        ))
+        let instances = self.instances.read().await.clone();
+        Ok(instances)
     }
 
     async fn capabilities(&self) -> RuntimeCapabilities {
@@ -265,14 +349,32 @@ impl AgentRuntime for FakeAgentRuntime {
     ) -> Result<RuntimeSessionHandle, RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Start {
-            instance_id: request.instance_id.to_string(),
+            instance_id: *request.instance_id(),
             prompt: request.initial_prompt.clone(),
         });
 
-        if let Some(reason) = self.fail_start.read().await.as_ref() {
-            return Err(RuntimeError::StartupFailed {
-                reason: reason.clone(),
+        if *request.implementation_id() != self.implementation_id {
+            return Err(RuntimeError::InstanceImplementationMismatch {
+                expected: self.implementation_id.clone(),
+                actual: request.implementation_id().clone(),
+                instance_id: *request.instance_id(),
             });
+        }
+
+        let known_instances = self.instances.read().await;
+        if !known_instances.is_empty()
+            && !known_instances
+                .iter()
+                .any(|inst| inst.instance_id == *request.instance_id())
+        {
+            return Err(RuntimeError::UnknownInstance {
+                instance_id: *request.instance_id(),
+            });
+        }
+        drop(known_instances);
+
+        if let Some(reason) = self.fail_start.read().await.as_ref() {
+            return Err(RuntimeError::startup_failed(reason.clone()));
         }
 
         let session_id = RuntimeSessionId::generate();
@@ -280,7 +382,7 @@ impl AgentRuntime for FakeAgentRuntime {
 
         let handle = RuntimeSessionHandle::new(
             session_id,
-            request.instance_id,
+            *request.instance_id(),
             self.implementation_id.clone(),
             RuntimeLifecycleState::Running,
             request.workspace.clone(),
@@ -291,13 +393,13 @@ impl AgentRuntime for FakeAgentRuntime {
         let mut recorded_events = Vec::new();
         let mut next_seq = 1;
 
-        // Emit SessionStarted
+        // Emit SessionStarted with matching session_id
         let start_event = RuntimeEvent::new(
             session_id,
             next_seq,
             RuntimeEventKind::SessionStarted {
                 session_id,
-                instance_id: request.instance_id,
+                instance_id: *request.instance_id(),
             },
         );
         next_seq += 1;
@@ -349,65 +451,59 @@ impl AgentRuntime for FakeAgentRuntime {
 
     async fn send(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
         input: RuntimeInput,
     ) -> Result<(), RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Send {
-            session_id: *session_id,
+            session_ref: session.clone(),
             input: input.clone(),
         });
 
         if let Some(reason) = self.fail_send.read().await.as_ref() {
-            return Err(RuntimeError::SendFailed {
-                session_id: *session_id,
-                reason: reason.clone(),
-            });
+            return Err(RuntimeError::send_failed(
+                session.session_id,
+                reason.clone(),
+            ));
         }
 
         let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref_mut(session, &mut sessions)?;
 
-        if session.state.is_terminal() {
-            return Err(RuntimeError::SendFailed {
-                session_id: *session_id,
-                reason: format!(
-                    "Cannot send to terminal session in state '{}'",
-                    session.state
-                ),
-            });
+        if session_state.state.is_terminal() {
+            return Err(RuntimeError::terminal_state_error(
+                session.session_id,
+                session_state.state,
+                "send",
+            ));
         }
 
-        session.received_inputs.push(input.clone());
+        session_state.received_inputs.push(input.clone());
 
         match &input {
             RuntimeInput::Text { content } => {
                 let event = RuntimeEvent::new(
-                    *session_id,
-                    session.next_sequence,
+                    session.session_id,
+                    session_state.next_sequence,
                     RuntimeEventKind::OutputDelta {
                         text: format!("Processed text: {}", content),
                     },
                 );
-                session.next_sequence += 1;
-                session.recorded_events.push(event.clone());
-                let _ = session.events_tx.send(event);
+                session_state.next_sequence += 1;
+                session_state.recorded_events.push(event.clone());
+                let _ = session_state.events_tx.send(event);
             }
             RuntimeInput::Continuation { context } => {
                 let event = RuntimeEvent::new(
-                    *session_id,
-                    session.next_sequence,
+                    session.session_id,
+                    session_state.next_sequence,
                     RuntimeEventKind::OutputDelta {
                         text: format!("Continued turn with context: {:?}", context),
                     },
                 );
-                session.next_sequence += 1;
-                session.recorded_events.push(event.clone());
-                let _ = session.events_tx.send(event);
+                session_state.next_sequence += 1;
+                session_state.recorded_events.push(event.clone());
+                let _ = session_state.events_tx.send(event);
             }
             RuntimeInput::ApprovalResponse {
                 approval_id,
@@ -415,86 +511,82 @@ impl AgentRuntime for FakeAgentRuntime {
                 ..
             } => {
                 let event = RuntimeEvent::new(
-                    *session_id,
-                    session.next_sequence,
+                    session.session_id,
+                    session_state.next_sequence,
                     RuntimeEventKind::Diagnostic {
                         level: "info".to_string(),
                         message: format!("Approval {} resolved: {}", approval_id, approved),
                     },
                 );
-                session.next_sequence += 1;
-                session.recorded_events.push(event.clone());
-                let _ = session.events_tx.send(event);
+                session_state.next_sequence += 1;
+                session_state.recorded_events.push(event.clone());
+                let _ = session_state.events_tx.send(event);
             }
         }
 
         Ok(())
     }
 
-    async fn interrupt(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError> {
+    async fn interrupt(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Interrupt {
-            session_id: *session_id,
+            session_ref: session.clone(),
         });
 
         let caps = self.capabilities.read().await;
         caps.ensure_supported(RuntimeCapability::Interrupt)?;
 
         if let Some(reason) = self.fail_interrupt.read().await.as_ref() {
-            return Err(RuntimeError::InterruptionFailed {
-                session_id: *session_id,
-                reason: reason.clone(),
-            });
+            return Err(RuntimeError::interruption_failed(
+                session.session_id,
+                reason.clone(),
+            ));
         }
 
         let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref_mut(session, &mut sessions)?;
 
-        session
+        session_state
             .state
             .validate_transition_to(RuntimeLifecycleState::Interrupted)?;
-        let prev = session.state;
-        session.state = RuntimeLifecycleState::Interrupted;
-        session.handle.state = RuntimeLifecycleState::Interrupted;
+        let prev = session_state.state;
+        session_state.state = RuntimeLifecycleState::Interrupted;
+        session_state.handle.state = RuntimeLifecycleState::Interrupted;
 
         let status_event = RuntimeEvent::new(
-            *session_id,
-            session.next_sequence,
+            session.session_id,
+            session_state.next_sequence,
             RuntimeEventKind::StatusChanged {
                 previous_state: prev,
                 new_state: RuntimeLifecycleState::Interrupted,
             },
         );
-        session.next_sequence += 1;
-        session.recorded_events.push(status_event.clone());
-        let _ = session.events_tx.send(status_event);
+        session_state.next_sequence += 1;
+        session_state.recorded_events.push(status_event.clone());
+        let _ = session_state.events_tx.send(status_event);
 
         let interrupt_event = RuntimeEvent::new(
-            *session_id,
-            session.next_sequence,
+            session.session_id,
+            session_state.next_sequence,
             RuntimeEventKind::Interrupted {
                 reason: "Interrupt requested by control plane".to_string(),
             },
         );
-        session.next_sequence += 1;
-        session.recorded_events.push(interrupt_event.clone());
-        let _ = session.events_tx.send(interrupt_event);
+        session_state.next_sequence += 1;
+        session_state.recorded_events.push(interrupt_event.clone());
+        let _ = session_state.events_tx.send(interrupt_event);
 
         Ok(())
     }
 
     async fn resume(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
         input: Option<RuntimeInput>,
     ) -> Result<(), RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Resume {
-            session_id: *session_id,
+            session_ref: session.clone(),
             input: input.clone(),
         });
 
@@ -502,137 +594,151 @@ impl AgentRuntime for FakeAgentRuntime {
         caps.ensure_supported(RuntimeCapability::Resume)?;
 
         if let Some(reason) = self.fail_resume.read().await.as_ref() {
-            return Err(RuntimeError::ResumeFailed {
-                session_id: *session_id,
-                reason: reason.clone(),
-            });
+            return Err(RuntimeError::resume_failed(
+                session.session_id,
+                reason.clone(),
+            ));
         }
 
         let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref_mut(session, &mut sessions)?;
 
-        session
+        if session_state.state != RuntimeLifecycleState::Interrupted {
+            return Err(RuntimeError::InvalidLifecycleTransition {
+                from: session_state.state,
+                to: RuntimeLifecycleState::Running,
+                reason: "Can only resume from Interrupted state".into(),
+            });
+        }
+
+        session_state
             .state
             .validate_transition_to(RuntimeLifecycleState::Running)?;
-        let prev = session.state;
-        session.state = RuntimeLifecycleState::Running;
-        session.handle.state = RuntimeLifecycleState::Running;
+        let prev = session_state.state;
+        session_state.state = RuntimeLifecycleState::Running;
+        session_state.handle.state = RuntimeLifecycleState::Running;
 
         let status_event = RuntimeEvent::new(
-            *session_id,
-            session.next_sequence,
+            session.session_id,
+            session_state.next_sequence,
             RuntimeEventKind::StatusChanged {
                 previous_state: prev,
                 new_state: RuntimeLifecycleState::Running,
             },
         );
-        session.next_sequence += 1;
-        session.recorded_events.push(status_event.clone());
-        let _ = session.events_tx.send(status_event);
+        session_state.next_sequence += 1;
+        session_state.recorded_events.push(status_event.clone());
+        let _ = session_state.events_tx.send(status_event);
 
         if let Some(inp) = input {
-            session.received_inputs.push(inp);
+            session_state.received_inputs.push(inp);
             let event = RuntimeEvent::new(
-                *session_id,
-                session.next_sequence,
+                session.session_id,
+                session_state.next_sequence,
                 RuntimeEventKind::OutputDelta {
                     text: "Resumed turn".to_string(),
                 },
             );
-            session.next_sequence += 1;
-            session.recorded_events.push(event.clone());
-            let _ = session.events_tx.send(event);
+            session_state.next_sequence += 1;
+            session_state.recorded_events.push(event.clone());
+            let _ = session_state.events_tx.send(event);
         }
 
         Ok(())
     }
 
-    async fn stop(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError> {
+    async fn stop(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Stop {
-            session_id: *session_id,
+            session_ref: session.clone(),
         });
 
+        let caps = self.capabilities.read().await;
+        caps.ensure_supported(RuntimeCapability::Stop)?;
+
         if let Some(reason) = self.fail_stop.read().await.as_ref() {
-            return Err(RuntimeError::StopFailed {
-                session_id: *session_id,
-                reason: reason.clone(),
-            });
+            return Err(RuntimeError::stop_failed(
+                session.session_id,
+                reason.clone(),
+            ));
         }
 
         let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref_mut(session, &mut sessions)?;
 
-        if session.state.is_terminal() {
-            return Ok(());
+        // Stop semantics:
+        // 1. If already Stopped: IDEMPOTENT (Ok(()))
+        // 2. If Completed or Failed: TerminalStateError
+        // 3. Otherwise: transition to Stopped
+        match session_state.state {
+            RuntimeLifecycleState::Stopped => return Ok(()),
+            RuntimeLifecycleState::Completed => {
+                return Err(RuntimeError::terminal_state_error(
+                    session.session_id,
+                    RuntimeLifecycleState::Completed,
+                    "stop",
+                ));
+            }
+            RuntimeLifecycleState::Failed => {
+                return Err(RuntimeError::terminal_state_error(
+                    session.session_id,
+                    RuntimeLifecycleState::Failed,
+                    "stop",
+                ));
+            }
+            _ => {}
         }
 
-        let prev = session.state;
-        session.state = RuntimeLifecycleState::Stopped;
-        session.handle.state = RuntimeLifecycleState::Stopped;
+        let prev = session_state.state;
+        session_state.state = RuntimeLifecycleState::Stopped;
+        session_state.handle.state = RuntimeLifecycleState::Stopped;
 
         let status_event = RuntimeEvent::new(
-            *session_id,
-            session.next_sequence,
+            session.session_id,
+            session_state.next_sequence,
             RuntimeEventKind::StatusChanged {
                 previous_state: prev,
                 new_state: RuntimeLifecycleState::Stopped,
             },
         );
-        session.next_sequence += 1;
-        session.recorded_events.push(status_event.clone());
-        let _ = session.events_tx.send(status_event);
+        session_state.next_sequence += 1;
+        session_state.recorded_events.push(status_event.clone());
+        let _ = session_state.events_tx.send(status_event);
 
         let stop_event = RuntimeEvent::new(
-            *session_id,
-            session.next_sequence,
+            session.session_id,
+            session_state.next_sequence,
             RuntimeEventKind::Stopped,
         );
-        session.next_sequence += 1;
-        session.recorded_events.push(stop_event.clone());
-        let _ = session.events_tx.send(stop_event);
+        session_state.next_sequence += 1;
+        session_state.recorded_events.push(stop_event.clone());
+        let _ = session_state.events_tx.send(stop_event);
 
         Ok(())
     }
 
     async fn status(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
     ) -> Result<RuntimeLifecycleState, RuntimeError> {
         let mut calls = self.calls.write().await;
         calls.push(FakeCallRecord::Status {
-            session_id: *session_id,
+            session_ref: session.clone(),
         });
 
         let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref(session, &sessions)?;
 
-        Ok(session.state)
+        Ok(session_state.state)
     }
 
     async fn events(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
     ) -> Result<broadcast::Receiver<RuntimeEvent>, RuntimeError> {
         let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or(RuntimeError::SessionNotFound {
-                session_id: *session_id,
-            })?;
+        let session_state = self.validate_session_ref(session, &sessions)?;
 
-        Ok(session.events_tx.subscribe())
+        Ok(session_state.events_tx.subscribe())
     }
 }

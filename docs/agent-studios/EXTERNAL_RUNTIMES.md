@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
-> **Status**: Interface Implemented (Milestone M10 COMPLETED; Adapters M11–M12 PLANNED)
-> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface and contract test matrix are **IMPLEMENTED**. Adapters are **PLANNED**.
+> **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; Adapters M11–M12 PLANNED)
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 24-point contract test matrix are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -49,8 +49,8 @@ pub trait AgentRuntime: Send + Sync {
     /// Returns the unique implementation identifier for this runtime.
     fn implementation_id(&self) -> &RuntimeImplementationId;
 
-    /// Discovers runtime availability, local binary path, and metadata in the environment.
-    async fn discover(&self) -> Result<DiscoveredRuntime, RuntimeError>;
+    /// Discovers runtime instances, local binary paths, and metadata in the environment.
+    async fn discover(&self) -> Result<Vec<DiscoveredRuntimeInstance>, RuntimeError>;
 
     /// Advertises the static or dynamic capability profile supported by this runtime.
     async fn capabilities(&self) -> RuntimeCapabilities;
@@ -64,40 +64,77 @@ pub trait AgentRuntime: Send + Sync {
     /// Sends typed input (user text, continuation, or approval response) to an active session.
     async fn send(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
         input: RuntimeInput,
     ) -> Result<(), RuntimeError>;
 
-    /// Interrupts the active execution turn while keeping the session process and context intact.
-    async fn interrupt(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError>;
+    /// Interrupts active turn while preserving session context and process.
+    async fn interrupt(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError>;
 
     /// Resumes execution after interruption if the runtime advertises `RuntimeCapability::Resume`.
     async fn resume(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
         input: Option<RuntimeInput>,
     ) -> Result<(), RuntimeError>;
 
-    /// Terminates the runtime session permanently.
-    async fn stop(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError>;
+    /// Terminates the runtime session permanently (idempotent if already Stopped).
+    async fn stop(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError>;
 
     /// Queries the current lifecycle state of a session.
     async fn status(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
     ) -> Result<RuntimeLifecycleState, RuntimeError>;
 
     /// Subscribes to the broadcast stream of normalized events emitted by the session.
     async fn events(
         &self,
-        session_id: &RuntimeSessionId,
+        session: &RuntimeSessionRef,
     ) -> Result<broadcast::Receiver<RuntimeEvent>, RuntimeError>;
 }
 ```
 
 ---
 
-## 4. Process Containment & Isolation
+## 4. Contract Hardening (Milestone M10.1)
+
+Milestone M10.1 closed 12 architectural contract boundaries prior to concrete adapter development:
+
+1. **Multi-Instance Discovery Authority**:
+   - `AgentRuntime::discover()` returns `Vec<DiscoveredRuntimeInstance>`.
+   - Each instance possesses unique `RuntimeInstanceId` (`rt-inst-<uuid>`) and typed `RuntimeAvailability` (`Available` or `Unavailable { reason: SanitizedRuntimeMessage }`).
+2. **Typed Runtime Instance References**:
+   - `RuntimeInstanceRef` (`implementation_id`, `instance_id`, `config_ref: Option<RuntimeConfigRef>`) verified at start boundary before process spawn.
+3. **Three-Tuple Session Ownership Tokens**:
+   - `RuntimeSessionRef` (`implementation_id`, `instance_id`, `session_id`) required across all lifecycle methods (`send`, `interrupt`, `resume`, `stop`, `status`, `events`).
+   - Forged or mismatched tokens are rejected with typed `SessionInstanceMismatch` or `SessionImplementationMismatch`.
+4. **Zero-Plaintext Secret Architecture**:
+   - `RuntimeStartRequest` replaces raw environment maps with typed `EnvironmentVariableBinding`.
+   - Secrets use deferred `SecretReference` and `SecretBackend` from `agent-studios-provider`.
+5. **Structural Diagnostic Sanitization**:
+   - `SanitizedRuntimeMessage` newtype with private inner storage scrubs API tokens and authorization headers on construction and deserialization.
+6. **Production Export Cleanliness**:
+   - Mock/fake runtime (`FakeAgentRuntime`) relocated to `tests/support/fake_runtime.rs`. Zero simulation mocks in production crate exports.
+7. **Stop Semantics & Capability Gating**:
+   - `stop()` on `Stopped` session is strictly idempotent (`Ok(())`).
+   - `stop()` on `Completed` or `Failed` returns typed `TerminalStateError`.
+   - `RuntimeCapability::Stop` checked before termination side effects.
+8. **Fail-Closed Capability Enforcement**:
+   - `RuntimeCapabilities::ensure_supported` rejects `Unknown` and `Unsupported` capabilities fail-closed.
+9. **Concurrency & Registry Discipline**:
+   - `RuntimeRegistry` uses `BTreeMap` for deterministic alphabetical ordering.
+   - Lock-drop-before-await pattern guarantees no mutex/rwlock guards are held across `.await` points.
+10. **Monotonic Event Sequence Authority**:
+    - `RuntimeEvent.sequence` (1..N gapless u64) is the sole deterministic ordering authority. Wall-clock `timestamp` is observational metadata.
+11. **Event Correlation Consistency**:
+    - `RuntimeEventKind::SessionStarted` carries matching authoritative `session_id` and `instance_id`.
+12. **Non-Resurrection Lifecycle Invariants**:
+    - Terminal states (`Stopped`, `Completed`, `Failed`) forbid transition to active states. All operations on terminal sessions fail with `TerminalStateError`.
+
+---
+
+## 5. Process Containment & Isolation
 
 Because external runtimes execute foreign CLI binaries (Node.js, Python, or Go processes), Agent Studios enforces strict process containment:
 
@@ -115,7 +152,7 @@ Because external runtimes execute foreign CLI binaries (Node.js, Python, or Go p
 
 ---
 
-## 5. Planned Runtime Adapters
+## 6. Planned Runtime Adapters
 
 ### A. OpenCode Adapter (Milestone M11)
 - Wraps the OpenCode CLI or Node.js server.

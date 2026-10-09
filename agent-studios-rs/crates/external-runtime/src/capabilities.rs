@@ -157,7 +157,8 @@ impl RuntimeCapabilities {
         } else {
             Err(RuntimeError::UnsupportedCapability {
                 capability: cap,
-                reason: format!("Capability '{}' is not supported (state: {})", cap, support),
+                reason: format!("Capability '{}' is not supported (state: {})", cap, support)
+                    .into(),
             })
         }
     }

@@ -24,7 +24,7 @@
 │ M07.6   │ Runtime Session Factory & Thread E2E   │ [COMPLETED]         │
 │ M08/8.1 │ Internal Multi-Agent Runtime Hardening │ [COMPLETED]         │
 │ M09     │ Worktree, Task & Artifact Orchestration│ [COMPLETED]         │
-│ M10     │ External Runtime Interface Specification│ [PLANNED]           │
+│ M10/10.1│ External Runtime Contract Hardening    │ [COMPLETED]         │
 │ M11     │ OpenCode CLI Runtime Adapter           │ [PLANNED]           │
 │ M12     │ Claude Code CLI Runtime Adapter        │ [PLANNED]           │
 │ M13     │ Code-OSS Shell Integration Foundation   │ [PLANNED]           │
@@ -114,14 +114,23 @@
 - **M09.3 (Deterministic Patch Reconciliation & Final Gate)**: Reconciliation engine validating patches via `git apply --check` and applying to integration workspaces. Safe worktree retention (zero destructive `git reset --hard` or `git clean -fdx`). Non-conflated state transitions (`Blocked(ReconciliationConflict)` != `Cancelled`). Full end-to-end WireMock integration passing all quality gates.
 - **M09.7 (Orphan-Thread Safety Fix)**: Enforces safe thread shutdown and removal invariant (`shutdown_and_wait_thread.await?` before `remove_thread_if_matches`), preventing untracked orphan threads on timeout or failure.
 
-### M10: External Runtime Interface [COMPLETED]
+### M10 & M10.1: External Runtime Interface & Contract Hardening [COMPLETED]
 - Establish vendor-neutral `agent-studios-external-runtime` crate with zero provider coupling.
 - Define asynchronous `AgentRuntime` lifecycle trait (`discover`, `capabilities`, `start`, `send`, `interrupt`, `resume`, `stop`, `status`, `events`).
 - Strongly-typed identifier families with wire collision prevention (`RuntimeImplementationId`, `rt-inst-<uuid>`, `rt-sess-<uuid>`).
 - Strict lifecycle state machine with active/resumable `Interrupted` and fail-closed terminal transitions (`Stopped`, `Completed`, `Failed`).
 - Tristate capability profiles across 16 dimensions (`Supported`, `Unsupported`, `Unknown`).
 - Monotonically numbered event streams with typed event kinds and regex-free secret scrubbing.
-- In-process `FakeAgentRuntime` and comprehensive Section 20 contract matrices (A through M) verified.
+- Closed 12 contract boundaries in M10.1:
+  - Multi-instance discovery authority (`DiscoveredRuntimeInstance`, `RuntimeAvailability`).
+  - Typed `RuntimeInstanceRef` verified at start boundary and 3-tuple `RuntimeSessionRef` ownership tokens enforced across all methods.
+  - Zero-plaintext secret architecture with `EnvironmentVariableBinding` using `SecretReference` / `SecretBackend`.
+  - Structural error sanitization newtype (`SanitizedRuntimeMessage`) preventing secret leakage.
+  - Relocated fake runtime out of production exports into `tests/support/fake_runtime.rs`.
+  - Stop semantics (idempotent `Stopped`, `TerminalStateError` on `Completed`/`Failed`, `RuntimeCapability::Stop` enforcement).
+  - Concurrency discipline (`BTreeMap` registry, lock-drop-before-await pattern).
+  - Event ordering authority (`sequence` number authority, observational timestamps).
+  - Terminal non-resurrection invariants verified by 24 contract regression tests.
 
 ### M11: OpenCode Runtime Adapter [PLANNED]
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.

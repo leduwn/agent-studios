@@ -69,7 +69,8 @@ impl RuntimeLifecycleState {
                 reason: format!(
                     "Cannot transition from terminal state '{}' to '{}'",
                     self, target
-                ),
+                )
+                .into(),
             });
         }
 
@@ -82,7 +83,8 @@ impl RuntimeLifecycleState {
                 reason: format!(
                     "Illegal lifecycle transition from '{}' to '{}'",
                     self, target
-                ),
+                )
+                .into(),
             })
         }
     }

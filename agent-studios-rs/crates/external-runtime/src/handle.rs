@@ -1,14 +1,116 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use agent_studios_protocol::agent::AgentExecutionBudget;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_protocol::worktree::ExecutionWorkspace;
-use agent_studios_provider::ModelRef;
+use agent_studios_provider::{ModelRef, SecretReference};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::id::{RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId};
+use crate::error::RuntimeError;
+use crate::id::{RuntimeConfigRef, RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId};
 use crate::lifecycle::RuntimeLifecycleState;
+
+/// Strongly-typed reference to a configured runtime instance, unifying implementation ID,
+/// authoritative instance ID, and optional configuration reference.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RuntimeInstanceRef {
+    pub implementation_id: RuntimeImplementationId,
+    pub instance_id: RuntimeInstanceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_ref: Option<RuntimeConfigRef>,
+}
+
+impl RuntimeInstanceRef {
+    pub fn new(implementation_id: RuntimeImplementationId, instance_id: RuntimeInstanceId) -> Self {
+        Self {
+            implementation_id,
+            instance_id,
+            config_ref: None,
+        }
+    }
+
+    pub fn with_config_ref(mut self, config_ref: RuntimeConfigRef) -> Self {
+        self.config_ref = Some(config_ref);
+        self
+    }
+}
+
+/// Three-tuple reference defining authoritative runtime session ownership.
+/// Prevents cross-instance and cross-implementation session confusion across all lifecycle operations.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RuntimeSessionRef {
+    pub implementation_id: RuntimeImplementationId,
+    pub instance_id: RuntimeInstanceId,
+    pub session_id: RuntimeSessionId,
+}
+
+impl RuntimeSessionRef {
+    pub fn new(
+        implementation_id: RuntimeImplementationId,
+        instance_id: RuntimeInstanceId,
+        session_id: RuntimeSessionId,
+    ) -> Self {
+        Self {
+            implementation_id,
+            instance_id,
+            session_id,
+        }
+    }
+}
+
+/// Source for an environment variable injected into an external runtime session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EnvironmentBindingSource {
+    Literal { value: String },
+    Secret { secret: SecretReference },
+}
+
+/// Typed environment variable binding replacing raw plaintext credential maps.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentVariableBinding {
+    pub name: String,
+    pub source: EnvironmentBindingSource,
+}
+
+impl EnvironmentVariableBinding {
+    pub fn literal(
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, RuntimeError> {
+        let name = name.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::invalid_configuration(
+                "Environment variable name cannot be empty",
+            ));
+        }
+        Ok(Self {
+            name: trimmed.to_string(),
+            source: EnvironmentBindingSource::Literal {
+                value: value.into(),
+            },
+        })
+    }
+
+    pub fn secret(name: impl Into<String>, secret: SecretReference) -> Result<Self, RuntimeError> {
+        let name = name.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::invalid_configuration(
+                "Environment variable name cannot be empty",
+            ));
+        }
+        secret
+            .validate()
+            .map_err(|e| RuntimeError::invalid_configuration(e.to_string()))?;
+        Ok(Self {
+            name: trimmed.to_string(),
+            source: EnvironmentBindingSource::Secret { secret },
+        })
+    }
+}
 
 /// Correlation metadata linking an external runtime session to Agent Studios control plane entities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -53,43 +155,46 @@ impl RuntimeCorrelation {
 /// Never embeds raw secrets directly in public serializable request structures.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStartRequest {
-    pub instance_id: RuntimeInstanceId,
-    pub implementation_id: RuntimeImplementationId,
+    pub instance_ref: RuntimeInstanceRef,
     pub workspace: ExecutionWorkspace,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_config_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_ref: Option<ModelRef>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub environment: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment_bindings: Vec<EnvironmentVariableBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation: Option<RuntimeCorrelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<AgentExecutionBudget>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub metadata: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
 }
 
 impl RuntimeStartRequest {
-    pub fn new(
-        instance_id: RuntimeInstanceId,
-        implementation_id: RuntimeImplementationId,
-        workspace: ExecutionWorkspace,
-    ) -> Self {
+    pub fn new(instance_ref: RuntimeInstanceRef, workspace: ExecutionWorkspace) -> Self {
         Self {
-            instance_id,
-            implementation_id,
+            instance_ref,
             workspace,
             initial_prompt: None,
-            runtime_config_ref: None,
             model_ref: None,
-            environment: HashMap::new(),
+            environment_bindings: Vec::new(),
             correlation: None,
             budget: None,
-            metadata: HashMap::new(),
+            metadata: BTreeMap::new(),
         }
+    }
+
+    pub fn instance_id(&self) -> &RuntimeInstanceId {
+        &self.instance_ref.instance_id
+    }
+
+    pub fn implementation_id(&self) -> &RuntimeImplementationId {
+        &self.instance_ref.implementation_id
+    }
+
+    pub fn runtime_config_ref(&self) -> Option<&RuntimeConfigRef> {
+        self.instance_ref.config_ref.as_ref()
     }
 
     pub fn with_initial_prompt(mut self, prompt: impl Into<String>) -> Self {
@@ -112,9 +217,24 @@ impl RuntimeStartRequest {
         self
     }
 
-    pub fn with_env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.environment.insert(key.into(), value.into());
-        self
+    pub fn with_literal_env(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<Self, RuntimeError> {
+        let binding = EnvironmentVariableBinding::literal(name, value)?;
+        self.environment_bindings.push(binding);
+        Ok(self)
+    }
+
+    pub fn with_secret_env(
+        mut self,
+        name: impl Into<String>,
+        secret: SecretReference,
+    ) -> Result<Self, RuntimeError> {
+        let binding = EnvironmentVariableBinding::secret(name, secret)?;
+        self.environment_bindings.push(binding);
+        Ok(self)
     }
 
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -155,5 +275,17 @@ impl RuntimeSessionHandle {
             correlation,
             created_at,
         }
+    }
+
+    pub fn session_ref(&self) -> RuntimeSessionRef {
+        RuntimeSessionRef::new(
+            self.implementation_id.clone(),
+            self.instance_id,
+            self.session_id,
+        )
+    }
+
+    pub fn instance_ref(&self) -> RuntimeInstanceRef {
+        RuntimeInstanceRef::new(self.implementation_id.clone(), self.instance_id)
     }
 }

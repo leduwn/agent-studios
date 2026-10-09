@@ -1,24 +1,25 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::capabilities::RuntimeCapabilities;
-use crate::discovery::DiscoveredRuntime;
+use crate::discovery::DiscoveredRuntimeInstance;
 use crate::error::RuntimeError;
 use crate::id::RuntimeImplementationId;
 use crate::traits::AgentRuntime;
 
 /// Thread-safe registry managing registered external agent runtime implementations.
+/// Uses BTreeMap for deterministic ordering and strictly releases locks before awaiting async runtime operations.
 #[derive(Clone, Default)]
 pub struct RuntimeRegistry {
-    runtimes: Arc<RwLock<HashMap<RuntimeImplementationId, Arc<dyn AgentRuntime>>>>,
+    runtimes: Arc<RwLock<BTreeMap<RuntimeImplementationId, Arc<dyn AgentRuntime>>>>,
 }
 
 impl RuntimeRegistry {
     /// Creates a new empty runtime registry.
     pub fn new() -> Self {
         Self {
-            runtimes: Arc::new(RwLock::new(HashMap::new())),
+            runtimes: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -59,28 +60,43 @@ impl RuntimeRegistry {
         guard.contains_key(id)
     }
 
-    /// Lists all registered runtime implementation IDs.
+    /// Lists all registered runtime implementation IDs in deterministic sorted order.
     pub async fn list_ids(&self) -> Vec<RuntimeImplementationId> {
         let guard = self.runtimes.read().await;
         guard.keys().cloned().collect()
     }
 
-    /// Discovers all registered runtimes concurrently.
-    pub async fn discover_all(&self) -> Result<Vec<DiscoveredRuntime>, RuntimeError> {
-        let guard = self.runtimes.read().await;
-        let mut results = Vec::with_capacity(guard.len());
-        for runtime in guard.values() {
-            results.push(runtime.discover().await?);
+    /// Discovers all registered runtime instances concurrently across implementations,
+    /// explicitly dropping the registry lock before awaiting async calls.
+    pub async fn discover_all(&self) -> Result<Vec<DiscoveredRuntimeInstance>, RuntimeError> {
+        let runtimes: Vec<Arc<dyn AgentRuntime>> = {
+            let guard = self.runtimes.read().await;
+            guard.values().cloned().collect()
+        }; // Lock dropped before await
+
+        let mut results = Vec::new();
+        for runtime in runtimes {
+            let instances = runtime.discover().await?;
+            results.extend(instances);
         }
         Ok(results)
     }
 
-    /// Queries capabilities for all registered runtimes.
-    pub async fn capabilities_all(&self) -> HashMap<RuntimeImplementationId, RuntimeCapabilities> {
-        let guard = self.runtimes.read().await;
-        let mut results = HashMap::with_capacity(guard.len());
-        for (id, runtime) in guard.iter() {
-            results.insert(id.clone(), runtime.capabilities().await);
+    /// Queries capabilities for all registered runtimes in deterministic order,
+    /// explicitly dropping the registry lock before awaiting async calls.
+    pub async fn capabilities_all(&self) -> BTreeMap<RuntimeImplementationId, RuntimeCapabilities> {
+        let entries: Vec<(RuntimeImplementationId, Arc<dyn AgentRuntime>)> = {
+            let guard = self.runtimes.read().await;
+            guard
+                .iter()
+                .map(|(k, v)| (k.clone(), Arc::clone(v)))
+                .collect()
+        }; // Lock dropped before await
+
+        let mut results = BTreeMap::new();
+        for (id, runtime) in entries {
+            let caps = runtime.capabilities().await;
+            results.insert(id, caps);
         }
         results
     }
