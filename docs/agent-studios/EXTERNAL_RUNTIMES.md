@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
 > **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; Adapters M11–M12 PLANNED)
-> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 24-point contract test matrix are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 51-test contract verification suite (49 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -82,16 +82,26 @@ pub trait AgentRuntime: Send + Sync {
     async fn stop(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError>;
 
     /// Queries the current lifecycle state of a session.
+    /// Queries the current lifecycle state of a session.
     async fn status(
         &self,
         session: &RuntimeSessionRef,
     ) -> Result<RuntimeLifecycleState, RuntimeError>;
 
-    /// Subscribes to the broadcast stream of normalized events emitted by the session.
+    /// Subscribes to the normalized event stream emitted by the session, delivering replay history followed by live events.
     async fn events(
         &self,
         session: &RuntimeSessionRef,
-    ) -> Result<broadcast::Receiver<RuntimeEvent>, RuntimeError>;
+    ) -> Result<RuntimeEventSubscription, RuntimeError> {
+        self.events_after(session, None).await
+    }
+
+    /// Subscribes to the normalized event stream after a specific sequence number.
+    async fn events_after(
+        &self,
+        session: &RuntimeSessionRef,
+        after_sequence: Option<u64>,
+    ) -> Result<RuntimeEventSubscription, RuntimeError>;
 }
 ```
 
@@ -99,7 +109,9 @@ pub trait AgentRuntime: Send + Sync {
 
 ## 4. Contract Hardening & Remediation (Milestone M10.1)
 
-Milestone M10.1 systematically resolved all findings across the external runtime contract:
+Milestone M10.1 systematically resolved all findings across the external runtime contract through two intensive review rounds:
+
+### Round 1 Hardening Matrix (P1-01 to P2-04)
 
 1. **P1-01: Reliable Event Startup, Subscription, and Gapless Replay**:
    - `SessionEventHub` coordinates atomic monotonic sequence generation (`EventSequencer`), bounded in-memory replay history (`VecDeque<RuntimeEvent>`), and real-time broadcast (`tokio::sync::broadcast`).
@@ -127,11 +139,24 @@ Milestone M10.1 systematically resolved all findings across the external runtime
    - `sanitize_error_message` and `SanitizedRuntimeMessage` scrub credentials across all cases: case-insensitive keywords, single/double quoted values, query string parameters (`?key=...`, `&token=...`), and basic authentication URIs (`https://user:pass@host/`).
 9. **P2-03: ExecutionWorkspace Isolation Policy**:
    - `WorkspaceAccessMode` enum (`ReadOnly`, `Mutating`).
-   - `RuntimeStartRequest::validate` strictly prohibits `ExecutionWorkspace::SharedSource` when `WorkspaceAccessMode::Mutating` is configured.
+   - `RuntimeStartRequest::validate` strictly prohibits `ExecutionWorkspace::SharedSource` pending M11 verified containment isolation.
 10. **P2-04: Fault-Tolerant RuntimeRegistry Discovery**:
     - `RuntimeRegistry::discover_all` uses `tokio::task::JoinSet` for parallel discovery across registered implementations.
     - Locks are dropped before `.await` calls to prevent lock contention and deadlocks.
     - Collects into `RegistryDiscoveryOutcome`, preserving deterministic `BTreeMap` ordering while isolating individual runtime failures into sanitized error diagnostics without failing the entire registry.
+
+### Round 2 Source Review Remediation Matrix (R01 to R10)
+
+- **R01 (P1): Event Ingest Boundary Validation**: `SessionEventHub::ingest()` routes through `EventBoundaryValidator` to enforce sequence 1 `SessionStarted`, gapless monotonic increments, session/instance correlation, and post-terminal rejection without partial state corruption on failure.
+- **R02 (P1): Atomic Event Emission Synchronization**: `SessionEventHub::emit()` serializes sequence allocation, boundary validation, bounded history append, terminal state tracking, and live broadcast under a single atomic lock boundary (`Arc<RwLock<HubState>>`).
+- **R03 (P1): Replay Retention and Offset Boundary Semantics**: Enforces that `after_sequence = N` replays events strictly greater than N; when earliest retained sequence is E, `after_sequence = Some(E - 1)` succeeds and replays from E; initial subscription (`after_sequence = None`) after eviction returns `EventRetentionExceeded`; capacity 1, buffer overflow, and sequence overflow handled cleanly.
+- **R04 (P1): Secret Environment Variable Validation Bypass**: `EnvironmentVariableBinding` restricts field visibility (private `name` and `source`), implements custom serde deserialization enforcing constructor invariants, and re-validates all bindings at `RuntimeStartRequest::validate()`.
+- **R05 (P1): Terminal StatusChanged Event Stream Finalization**: `RuntimeEventKind::is_terminal()` recognizes `StatusChanged` with terminal states `Stopped`, `Completed`, `Failed`, finalizing hub and subscription streams.
+- **R06 (P1): `send()` Lifecycle Error Precedence**: `FakeAgentRuntime::send()` validates session reference ownership and terminal states before evaluating `fail_send`.
+- **R07 (P2): Registry Worker Panic Attribution**: `RuntimeRegistry::discover_all()` tracks implementation identity across task panics and cancellations on `JoinSet` and reports typed sanitized failures in `outcome.failures`.
+- **R08 (P1): Multi-URL and Query Parameter Credential Sanitization**: `sanitize_error_message()` iteratively processes and redacts all credential-bearing URIs and query parameters without early truncation.
+- **R09 (P2): ReadOnly Workspace Policy Demonstrated Enforcement**: Fail closed on `ExecutionWorkspace::SharedSource` under all access modes (including `ReadOnly`) with `RuntimeError::InvalidWorkspaceAccess` pending M11 verified containment primitives.
+- **R10 (P2): Documentation & Evidence Alignment**: Comprehensive alignment across architecture docs, roadmap, trait signatures, and 51 passing tests (49 contract regression tests + 2 unit tests).
 
 ---
 

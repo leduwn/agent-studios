@@ -139,11 +139,21 @@ impl RuntimeRegistry {
                 .collect()
         }; // Lock dropped before await
 
+        let task_map = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            tokio::task::Id,
+            RuntimeImplementationId,
+        >::new()));
+
         let mut join_set = JoinSet::new();
-        for (id, runtime) in entries {
+        for (id, runtime) in entries.clone() {
+            let task_map = Arc::clone(&task_map);
+            let impl_id = id.clone();
             join_set.spawn(async move {
+                if let Some(task_id) = tokio::task::try_id() {
+                    task_map.lock().unwrap().insert(task_id, impl_id.clone());
+                }
                 let res = runtime.discover().await;
-                (id, res)
+                (impl_id, res)
             });
         }
 
@@ -151,6 +161,8 @@ impl RuntimeRegistry {
             RuntimeImplementationId,
             Result<Vec<DiscoveredRuntimeInstance>, RuntimeError>,
         > = BTreeMap::new();
+        let mut worker_failures: BTreeMap<RuntimeImplementationId, SanitizedRuntimeMessage> =
+            BTreeMap::new();
 
         while let Some(join_res) = join_set.join_next().await {
             match join_res {
@@ -158,12 +170,34 @@ impl RuntimeRegistry {
                     collected.insert(id, discover_res);
                 }
                 Err(panic_err) => {
-                    tracing::error!("Runtime discovery worker panicked: {:?}", panic_err);
+                    let task_id = panic_err.id();
+                    let attributed_id = task_map.lock().unwrap().remove(&task_id);
+                    let reason = if panic_err.is_panic() {
+                        format!("Runtime discovery worker panicked: {panic_err}")
+                    } else {
+                        format!("Runtime discovery worker cancelled: {panic_err}")
+                    };
+                    tracing::error!("{reason}");
+                    if let Some(id) = attributed_id {
+                        worker_failures.insert(id, SanitizedRuntimeMessage::new(reason));
+                    }
                 }
             }
         }
 
         let mut outcome = RegistryDiscoveryOutcome::new();
+
+        // Attribute any remaining unaccounted-for implementations from entries
+        for (id, _) in entries {
+            if !collected.contains_key(&id) && !worker_failures.contains_key(&id) {
+                worker_failures.insert(
+                    id.clone(),
+                    SanitizedRuntimeMessage::new(
+                        "Runtime discovery task failed unexpectedly without result",
+                    ),
+                );
+            }
+        }
 
         // Iterate in deterministic sorted BTreeMap key order
         for (id, res) in collected {
@@ -177,6 +211,10 @@ impl RuntimeRegistry {
                         .insert(id, SanitizedRuntimeMessage::new(err.to_string()));
                 }
             }
+        }
+
+        for (id, failure) in worker_failures {
+            outcome.failures.insert(id, failure);
         }
 
         outcome

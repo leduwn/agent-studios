@@ -155,13 +155,50 @@ pub enum EnvironmentBindingSource {
 }
 
 /// Typed environment variable binding replacing raw plaintext credential maps.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Private fields guarantee invariant enforcement via constructors and custom serde deserialization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EnvironmentVariableBinding {
-    pub name: String,
-    pub source: EnvironmentBindingSource,
+    name: String,
+    source: EnvironmentBindingSource,
 }
 
 impl EnvironmentVariableBinding {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn source(&self) -> &EnvironmentBindingSource {
+        &self.source
+    }
+
+    pub fn validate(&self) -> Result<(), RuntimeError> {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::invalid_configuration(
+                "Environment variable name cannot be empty",
+            ));
+        }
+        let upper = trimmed.to_uppercase();
+        match &self.source {
+            EnvironmentBindingSource::Literal { value } => {
+                for keyword in FORBIDDEN_SECRET_KEYWORDS {
+                    if upper.contains(keyword) {
+                        return Err(RuntimeError::invalid_configuration(format!(
+                            "Environment variable name '{trimmed}' contains forbidden credential keyword '{keyword}'; secret bindings must use EnvironmentBindingSource::Secret"
+                        )));
+                    }
+                }
+                NonSecretValue::new(value.as_str())?;
+            }
+            EnvironmentBindingSource::Secret { secret } => {
+                secret
+                    .validate()
+                    .map_err(|e| RuntimeError::invalid_configuration(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn literal(
         name: impl Into<String>,
         value: impl Into<String>,
@@ -205,6 +242,27 @@ impl EnvironmentVariableBinding {
             name: trimmed.to_string(),
             source: EnvironmentBindingSource::Secret { secret },
         })
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentVariableBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawBinding {
+            name: String,
+            source: EnvironmentBindingSource,
+        }
+
+        let raw = RawBinding::deserialize(deserializer)?;
+        let binding = Self {
+            name: raw.name.trim().to_string(),
+            source: raw.source,
+        };
+        binding.validate().map_err(serde::de::Error::custom)?;
+        Ok(binding)
     }
 }
 
@@ -371,15 +429,40 @@ impl RuntimeStartRequest {
         Ok(self)
     }
 
-    /// Validates start request invariants, enforcing workspace isolation rules.
+    /// Validates start request invariants, enforcing workspace isolation rules,
+    /// environment variable binding integrity, and metadata credential sanitization.
     pub fn validate(&self) -> Result<(), RuntimeError> {
-        if self.workspace_access_mode == WorkspaceAccessMode::Mutating
-            && matches!(self.workspace, ExecutionWorkspace::SharedSource { .. })
-        {
-            return Err(RuntimeError::invalid_configuration(
-                "ExecutionWorkspace::SharedSource is forbidden for mutating execution; use ExecutionWorkspace::Managed or configure WorkspaceAccessMode::ReadOnly",
+        // Enforce strict workspace isolation (SharedSource strictly forbidden under all access modes pending M11)
+        if matches!(self.workspace, ExecutionWorkspace::SharedSource { .. }) {
+            return Err(RuntimeError::invalid_workspace_access(
+                "ExecutionWorkspace::SharedSource is strictly forbidden under all access modes pending M11 verified containment isolation",
             ));
         }
+
+        // Re-validate all environment variable bindings
+        for binding in &self.environment_bindings {
+            binding.validate()?;
+        }
+
+        // Validate metadata keys and values
+        for (key, val) in &self.metadata {
+            let trimmed_key = key.trim();
+            if trimmed_key.is_empty() {
+                return Err(RuntimeError::invalid_configuration(
+                    "Metadata key cannot be empty",
+                ));
+            }
+            let upper_key = trimmed_key.to_uppercase();
+            for keyword in FORBIDDEN_SECRET_KEYWORDS {
+                if upper_key.contains(keyword) {
+                    return Err(RuntimeError::invalid_configuration(format!(
+                        "Metadata key '{trimmed_key}' contains forbidden credential keyword '{keyword}'"
+                    )));
+                }
+            }
+            NonSecretValue::new(val.as_str())?;
+        }
+
         Ok(())
     }
 }

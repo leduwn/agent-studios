@@ -468,13 +468,6 @@ impl AgentRuntime for FakeAgentRuntime {
             input: input.clone(),
         });
 
-        if let Some(reason) = self.fail_send.read().await.as_ref() {
-            return Err(RuntimeError::send_failed(
-                session.session_id,
-                reason.clone(),
-            ));
-        }
-
         let mut sessions = self.sessions.write().await;
         let session_state = self.validate_session_ref_mut(session, &mut sessions)?;
 
@@ -483,6 +476,13 @@ impl AgentRuntime for FakeAgentRuntime {
                 session.session_id,
                 session_state.state,
                 "send",
+            ));
+        }
+
+        if let Some(reason) = self.fail_send.read().await.as_ref() {
+            return Err(RuntimeError::send_failed(
+                session.session_id,
+                reason.clone(),
             ));
         }
 
@@ -693,17 +693,9 @@ impl AgentRuntime for FakeAgentRuntime {
             ));
         }
 
-        let prev = session_state.state;
+        let _prev = session_state.state;
         session_state.state = RuntimeLifecycleState::Stopped;
         session_state.handle.state = RuntimeLifecycleState::Stopped;
-
-        session_state
-            .event_hub
-            .emit(RuntimeEventKind::StatusChanged {
-                previous_state: prev,
-                new_state: RuntimeLifecycleState::Stopped,
-            })
-            .await?;
 
         session_state
             .event_hub

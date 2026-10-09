@@ -83,6 +83,9 @@ impl RuntimeEventKind {
         matches!(
             self,
             Self::Stopped | Self::Completed { .. } | Self::Failed { .. }
+        ) || matches!(
+            self,
+            Self::StatusChanged { new_state, .. } if new_state.is_terminal()
         )
     }
 
@@ -253,10 +256,23 @@ impl EventBoundaryValidator {
     pub fn expected_sequence(&self) -> u64 {
         self.expected_sequence
     }
+
+    pub fn terminal_state(&self) -> Option<RuntimeLifecycleState> {
+        self.terminal_state
+    }
 }
 
 /// Default maximum events retained in in-memory session history for late replay.
 pub const DEFAULT_EVENT_RETENTION: usize = 1024;
+
+/// Internal synchronized state for SessionEventHub.
+/// Holds boundary validator, replay history buffer, and earliest retained sequence under one lock.
+#[derive(Debug)]
+struct HubState {
+    validator: EventBoundaryValidator,
+    history: VecDeque<RuntimeEvent>,
+    earliest_retained_sequence: u64,
+}
 
 /// Authoritative event hub managing sequence generation, bounded replay history,
 /// and live event broadcasting for an external runtime session.
@@ -264,11 +280,8 @@ pub struct SessionEventHub {
     session_id: RuntimeSessionId,
     instance_id: RuntimeInstanceId,
     retention_limit: usize,
-    sequencer: EventSequencer,
-    history: Arc<RwLock<VecDeque<RuntimeEvent>>>,
+    state: Arc<RwLock<HubState>>,
     live_tx: broadcast::Sender<RuntimeEvent>,
-    terminal_state: Arc<RwLock<Option<RuntimeLifecycleState>>>,
-    earliest_retained_sequence: Arc<RwLock<u64>>,
 }
 
 impl SessionEventHub {
@@ -277,16 +290,19 @@ impl SessionEventHub {
         instance_id: RuntimeInstanceId,
         retention_limit: usize,
     ) -> Self {
+        let retention_limit = retention_limit.max(1);
         let (live_tx, _) = broadcast::channel(retention_limit.max(128));
+        let validator = EventBoundaryValidator::new(session_id, instance_id);
         Self {
             session_id,
             instance_id,
             retention_limit,
-            sequencer: EventSequencer::new(),
-            history: Arc::new(RwLock::new(VecDeque::with_capacity(retention_limit))),
+            state: Arc::new(RwLock::new(HubState {
+                validator,
+                history: VecDeque::with_capacity(retention_limit),
+                earliest_retained_sequence: 1,
+            })),
             live_tx,
-            terminal_state: Arc::new(RwLock::new(None)),
-            earliest_retained_sequence: Arc::new(RwLock::new(1)),
         }
     }
 
@@ -300,82 +316,49 @@ impl SessionEventHub {
 
     /// Emits a new event into the session event stream.
     /// Atomically assigns monotonic sequence number, verifies non-terminal invariant,
-    /// appends to bounded replay history, and broadcasts to live subscribers.
+    /// appends to bounded replay history, and broadcasts to live subscribers
+    /// under a single unified synchronization boundary.
     pub async fn emit(&self, kind: RuntimeEventKind) -> Result<RuntimeEvent, RuntimeError> {
-        let mut term_guard = self.terminal_state.write().await;
-        if let Some(terminal) = *term_guard {
+        let mut state = self.state.write().await;
+        if let Some(terminal) = state.validator.terminal_state() {
             return Err(RuntimeError::EventAfterTerminalState {
                 session_id: self.session_id,
                 terminal_state: terminal,
-                attempted_sequence: self.sequencer.current_sequence() + 1,
+                attempted_sequence: state.validator.expected_sequence(),
             });
         }
 
-        let sequence = self.sequencer.next_sequence();
-        let event = RuntimeEvent::new(self.session_id, sequence, kind.clone());
+        let sequence = state.validator.expected_sequence();
+        let event = RuntimeEvent::new(self.session_id, sequence, kind);
 
-        if kind.is_terminal() {
-            *term_guard = kind.to_lifecycle_state();
-        }
-        drop(term_guard);
+        state.validator.validate(&event)?;
 
-        let mut hist_guard = self.history.write().await;
-        if hist_guard.len() >= self.retention_limit {
-            hist_guard.pop_front();
-            let mut earliest_guard = self.earliest_retained_sequence.write().await;
-            if let Some(first) = hist_guard.front() {
-                *earliest_guard = first.sequence;
+        if state.history.len() >= self.retention_limit {
+            state.history.pop_front();
+            if let Some(first) = state.history.front() {
+                state.earliest_retained_sequence = first.sequence;
             }
         }
-        hist_guard.push_back(event.clone());
-        drop(hist_guard);
+        state.history.push_back(event.clone());
 
         let _ = self.live_tx.send(event.clone());
         Ok(event)
     }
 
     /// Ingests an externally constructed event into the hub, enforcing sequence validation.
+    /// Routes through EventBoundaryValidator and only mutates hub state on complete validation success.
     pub async fn ingest(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
-        let mut term_guard = self.terminal_state.write().await;
-        if let Some(terminal) = *term_guard {
-            return Err(RuntimeError::EventAfterTerminalState {
-                session_id: self.session_id,
-                terminal_state: terminal,
-                attempted_sequence: event.sequence,
-            });
-        }
+        let mut state = self.state.write().await;
+        // Validate against state machine - rejects before mutating any hub state
+        state.validator.validate(&event)?;
 
-        if event.session_id != self.session_id {
-            return Err(RuntimeError::EventSessionMismatch {
-                expected: self.session_id,
-                actual: event.session_id,
-                sequence: event.sequence,
-            });
-        }
-
-        if event.sequence == 0 {
-            return Err(RuntimeError::InvalidEventSequence {
-                session_id: self.session_id,
-                sequence: 0,
-                reason: SanitizedRuntimeMessage::new("Sequence cannot be 0"),
-            });
-        }
-
-        if event.kind.is_terminal() {
-            *term_guard = event.kind.to_lifecycle_state();
-        }
-        drop(term_guard);
-
-        let mut hist_guard = self.history.write().await;
-        if hist_guard.len() >= self.retention_limit {
-            hist_guard.pop_front();
-            let mut earliest_guard = self.earliest_retained_sequence.write().await;
-            if let Some(first) = hist_guard.front() {
-                *earliest_guard = first.sequence;
+        if state.history.len() >= self.retention_limit {
+            state.history.pop_front();
+            if let Some(first) = state.history.front() {
+                state.earliest_retained_sequence = first.sequence;
             }
         }
-        hist_guard.push_back(event.clone());
-        drop(hist_guard);
+        state.history.push_back(event.clone());
 
         let _ = self.live_tx.send(event);
         Ok(())
@@ -391,13 +374,16 @@ impl SessionEventHub {
         let live_rx = self.live_tx.subscribe();
 
         // 2. Snapshot history under read lock
-        let hist_guard = self.history.read().await;
-        let earliest = *self.earliest_retained_sequence.read().await;
+        let state = self.state.read().await;
+        let earliest = state.earliest_retained_sequence;
 
         let requested_seq = after_sequence.unwrap_or(0);
+        let expected_first_seq = requested_seq.saturating_add(1);
 
         // Check if requested sequence is older than retained history
-        if requested_seq > 0 && requested_seq < earliest && !hist_guard.is_empty() {
+        // When earliest is E, after_sequence = Some(E - 1) means expected_first_seq = E, which is valid.
+        // If after_sequence = None (requested_seq = 0), expected_first_seq = 1. If earliest > 1, history was evicted.
+        if !state.history.is_empty() && expected_first_seq < earliest {
             return Err(RuntimeError::EventRetentionExceeded {
                 session_id: self.session_id,
                 requested_sequence: requested_seq,
@@ -405,12 +391,13 @@ impl SessionEventHub {
             });
         }
 
-        let replay_events: VecDeque<RuntimeEvent> = hist_guard
+        let replay_events: VecDeque<RuntimeEvent> = state
+            .history
             .iter()
             .filter(|ev| ev.sequence > requested_seq)
             .cloned()
             .collect();
-        drop(hist_guard);
+        drop(state);
 
         let last_seen_sequence = requested_seq;
 
@@ -425,8 +412,8 @@ impl SessionEventHub {
 
     /// Returns a snapshot of all recorded events in memory.
     pub async fn recorded_events(&self) -> Vec<RuntimeEvent> {
-        let hist_guard = self.history.read().await;
-        hist_guard.iter().cloned().collect()
+        let state = self.state.read().await;
+        state.history.iter().cloned().collect()
     }
 }
 

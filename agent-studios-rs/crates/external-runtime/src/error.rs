@@ -31,7 +31,17 @@ fn extract_token_len(after: &str) -> usize {
     } else {
         after
             .char_indices()
-            .find(|(_, c)| c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\'')
+            .find(|(_, c)| {
+                c.is_whitespace()
+                    || *c == ';'
+                    || *c == '&'
+                    || *c == '"'
+                    || *c == '\''
+                    || *c == '#'
+                    || *c == '<'
+                    || *c == '>'
+                    || *c == ')'
+            })
             .map(|(i, _)| i)
             .unwrap_or(after.len())
     }
@@ -47,110 +57,92 @@ fn extract_val_span(after: &str) -> (usize, usize) {
     (ws_len, token_len)
 }
 
+fn redact_prefix_pattern(sanitized: &mut String, prefix: &str, replacement: &str) {
+    let mut cursor = 0;
+    while cursor < sanitized.len() {
+        if let Some(rel) = sanitized[cursor..].find(prefix) {
+            let idx = cursor + rel;
+            let after = &sanitized[idx..];
+            if after.starts_with(replacement) {
+                cursor = idx + replacement.len();
+                continue;
+            }
+            let token_bytes = extract_token_len(after);
+            if token_bytes > 0 {
+                sanitized.replace_range(idx..idx + token_bytes, replacement);
+                cursor = idx + replacement.len();
+            } else {
+                cursor = idx + prefix.len();
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+fn redact_kv_pattern(sanitized: &mut String, prefix: &str, replacement: &str) {
+    let mut cursor = 0;
+    while cursor < sanitized.len() {
+        if let Some(rel) = find_ascii_case_insensitive(&sanitized[cursor..], prefix) {
+            let idx = cursor + rel;
+            let val_start = idx + prefix.len();
+            let after = &sanitized[val_start..];
+            if after.starts_with("[REDACTED") {
+                cursor = val_start + "[REDACTED".len();
+                continue;
+            }
+            let (ws_len, val_bytes) = extract_val_span(after);
+            if val_bytes > 0 {
+                sanitized.replace_range(idx..val_start + ws_len + val_bytes, replacement);
+                cursor = idx + replacement.len();
+            } else {
+                cursor = val_start;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 /// Strips common secret patterns (API keys, bearer tokens, passwords) from diagnostic strings.
+/// Processes all occurrences across multiple URLs and query parameters without early truncation.
 pub fn sanitize_error_message(input: &str) -> String {
     let mut sanitized = input.to_string();
 
     // Redact sk-ant-* Anthropic API keys directly
-    while let Some(idx) = sanitized.find("sk-ant-") {
-        let after = &sanitized[idx..];
-        let token_bytes = extract_token_len(after);
-        if token_bytes > 0 {
-            sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_API_KEY]");
-        } else {
-            break;
-        }
-    }
+    redact_prefix_pattern(&mut sanitized, "sk-ant-", "[REDACTED_API_KEY]");
 
     // Redact ghp_* GitHub tokens directly
-    while let Some(idx) = sanitized.find("ghp_") {
-        let after = &sanitized[idx..];
-        let token_bytes = extract_token_len(after);
-        if token_bytes > 0 {
-            sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_GITHUB_TOKEN]");
-        } else {
-            break;
-        }
-    }
+    redact_prefix_pattern(&mut sanitized, "ghp_", "[REDACTED_GITHUB_TOKEN]");
 
     // Redact other known secret prefixes
     for prefix in &["gho_", "glpat-", "xoxb-", "xoxp-", "npm_"] {
-        while let Some(idx) = sanitized.find(prefix) {
-            let after = &sanitized[idx..];
-            let token_bytes = extract_token_len(after);
-            if token_bytes > 0 {
-                sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_TOKEN]");
-            } else {
-                break;
-            }
-        }
+        redact_prefix_pattern(&mut sanitized, prefix, "[REDACTED_TOKEN]");
     }
 
     // Redact Bearer tokens
-    while let Some(idx) = find_ascii_case_insensitive(&sanitized, "bearer ") {
-        let after = &sanitized[idx + 7..];
-        if after.starts_with("[REDACTED") {
-            break;
-        }
-        let (ws_len, token_bytes) = extract_val_span(after);
-        if token_bytes > 0 {
-            sanitized.replace_range(
-                idx..idx + 7 + ws_len + token_bytes,
-                "[REDACTED_BEARER_TOKEN]",
-            );
-        } else {
-            break;
-        }
-    }
+    redact_kv_pattern(&mut sanitized, "bearer ", "[REDACTED_BEARER_TOKEN]");
 
-    // Redact api_key / apikey / x-api-key patterns
-    for prefix in &["api_key=", "api-key=", "apikey=", "api_key:", "x-api-key:"] {
-        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
-            let val_start = idx + prefix.len();
-            let after = &sanitized[val_start..];
-            if after.starts_with("[REDACTED") {
-                break;
-            }
-            let (ws_len, val_bytes) = extract_val_span(after);
-            if val_bytes > 0 {
-                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_API_KEY]");
-            } else {
-                break;
-            }
-        }
+    // Redact api_key / apikey / x-api-key / key= patterns
+    for prefix in &[
+        "api_key=",
+        "api-key=",
+        "apikey=",
+        "api_key:",
+        "x-api-key:",
+        "key=",
+    ] {
+        redact_kv_pattern(&mut sanitized, prefix, "[REDACTED_API_KEY]");
     }
 
     // Redact secret= patterns
     for prefix in &["secret=", "secret:", "password=", "passwd=", "pwd="] {
-        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
-            let val_start = idx + prefix.len();
-            let after = &sanitized[val_start..];
-            if after.starts_with("[REDACTED") {
-                break;
-            }
-            let (ws_len, val_bytes) = extract_val_span(after);
-            if val_bytes > 0 {
-                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_SECRET]");
-            } else {
-                break;
-            }
-        }
+        redact_kv_pattern(&mut sanitized, prefix, "[REDACTED_SECRET]");
     }
 
     // Redact general sk- tokens (OpenAI project/admin keys, etc.)
     for prefix in &["sk-proj-", "sk-admin-", "sk-svcacct-", "sk-"] {
-        while let Some(idx) = sanitized.find(prefix) {
-            let after = &sanitized[idx..];
-            if after.starts_with("[REDACTED") {
-                break;
-            }
-            let token_bytes = extract_token_len(after);
-            if token_bytes > 0 {
-                sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_API_KEY]");
-            } else {
-                break;
-            }
-        }
+        redact_prefix_pattern(&mut sanitized, prefix, "[REDACTED_API_KEY]");
     }
 
     // Redact token=, token:, access_token=, refresh_token=, auth=, authorization:
@@ -162,38 +154,46 @@ pub fn sanitize_error_message(input: &str) -> String {
         "auth=",
         "authorization:",
     ] {
-        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
-            let val_start = idx + prefix.len();
-            let after = &sanitized[val_start..];
-            if after.starts_with("[REDACTED") {
-                break;
-            }
-            let (ws_len, val_bytes) = extract_val_span(after);
-            if val_bytes > 0 {
-                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_TOKEN]");
-            } else {
-                break;
-            }
-        }
+        redact_kv_pattern(&mut sanitized, prefix, "[REDACTED_TOKEN]");
     }
 
-    // Redact embedded user:password credentials in URIs (e.g. https://user:pass@host)
-    while let Some(idx) = sanitized.find("://") {
-        let after_scheme = &sanitized[idx + 3..];
-        if let Some(at_idx) = after_scheme.find('@') {
-            let user_info = &after_scheme[..at_idx];
-            if let Some(colon_idx) = user_info.find(':') {
-                let pass_start = idx + 3 + colon_idx + 1;
-                let pass_end = idx + 3 + at_idx;
-                if pass_end > pass_start
-                    && !sanitized[pass_start..pass_end].starts_with("[REDACTED")
-                {
-                    sanitized.replace_range(pass_start..pass_end, "[REDACTED_PASSWORD]");
-                    continue;
+    // Redact embedded user:password credentials in URIs across all occurrences (e.g. https://user:pass@host)
+    let mut uri_search_start = 0;
+    while uri_search_start < sanitized.len() {
+        if let Some(rel_scheme) = sanitized[uri_search_start..].find("://") {
+            let scheme_pos = uri_search_start + rel_scheme;
+            let after_scheme_pos = scheme_pos + 3;
+            let after_scheme = &sanitized[after_scheme_pos..];
+
+            // Authority ends at first '/', '?', '#', whitespace, quote, or delimiter
+            let authority_len = after_scheme
+                .char_indices()
+                .find(|(_, c)| {
+                    matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | '`') || c.is_whitespace()
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(after_scheme.len());
+
+            let authority = &after_scheme[..authority_len];
+            if let Some(at_idx) = authority.find('@') {
+                let user_info = &authority[..at_idx];
+                if let Some(colon_idx) = user_info.find(':') {
+                    let pass_start = after_scheme_pos + colon_idx + 1;
+                    let pass_end = after_scheme_pos + at_idx;
+                    if pass_end > pass_start {
+                        let current_pass = &sanitized[pass_start..pass_end];
+                        if !current_pass.starts_with("[REDACTED") {
+                            sanitized.replace_range(pass_start..pass_end, "[REDACTED_PASSWORD]");
+                            uri_search_start = pass_start + "[REDACTED_PASSWORD]".len();
+                            continue;
+                        }
+                    }
                 }
             }
+            uri_search_start = after_scheme_pos;
+        } else {
+            break;
         }
-        break;
     }
 
     sanitized
@@ -444,11 +444,21 @@ pub enum RuntimeError {
         received_sequence: u64,
     },
 
+    #[error("Invalid workspace access for session or instance: {reason}")]
+    InvalidWorkspaceAccess { reason: SanitizedRuntimeMessage },
+
     #[error("Internal runtime error: {reason}")]
     Internal { reason: SanitizedRuntimeMessage },
 }
 
 impl RuntimeError {
+    /// Constructs an InvalidWorkspaceAccess error.
+    pub fn invalid_workspace_access(reason: impl Into<SanitizedRuntimeMessage>) -> Self {
+        Self::InvalidWorkspaceAccess {
+            reason: reason.into(),
+        }
+    }
+
     /// Constructs an InstanceUnavailable error.
     pub fn instance_unavailable(
         instance_id: RuntimeInstanceId,

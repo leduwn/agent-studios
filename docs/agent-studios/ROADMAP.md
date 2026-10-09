@@ -116,12 +116,12 @@
 
 ### M10 & M10.1: External Runtime Interface & Contract Hardening [COMPLETED]
 - Establish vendor-neutral `agent-studios-external-runtime` crate with zero provider coupling.
-- Define asynchronous `AgentRuntime` lifecycle trait (`discover`, `capabilities`, `start`, `send`, `interrupt`, `resume`, `stop`, `status`, `events`).
+- Define asynchronous `AgentRuntime` lifecycle trait (`discover`, `capabilities`, `start`, `send`, `interrupt`, `resume`, `stop`, `status`, `events`, `events_after`).
 - Strongly-typed identifier families with wire collision prevention (`RuntimeImplementationId`, `rt-inst-<uuid>`, `rt-sess-<uuid>`).
 - Strict lifecycle state machine with active/resumable `Interrupted` and fail-closed terminal transitions (`Stopped`, `Completed`, `Failed`).
 - Tristate capability profiles across 16 dimensions (`Supported`, `Unsupported`, `Unknown`).
 - Monotonically numbered event streams with typed event kinds and regex-free secret scrubbing.
-- Remediated all 10 M10.1 contract review findings (P1-01 to P1-06, P2-01 to P2-04):
+- Remediated all 10 initial M10.1 contract review findings (P1-01 to P1-06, P2-01 to P2-04):
   - P1-01: Reliable event startup, subscription, and replay (`SessionEventHub`, `RuntimeEventSubscription`, replay before broadcast, gap/lag detection, `EventRetentionExceeded`).
   - P1-02: Elimination of plaintext credential bypass (`NonSecretValue`, forbidden keywords/prefixes, custom serde validation).
   - P1-03: Strict pre-spawn start validation (`validate_instance_start`, supported configuration checks, workspace isolation).
@@ -132,7 +132,18 @@
   - P2-02: Diagnostic sanitization coverage (case-insensitive, quoted, query string, basic auth URI scrubbing).
   - P2-03: `ExecutionWorkspace` isolation policy (`WorkspaceAccessMode::Mutating` prohibits `SharedSource`).
   - P2-04: Fault-tolerant `RuntimeRegistry` discovery (`JoinSet` concurrency, lock drop before await, `RegistryDiscoveryOutcome` failure isolation).
-- Full 40-test contract regression matrix covering all findings.
+- Remediated all 10 second-round source review findings (R01 to R10):
+  - R01: `SessionEventHub::ingest()` routes through `EventBoundaryValidator` preventing state corruption.
+  - R02: `SessionEventHub::emit()` serializes sequence, validation, history, and broadcast under atomic `HubState` lock.
+  - R03: Enforce strict `after_sequence = N` replay offset semantics and retention exceeded boundaries.
+  - R04: Encapsulate `EnvironmentVariableBinding` private fields and enforce serde deserialization invariants.
+  - R05: Finalize event streams on terminal `StatusChanged` events (`Stopped`, `Completed`, `Failed`).
+  - R06: Enforce canonical session ref and terminal state check precedence in `FakeAgentRuntime::send()`.
+  - R07: Attribute `JoinSet` discovery worker panics and cancellations to runtime implementation IDs.
+  - R08: Iterative credential sanitization across multi-URL strings and query parameters without truncation.
+  - R09: Strict fail-closed rejection of `ExecutionWorkspace::SharedSource` under all access modes.
+  - R10: Full documentation, roadmap, and evidence alignment across all contracts.
+- 51-test contract verification suite (49 contract regression tests + 2 unit tests) passing with zero failures.
 
 ### M11: OpenCode Runtime Adapter [PLANNED]
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.

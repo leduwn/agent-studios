@@ -5,9 +5,21 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_studios_external_runtime::*;
+use agent_studios_protocol::id::WorktreeId;
 use agent_studios_protocol::worktree::ExecutionWorkspace;
 use agent_studios_provider::{ProviderInstanceId, SecretBackend, SecretReference};
 use uuid::Uuid;
+
+fn valid_test_workspace() -> ExecutionWorkspace {
+    ExecutionWorkspace::managed(
+        WorktreeId::new(),
+        PathBuf::from("/worktree"),
+        PathBuf::from("/worktree"),
+        PathBuf::from("/source"),
+        PathBuf::from("/source"),
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+}
 
 // ============================================================================
 // Milestone M10.1: 24 Contract Regression Tests
@@ -51,7 +63,7 @@ async fn test_01_multi_instance_discovery_authority() {
 #[tokio::test]
 async fn test_02_instance_ref_validation_at_start() {
     let runtime = FakeAgentRuntime::new("opencode");
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     // Case 1: Mismatched implementation ID
     let mismatched_impl = RuntimeImplementationId::new("claude-code").unwrap();
@@ -91,7 +103,7 @@ async fn test_03_session_ref_ownership_validation() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -151,7 +163,7 @@ async fn test_04_session_instance_mismatch_error() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -189,7 +201,7 @@ async fn test_05_zero_plaintext_secrets_in_start_request() {
     let runtime_impl = RuntimeImplementationId::new("opencode").unwrap();
     let inst_id = RuntimeInstanceId::generate();
     let inst_ref = RuntimeInstanceRef::new(runtime_impl, inst_id);
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let secret =
         SecretReference::new(SecretBackend::EnvironmentVariable, "OPENCODE_SECRET_TOKEN").unwrap();
@@ -201,14 +213,14 @@ async fn test_05_zero_plaintext_secrets_in_start_request() {
         .unwrap();
 
     assert_eq!(req.environment_bindings.len(), 2);
-    assert_eq!(req.environment_bindings[0].name, "DEBUG");
+    assert_eq!(req.environment_bindings[0].name(), "DEBUG");
     assert!(matches!(
-        req.environment_bindings[0].source,
+        req.environment_bindings[0].source(),
         EnvironmentBindingSource::Literal { .. }
     ));
-    assert_eq!(req.environment_bindings[1].name, "API_KEY");
+    assert_eq!(req.environment_bindings[1].name(), "API_KEY");
     assert!(matches!(
-        req.environment_bindings[1].source,
+        req.environment_bindings[1].source(),
         EnvironmentBindingSource::Secret { .. }
     ));
 
@@ -249,7 +261,7 @@ async fn test_07_stop_idempotency_on_stopped_session() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -287,7 +299,7 @@ async fn test_08_stop_rejection_on_completed_session() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -328,7 +340,7 @@ async fn test_09_stop_rejection_on_failed_session() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -374,7 +386,7 @@ async fn test_10_stop_capability_enforcement() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -409,7 +421,7 @@ async fn test_11_interrupt_capability_enforcement() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -445,7 +457,7 @@ async fn test_12_resume_capability_enforcement() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -510,7 +522,7 @@ async fn test_14_non_resurrection_from_stopped() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -546,7 +558,7 @@ async fn test_15_non_resurrection_from_completed() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -585,7 +597,7 @@ async fn test_16_non_resurrection_from_failed() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -678,7 +690,7 @@ async fn test_19_event_sequence_number_authority() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -720,7 +732,7 @@ async fn test_20_session_started_event_correlation() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
 
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
@@ -800,7 +812,7 @@ async fn test_23_runtime_config_ref_integrity() {
 
     assert_eq!(inst_ref.config_ref.as_ref().unwrap(), &config_ref);
 
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws);
     assert_eq!(req.runtime_config_ref().unwrap(), &config_ref);
 }
@@ -813,7 +825,7 @@ async fn test_24_full_lifecycle_e2e_contract() {
     let inst_id = instances[0].instance_id;
 
     let inst_ref = RuntimeInstanceRef::new(runtime.implementation_id().clone(), inst_id);
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws).with_initial_prompt("Hello assistant");
 
     // 1. Start session
@@ -907,7 +919,7 @@ async fn test_matrix_a_lifecycle_normal_completion() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws);
 
     let handle = runtime.start(req).await.unwrap();
@@ -961,7 +973,7 @@ async fn test_25_event_subscription_replay_and_live_stream() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
         .await
@@ -984,7 +996,7 @@ async fn test_25_event_subscription_replay_and_live_stream() {
         events.push(event);
     }
 
-    assert_eq!(events.len(), 5);
+    assert_eq!(events.len(), 4);
     assert_eq!(events[0].sequence, 1);
     assert!(matches!(
         events[0].kind,
@@ -1001,12 +1013,7 @@ async fn test_25_event_subscription_replay_and_live_stream() {
         RuntimeEventKind::OutputDelta { .. }
     ));
     assert_eq!(events[3].sequence, 4);
-    assert!(matches!(
-        events[3].kind,
-        RuntimeEventKind::StatusChanged { .. }
-    ));
-    assert_eq!(events[4].sequence, 5);
-    assert!(matches!(events[4].kind, RuntimeEventKind::Stopped));
+    assert!(matches!(events[3].kind, RuntimeEventKind::Stopped));
 
     // Next event after close is Ok(None)
     assert!(sub.next_event().await.unwrap().is_none());
@@ -1020,7 +1027,7 @@ async fn test_26_event_subscription_replay_from_offset() {
         runtime.implementation_id().clone(),
         instances[0].instance_id,
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
         .await
@@ -1046,13 +1053,11 @@ async fn test_26_event_subscription_replay_from_offset() {
 
     let second = sub.next_event().await.unwrap().unwrap();
     assert_eq!(second.sequence, 4);
+    assert!(matches!(second.kind, RuntimeEventKind::OutputDelta { .. }));
 
     let third = sub.next_event().await.unwrap().unwrap();
     assert_eq!(third.sequence, 5);
-
-    let fourth = sub.next_event().await.unwrap().unwrap();
-    assert_eq!(fourth.sequence, 6);
-    assert!(matches!(fourth.kind, RuntimeEventKind::Stopped));
+    assert!(matches!(third.kind, RuntimeEventKind::Stopped));
 
     assert!(sub.next_event().await.unwrap().is_none());
 }
@@ -1064,8 +1069,16 @@ async fn test_27_event_retention_exceeded_error() {
     // Tiny retention buffer of 3 events
     let hub = SessionEventHub::new(session_id, instance_id, 3);
 
-    // Emit 6 events (seq 1 to 6)
-    for _ in 0..6 {
+    // Sequence 1 must be SessionStarted
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    // Emit 5 more events (seq 2 to 6)
+    for _ in 0..5 {
         hub.emit(RuntimeEventKind::OutputDelta {
             text: "delta".to_string(),
         })
@@ -1222,7 +1235,7 @@ async fn test_30_start_request_metadata_and_env_deserialization_safety() {
         RuntimeImplementationId::new("test").unwrap(),
         RuntimeInstanceId::generate(),
     );
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws);
 
     assert!(req.clone().with_metadata("SECRET_CONFIG", "safe").is_err());
@@ -1242,7 +1255,7 @@ async fn test_31_validate_instance_start_unavailable_rejection() {
     );
 
     let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id);
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws);
 
     let err = validate_instance_start(&unavail, &impl_id, &req).unwrap_err();
@@ -1270,7 +1283,7 @@ async fn test_32_validate_instance_start_unsupported_config_rejection() {
 
     // Request specifying unsupported config
     let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id).with_config_ref(cfg_stage);
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let req = RuntimeStartRequest::new(inst_ref, ws);
 
     let err = validate_instance_start(&inst, &impl_id, &req).unwrap_err();
@@ -1293,13 +1306,28 @@ async fn test_33_validate_instance_start_workspace_isolation_rejection() {
     );
 
     let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id);
-    // SharedSource workspace configured for Mutating access
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
-    let req = RuntimeStartRequest::new(inst_ref, ws)
-        .with_workspace_access_mode(WorkspaceAccessMode::Mutating);
 
-    let err = validate_instance_start(&inst, &impl_id, &req).unwrap_err();
-    assert!(matches!(err, RuntimeError::InvalidConfiguration { .. }));
+    // 1. SharedSource workspace configured for Mutating access must fail closed with InvalidWorkspaceAccess
+    let ws_mutating = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req_mutating = RuntimeStartRequest::new(inst_ref.clone(), ws_mutating)
+        .with_workspace_access_mode(WorkspaceAccessMode::Mutating);
+    let err_mutating = validate_instance_start(&inst, &impl_id, &req_mutating).unwrap_err();
+    assert!(
+        matches!(err_mutating, RuntimeError::InvalidWorkspaceAccess { .. }),
+        "Expected InvalidWorkspaceAccess for Mutating, got {:?}",
+        err_mutating
+    );
+
+    // 2. SharedSource workspace configured for ReadOnly access must ALSO fail closed pending M11 (R09)
+    let ws_readonly = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req_readonly = RuntimeStartRequest::new(inst_ref, ws_readonly)
+        .with_workspace_access_mode(WorkspaceAccessMode::ReadOnly);
+    let err_readonly = validate_instance_start(&inst, &impl_id, &req_readonly).unwrap_err();
+    assert!(
+        matches!(err_readonly, RuntimeError::InvalidWorkspaceAccess { .. }),
+        "Expected InvalidWorkspaceAccess for ReadOnly, got {:?}",
+        err_readonly
+    );
 }
 
 #[tokio::test]
@@ -1322,7 +1350,7 @@ async fn test_34_per_instance_capability_authority() {
     runtime.add_instance(inst).await;
 
     let inst_ref = RuntimeInstanceRef::new(impl_id, inst_id);
-    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let ws = valid_test_workspace();
     let handle = runtime
         .start(RuntimeStartRequest::new(inst_ref, ws))
         .await
@@ -1406,4 +1434,445 @@ async fn test_37_registry_parallel_discovery_with_fault_tolerance() {
     assert_eq!(outcome.failures.len(), 1);
     let fail_impl = RuntimeImplementationId::new("runtime-fail").unwrap();
     assert!(outcome.failures.contains_key(&fail_impl));
+}
+
+#[tokio::test]
+async fn test_38_r01_event_hub_ingest_boundary_validation_atomic() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+
+    // 1. Ingest non-sequence 1 start event rejects
+    let invalid_first = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::OutputDelta {
+            text: "premature delta".to_string(),
+        },
+    );
+    let err = hub.ingest(invalid_first).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::InvalidEventSequence { sequence: 1, .. }
+    ));
+    // Verify hub history is still empty (atomic rollback / non-mutation)
+    assert!(hub.recorded_events().await.is_empty());
+
+    // 2. Ingest sequence 1 with mismatched instance ID rejects
+    let foreign_inst = RuntimeInstanceId::generate();
+    let mismatched_start = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id: foreign_inst,
+        },
+    );
+    let err = hub.ingest(mismatched_start).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::InvalidEventSequence { sequence: 1, .. }
+    ));
+    assert!(hub.recorded_events().await.is_empty());
+
+    // 3. Ingest valid sequence 1 SessionStarted succeeds
+    let valid_start = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    hub.ingest(valid_start).await.unwrap();
+    assert_eq!(hub.recorded_events().await.len(), 1);
+
+    // 4. Ingest sequence gap (seq 3 instead of 2) rejects without corrupting state
+    let gap_event = RuntimeEvent::new(
+        session_id,
+        3,
+        RuntimeEventKind::OutputDelta {
+            text: "gap".to_string(),
+        },
+    );
+    let err = hub.ingest(gap_event).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::InvalidEventSequence { sequence: 3, .. }
+    ));
+    assert_eq!(hub.recorded_events().await.len(), 1);
+
+    // 5. Ingest terminal event Stopped
+    let stopped = RuntimeEvent::new(session_id, 2, RuntimeEventKind::Stopped);
+    hub.ingest(stopped).await.unwrap();
+    assert_eq!(hub.recorded_events().await.len(), 2);
+
+    // 6. Ingest after terminal rejects
+    let post_terminal = RuntimeEvent::new(
+        session_id,
+        3,
+        RuntimeEventKind::OutputDelta {
+            text: "after terminal".to_string(),
+        },
+    );
+    let err = hub.ingest(post_terminal).await.unwrap_err();
+    assert!(matches!(err, RuntimeError::EventAfterTerminalState { .. }));
+    assert_eq!(hub.recorded_events().await.len(), 2);
+}
+
+#[tokio::test]
+async fn test_39_r02_event_hub_emit_atomic_serialization_and_terminal_rejection() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+
+    // 1. Emit assigns sequence 1
+    let ev1 = hub
+        .emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ev1.sequence, 1);
+
+    // 2. Emit assigns monotonic sequence 2
+    let ev2 = hub
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "step 1".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(ev2.sequence, 2);
+
+    // 3. Emit terminal event Stopped at sequence 3
+    let ev3 = hub.emit(RuntimeEventKind::Stopped).await.unwrap();
+    assert_eq!(ev3.sequence, 3);
+
+    // 4. Attempted emission after terminal event is atomically rejected
+    let err = hub
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "forbidden".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::EventAfterTerminalState {
+            terminal_state: RuntimeLifecycleState::Stopped,
+            attempted_sequence: 4,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_40_r03_event_hub_subscribe_retention_and_offset_boundary() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    // Capacity 2 buffer
+    let hub = SessionEventHub::new(session_id, instance_id, 2);
+
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    hub.emit(RuntimeEventKind::OutputDelta { text: "1".into() })
+        .await
+        .unwrap();
+    hub.emit(RuntimeEventKind::OutputDelta { text: "2".into() })
+        .await
+        .unwrap();
+    hub.emit(RuntimeEventKind::OutputDelta { text: "3".into() })
+        .await
+        .unwrap();
+
+    // Retained events are sequences 3 and 4. Earliest is 3.
+    // 1. Initial subscription without offset (after_sequence = None) fails with EventRetentionExceeded
+    let err_none = hub.subscribe(None).await.unwrap_err();
+    assert!(matches!(
+        err_none,
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence: 0,
+            earliest_available_sequence: 3,
+            ..
+        }
+    ));
+
+    // 2. Requesting sequence older than retained (e.g. Some(1)) fails
+    let err_old = hub.subscribe(Some(1)).await.unwrap_err();
+    assert!(matches!(
+        err_old,
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence: 1,
+            earliest_available_sequence: 3,
+            ..
+        }
+    ));
+
+    // 3. Boundary offset: after_sequence = Some(E - 1) = Some(2) must SUCCEED and replay sequences 3 and 4
+    let mut sub_bound = hub.subscribe(Some(2)).await.unwrap();
+    let e3 = sub_bound.next_event().await.unwrap().unwrap();
+    assert_eq!(e3.sequence, 3);
+    let e4 = sub_bound.next_event().await.unwrap().unwrap();
+    assert_eq!(e4.sequence, 4);
+
+    // 4. after_sequence = Some(3) replays strictly sequence 4
+    let mut sub_3 = hub.subscribe(Some(3)).await.unwrap();
+    let e4_only = sub_3.next_event().await.unwrap().unwrap();
+    assert_eq!(e4_only.sequence, 4);
+}
+
+#[tokio::test]
+async fn test_41_r04_secret_environment_variable_binding_invariants_and_serde() {
+    // 1. Direct constructor rejects forbidden secret keyword in literal binding
+    let err_lit = EnvironmentVariableBinding::literal("AWS_SECRET_KEY", "plain_val").unwrap_err();
+    assert!(matches!(err_lit, RuntimeError::InvalidConfiguration { .. }));
+
+    let err_tok = EnvironmentVariableBinding::literal("GITHUB_TOKEN", "plain_val").unwrap_err();
+    assert!(matches!(err_tok, RuntimeError::InvalidConfiguration { .. }));
+
+    // 2. Serde deserialization cannot bypass validation
+    let raw_json = r#"{
+        "name": "MY_AUTH_PASSWORD",
+        "source": {
+            "type": "literal",
+            "value": "plaintext"
+        }
+    }"#;
+    let res: Result<EnvironmentVariableBinding, _> = serde_json::from_str(raw_json);
+    assert!(
+        res.is_err(),
+        "Deserializing binding with secret keyword must fail"
+    );
+
+    // 3. Custom serde validates successfully on valid binding
+    let valid_json = r#"{
+        "name": "MY_APP_ENV",
+        "source": {
+            "type": "literal",
+            "value": "production"
+        }
+    }"#;
+    let binding: EnvironmentVariableBinding = serde_json::from_str(valid_json).unwrap();
+    assert_eq!(binding.name(), "MY_APP_ENV");
+    assert!(matches!(
+        binding.source(),
+        EnvironmentBindingSource::Literal { .. }
+    ));
+
+    // 4. RuntimeStartRequest::validate() re-checks all bindings
+    let inst_ref = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new("opencode").unwrap(),
+        RuntimeInstanceId::generate(),
+    );
+    let ws = valid_test_workspace();
+    let mut req = RuntimeStartRequest::new(inst_ref, ws);
+    req.environment_bindings.push(binding);
+    assert!(req.validate().is_ok());
+}
+
+#[tokio::test]
+async fn test_42_r05_terminal_status_changed_stream_finalization() {
+    // 1. is_terminal() recognizes StatusChanged to terminal states
+    let sc_stopped = RuntimeEventKind::StatusChanged {
+        previous_state: RuntimeLifecycleState::Running,
+        new_state: RuntimeLifecycleState::Stopped,
+    };
+    assert!(sc_stopped.is_terminal());
+
+    let sc_completed = RuntimeEventKind::StatusChanged {
+        previous_state: RuntimeLifecycleState::Running,
+        new_state: RuntimeLifecycleState::Completed,
+    };
+    assert!(sc_completed.is_terminal());
+
+    let sc_failed = RuntimeEventKind::StatusChanged {
+        previous_state: RuntimeLifecycleState::Running,
+        new_state: RuntimeLifecycleState::Failed,
+    };
+    assert!(sc_failed.is_terminal());
+
+    // Non-terminal StatusChanged
+    let sc_interrupted = RuntimeEventKind::StatusChanged {
+        previous_state: RuntimeLifecycleState::Running,
+        new_state: RuntimeLifecycleState::Interrupted,
+    };
+    assert!(!sc_interrupted.is_terminal());
+
+    // 2. Subscription finalizes after yielding terminal StatusChanged
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+    let mut sub = hub.subscribe(None).await.unwrap();
+
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    hub.emit(sc_stopped).await.unwrap();
+
+    let e1 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(e1.sequence, 1);
+    let e2 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(e2.sequence, 2);
+    assert!(matches!(e2.kind, RuntimeEventKind::StatusChanged { .. }));
+
+    // Subscription is closed after terminal event
+    assert!(sub.next_event().await.unwrap().is_none());
+
+    // Hub rejects subsequent emission
+    let post_err = hub
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "dead".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        post_err,
+        RuntimeError::EventAfterTerminalState { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_43_r06_send_lifecycle_error_precedence() {
+    let runtime = FakeAgentRuntime::new("test-runtime");
+    let instances = runtime.discover().await.unwrap();
+    let inst_ref = RuntimeInstanceRef::new(
+        runtime.implementation_id().clone(),
+        instances[0].instance_id,
+    );
+    let ws = valid_test_workspace();
+    let handle = runtime
+        .start(RuntimeStartRequest::new(inst_ref, ws))
+        .await
+        .unwrap();
+    let sess_ref = handle.session_ref();
+
+    // Enable fail_send injection
+    runtime
+        .set_fail_send(Some("Injected send failure".to_string()))
+        .await;
+
+    // 1. Invalid session reference returns SessionNotFound BEFORE evaluating fail_send
+    let bogus_ref = RuntimeSessionRef::new(
+        runtime.implementation_id().clone(),
+        instances[0].instance_id,
+        RuntimeSessionId::generate(),
+    );
+    let err_not_found = runtime
+        .send(&bogus_ref, RuntimeInput::text("test"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err_not_found, RuntimeError::SessionNotFound { .. }),
+        "Expected SessionNotFound, got {:?}",
+        err_not_found
+    );
+
+    // 2. Stop the session
+    runtime.stop(&sess_ref).await.unwrap();
+
+    // 3. Stopped session returns TerminalStateError BEFORE evaluating fail_send
+    let err_terminal = runtime
+        .send(&sess_ref, RuntimeInput::text("test"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err_terminal, RuntimeError::TerminalStateError { .. }),
+        "Expected TerminalStateError, got {:?}",
+        err_terminal
+    );
+}
+
+#[tokio::test]
+async fn test_44_r07_registry_worker_panic_attribution() {
+    let registry = RuntimeRegistry::new();
+
+    let runtime_ok = Arc::new(FakeAgentRuntime::new("healthy-runtime"));
+    let runtime_fail = Arc::new(FakeAgentRuntime::new("failing-runtime"));
+    runtime_fail
+        .set_fail_discovery(Some("Hardware device unplugged".into()))
+        .await;
+
+    registry.register(runtime_ok).await.unwrap();
+    registry.register(runtime_fail).await.unwrap();
+
+    let outcome = registry.discover_all().await;
+    assert!(!outcome.is_success());
+    assert_eq!(outcome.instances.len(), 1);
+    assert_eq!(
+        outcome.instances[0].implementation_id.as_str(),
+        "healthy-runtime"
+    );
+
+    let fail_id = RuntimeImplementationId::new("failing-runtime").unwrap();
+    assert!(outcome.failures.contains_key(&fail_id));
+    let failure_msg = outcome.failures.get(&fail_id).unwrap().to_string();
+    assert!(failure_msg.contains("Hardware device unplugged"));
+}
+
+#[tokio::test]
+async fn test_45_r08_multi_url_and_query_credential_sanitization() {
+    // 1. Multiple basic auth URLs in diagnostic string
+    let multi_url = "Error connecting to https://user1:secretpass1@example.com/api and backup https://user2:secretpass2@backup.example.com/api";
+    let sanitized_urls = sanitize_error_message(multi_url);
+    assert!(!sanitized_urls.contains("secretpass1"));
+    assert!(!sanitized_urls.contains("secretpass2"));
+    assert!(sanitized_urls.contains("user1:[REDACTED_PASSWORD]@example.com"));
+    assert!(sanitized_urls.contains("user2:[REDACTED_PASSWORD]@backup.example.com"));
+
+    // 2. Multiple query parameters without early loop break
+    let multi_query = "Request failed: https://api.service.com/v1?api_key=myapikey123&token=tok_456&access_token=acc_789&verbose=true";
+    let sanitized_query = sanitize_error_message(multi_query);
+    assert!(!sanitized_query.contains("myapikey123"));
+    assert!(!sanitized_query.contains("tok_456"));
+    assert!(!sanitized_query.contains("acc_789"));
+    assert!(sanitized_query.contains("&verbose=true"));
+}
+
+#[tokio::test]
+async fn test_46_r09_shared_source_workspace_strict_fail_closed() {
+    let inst_ref = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new("opencode").unwrap(),
+        RuntimeInstanceId::generate(),
+    );
+
+    // 1. SharedSource + Mutating fails closed with InvalidWorkspaceAccess
+    let req_mutating = RuntimeStartRequest::new(
+        inst_ref.clone(),
+        ExecutionWorkspace::shared_source(PathBuf::from("/workspace")),
+    )
+    .with_workspace_access_mode(WorkspaceAccessMode::Mutating);
+    let err_mut = req_mutating.validate().unwrap_err();
+    assert!(matches!(
+        err_mut,
+        RuntimeError::InvalidWorkspaceAccess { .. }
+    ));
+
+    // 2. SharedSource + ReadOnly fails closed with InvalidWorkspaceAccess
+    let req_readonly = RuntimeStartRequest::new(
+        inst_ref,
+        ExecutionWorkspace::shared_source(PathBuf::from("/workspace")),
+    )
+    .with_workspace_access_mode(WorkspaceAccessMode::ReadOnly);
+    let err_ro = req_readonly.validate().unwrap_err();
+    assert!(matches!(
+        err_ro,
+        RuntimeError::InvalidWorkspaceAccess { .. }
+    ));
+
+    // 3. Managed worktree passes validation
+    let req_managed = RuntimeStartRequest::new(
+        RuntimeInstanceRef::new(
+            RuntimeImplementationId::new("opencode").unwrap(),
+            RuntimeInstanceId::generate(),
+        ),
+        valid_test_workspace(),
+    );
+    assert!(req_managed.validate().is_ok());
 }

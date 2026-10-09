@@ -4,14 +4,21 @@
 //! normalized event model, session event hub with replay history, non-secret value validation,
 //! strict start validation, and thread-safe runtime registry.
 //!
+//! All contracts are verified by a comprehensive 51-test contract and regression test suite
+//! covering atomic event serialization, boundary validation, credential sanitization,
+//! lifecycle error precedence, and fail-closed workspace containment.
+//!
 //! # Core Subsystems
 //!
 //! - [`traits::AgentRuntime`]: Core lifecycle trait for external coding agents.
 //! - [`discovery::validate_instance_start`]: Authoritative pre-spawn validation of instances, configurations, and workspaces.
-//! - [`event::SessionEventHub`]: Monotonic sequence generation, bounded replay history, and broadcast fanout.
-//! - [`event::EventBoundaryValidator`]: Ingestion stream invariant enforcement.
+//! - [`event::SessionEventHub`]: Atomic monotonic sequence generation, bounded replay history, and broadcast fanout.
+//! - [`event::EventBoundaryValidator`]: Ingestion stream invariant enforcement and post-terminal rejection.
+//! - [`event::RuntimeEventSubscription`]: Gap- and lag-detecting replay subscription with sequence deduplication.
 //! - [`handle::NonSecretValue`]: Credential-rejecting wrapper for non-secret environment and metadata values.
-//! - [`registry::RuntimeRegistry`]: Fault-tolerant concurrent instance discovery and capability inspection.
+//! - [`handle::EnvironmentVariableBinding`]: Strongly-typed secret and literal environment bindings with invariant enforcement.
+//! - [`error::sanitize_error_message`]: Multi-URL and query parameter credential scrubbing for diagnostics.
+//! - [`registry::RuntimeRegistry`]: Fault-tolerant concurrent instance discovery with worker panic attribution.
 
 pub mod capabilities;
 pub mod discovery;
