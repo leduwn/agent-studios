@@ -952,3 +952,458 @@ async fn test_matrix_c_id_collision_prevention() {
     let rt_deser_result: Result<RuntimeInstanceId, _> = serde_json::from_str(&provider_inst_json);
     assert!(rt_deser_result.is_err());
 }
+
+#[tokio::test]
+async fn test_25_event_subscription_replay_and_live_stream() {
+    let runtime = FakeAgentRuntime::new("test-runtime");
+    let instances = runtime.discover().await.unwrap();
+    let inst_ref = RuntimeInstanceRef::new(
+        runtime.implementation_id().clone(),
+        instances[0].instance_id,
+    );
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let handle = runtime
+        .start(RuntimeStartRequest::new(inst_ref, ws))
+        .await
+        .unwrap();
+    let sess_ref = handle.session_ref();
+
+    // Subscribe to full history and live stream
+    let mut sub = runtime.events(&sess_ref).await.unwrap();
+
+    // Trigger an input turn and then stop
+    runtime
+        .send(&sess_ref, RuntimeInput::text("streaming input"))
+        .await
+        .unwrap();
+    runtime.stop(&sess_ref).await.unwrap();
+
+    // Consume all events until terminal close
+    let mut events = Vec::new();
+    while let Some(event) = sub.next_event().await.unwrap() {
+        events.push(event);
+    }
+
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[0].sequence, 1);
+    assert!(matches!(
+        events[0].kind,
+        RuntimeEventKind::SessionStarted { .. }
+    ));
+    assert_eq!(events[1].sequence, 2);
+    assert!(matches!(
+        events[1].kind,
+        RuntimeEventKind::StatusChanged { .. }
+    ));
+    assert_eq!(events[2].sequence, 3);
+    assert!(matches!(
+        events[2].kind,
+        RuntimeEventKind::OutputDelta { .. }
+    ));
+    assert_eq!(events[3].sequence, 4);
+    assert!(matches!(
+        events[3].kind,
+        RuntimeEventKind::StatusChanged { .. }
+    ));
+    assert_eq!(events[4].sequence, 5);
+    assert!(matches!(events[4].kind, RuntimeEventKind::Stopped));
+
+    // Next event after close is Ok(None)
+    assert!(sub.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_26_event_subscription_replay_from_offset() {
+    let runtime = FakeAgentRuntime::new("test-runtime");
+    let instances = runtime.discover().await.unwrap();
+    let inst_ref = RuntimeInstanceRef::new(
+        runtime.implementation_id().clone(),
+        instances[0].instance_id,
+    );
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let handle = runtime
+        .start(RuntimeStartRequest::new(inst_ref, ws))
+        .await
+        .unwrap();
+    let sess_ref = handle.session_ref();
+
+    runtime
+        .send(&sess_ref, RuntimeInput::text("msg 1"))
+        .await
+        .unwrap();
+    runtime
+        .send(&sess_ref, RuntimeInput::text("msg 2"))
+        .await
+        .unwrap();
+    runtime.stop(&sess_ref).await.unwrap();
+
+    // Replay after sequence 2 (skips sequence 1 and 2)
+    let mut sub = runtime.events_after(&sess_ref, Some(2)).await.unwrap();
+
+    let first = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(first.sequence, 3);
+    assert!(matches!(first.kind, RuntimeEventKind::OutputDelta { .. }));
+
+    let second = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(second.sequence, 4);
+
+    let third = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(third.sequence, 5);
+
+    let fourth = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(fourth.sequence, 6);
+    assert!(matches!(fourth.kind, RuntimeEventKind::Stopped));
+
+    assert!(sub.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_27_event_retention_exceeded_error() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    // Tiny retention buffer of 3 events
+    let hub = SessionEventHub::new(session_id, instance_id, 3);
+
+    // Emit 6 events (seq 1 to 6)
+    for _ in 0..6 {
+        hub.emit(RuntimeEventKind::OutputDelta {
+            text: "delta".to_string(),
+        })
+        .await
+        .unwrap();
+    }
+
+    // Earliest retained event sequence is 4 (events 1, 2, 3 dropped)
+    let err = hub.subscribe(Some(1)).await.unwrap_err();
+    match err {
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence,
+            earliest_available_sequence,
+            ..
+        } => {
+            assert_eq!(requested_sequence, 1);
+            assert_eq!(earliest_available_sequence, 4);
+        }
+        other => panic!("Expected EventRetentionExceeded, got {:?}", other),
+    }
+
+    // Subscribing after sequence 3 or 4 succeeds
+    let sub = hub.subscribe(Some(4)).await;
+    assert!(sub.is_ok());
+}
+
+#[tokio::test]
+async fn test_28_event_boundary_validator_invariants() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let mut validator = EventBoundaryValidator::new(session_id, instance_id);
+
+    // 1. Sequence 0 rejected
+    let ev0 = RuntimeEvent::new(
+        session_id,
+        0,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    assert!(matches!(
+        validator.validate(&ev0).unwrap_err(),
+        RuntimeError::InvalidEventSequence { sequence: 0, .. }
+    ));
+
+    // 2. Sequence 1 must be SessionStarted
+    let ev1_wrong_kind = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::OutputDelta {
+            text: "bad".to_string(),
+        },
+    );
+    assert!(matches!(
+        validator.validate(&ev1_wrong_kind).unwrap_err(),
+        RuntimeError::InvalidEventSequence { sequence: 1, .. }
+    ));
+
+    // 3. Foreign session ID rejected
+    let foreign_sess = RuntimeSessionId::generate();
+    let ev1_foreign = RuntimeEvent::new(
+        foreign_sess,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id: foreign_sess,
+            instance_id,
+        },
+    );
+    assert!(matches!(
+        validator.validate(&ev1_foreign).unwrap_err(),
+        RuntimeError::EventSessionMismatch { .. }
+    ));
+
+    // 4. Valid SessionStarted accepted
+    let ev1_valid = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    assert!(validator.validate(&ev1_valid).is_ok());
+
+    // 5. Sequence gap (3 instead of 2) rejected
+    let ev3_gap = RuntimeEvent::new(
+        session_id,
+        3,
+        RuntimeEventKind::OutputDelta {
+            text: "gap".to_string(),
+        },
+    );
+    assert!(matches!(
+        validator.validate(&ev3_gap).unwrap_err(),
+        RuntimeError::InvalidEventSequence { sequence: 3, .. }
+    ));
+
+    // 6. Valid sequence 2 accepted
+    let ev2_valid = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::OutputDelta {
+            text: "delta".to_string(),
+        },
+    );
+    assert!(validator.validate(&ev2_valid).is_ok());
+
+    // 7. Terminal event sequence 3 accepted
+    let ev3_terminal = RuntimeEvent::new(session_id, 3, RuntimeEventKind::Stopped);
+    assert!(validator.validate(&ev3_terminal).is_ok());
+
+    // 8. Event after terminal rejected
+    let ev4_post_term = RuntimeEvent::new(
+        session_id,
+        4,
+        RuntimeEventKind::OutputDelta {
+            text: "after term".to_string(),
+        },
+    );
+    assert!(matches!(
+        validator.validate(&ev4_post_term).unwrap_err(),
+        RuntimeError::EventAfterTerminalState { .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_29_non_secret_value_deserialization_rejection() {
+    // Secret keywords rejected during serde deserialization
+    assert!(serde_json::from_str::<NonSecretValue>("\"my_secret_token\"").is_err());
+    assert!(serde_json::from_str::<NonSecretValue>("\"some_password_123\"").is_err());
+    assert!(serde_json::from_str::<NonSecretValue>("\"AUTH_HEADER\"").is_err());
+    assert!(serde_json::from_str::<NonSecretValue>("\"Bearer secret123\"").is_err());
+
+    // Secret prefixes rejected during serde deserialization
+    assert!(serde_json::from_str::<NonSecretValue>("\"sk-ant-12345\"").is_err());
+    assert!(serde_json::from_str::<NonSecretValue>("\"ghp_0123456789\"").is_err());
+    assert!(serde_json::from_str::<NonSecretValue>("\"glpat-abcdef\"").is_err());
+
+    // Safe values deserialize cleanly
+    let safe: NonSecretValue = serde_json::from_str("\"claude-sonnet-4-6\"").unwrap();
+    assert_eq!(safe.as_str(), "claude-sonnet-4-6");
+}
+
+#[tokio::test]
+async fn test_30_start_request_metadata_and_env_deserialization_safety() {
+    // EnvironmentVariableBinding::literal rejects secret keywords and prefixes
+    assert!(EnvironmentVariableBinding::literal("API_KEY", "value").is_err());
+    assert!(EnvironmentVariableBinding::literal("TOKEN", "value").is_err());
+    assert!(EnvironmentVariableBinding::literal("SAFE_NAME", "sk-proj-xyz").is_err());
+
+    // RuntimeStartRequest metadata rejects secrets in key or value
+    let inst_ref = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new("test").unwrap(),
+        RuntimeInstanceId::generate(),
+    );
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req = RuntimeStartRequest::new(inst_ref, ws);
+
+    assert!(req.clone().with_metadata("SECRET_CONFIG", "safe").is_err());
+    assert!(req.with_metadata("safe_config", "PASSWORD123").is_err());
+}
+
+#[tokio::test]
+async fn test_31_validate_instance_start_unavailable_rejection() {
+    let impl_id = RuntimeImplementationId::new("opencode").unwrap();
+    let inst_id = RuntimeInstanceId::generate();
+    let unavail = DiscoveredRuntimeInstance::unavailable(
+        inst_id,
+        impl_id.clone(),
+        "Unavailable Instance",
+        RuntimeCapabilities::default(),
+        "CLI daemon is offline",
+    );
+
+    let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id);
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req = RuntimeStartRequest::new(inst_ref, ws);
+
+    let err = validate_instance_start(&unavail, &impl_id, &req).unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::InstanceUnavailable { instance_id, .. }
+        if instance_id == inst_id
+    ));
+}
+
+#[tokio::test]
+async fn test_32_validate_instance_start_unsupported_config_rejection() {
+    let impl_id = RuntimeImplementationId::new("opencode").unwrap();
+    let inst_id = RuntimeInstanceId::generate();
+    let cfg_prod = RuntimeConfigRef::new("profiles/prod.json").unwrap();
+    let cfg_stage = RuntimeConfigRef::new("profiles/staging.json").unwrap();
+
+    let inst = DiscoveredRuntimeInstance::available(
+        inst_id,
+        impl_id.clone(),
+        "Available Instance",
+        RuntimeCapabilities::default(),
+    )
+    .with_supported_config(cfg_prod);
+
+    // Request specifying unsupported config
+    let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id).with_config_ref(cfg_stage);
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req = RuntimeStartRequest::new(inst_ref, ws);
+
+    let err = validate_instance_start(&inst, &impl_id, &req).unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::UnsupportedConfiguration { instance_id, .. }
+        if instance_id == inst_id
+    ));
+}
+
+#[tokio::test]
+async fn test_33_validate_instance_start_workspace_isolation_rejection() {
+    let impl_id = RuntimeImplementationId::new("opencode").unwrap();
+    let inst_id = RuntimeInstanceId::generate();
+    let inst = DiscoveredRuntimeInstance::available(
+        inst_id,
+        impl_id.clone(),
+        "Available Instance",
+        RuntimeCapabilities::default(),
+    );
+
+    let inst_ref = RuntimeInstanceRef::new(impl_id.clone(), inst_id);
+    // SharedSource workspace configured for Mutating access
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let req = RuntimeStartRequest::new(inst_ref, ws)
+        .with_workspace_access_mode(WorkspaceAccessMode::Mutating);
+
+    let err = validate_instance_start(&inst, &impl_id, &req).unwrap_err();
+    assert!(matches!(err, RuntimeError::InvalidConfiguration { .. }));
+}
+
+#[tokio::test]
+async fn test_34_per_instance_capability_authority() {
+    let runtime = FakeAgentRuntime::new("opencode");
+    let impl_id = runtime.implementation_id().clone();
+
+    // Instance has Interrupt set to false
+    let inst_id = RuntimeInstanceId::generate();
+    let reduced_caps = RuntimeCapabilities::default()
+        .with_streaming_events(true)
+        .with_stop(true)
+        .with_interrupt(false);
+    let inst = DiscoveredRuntimeInstance::available(
+        inst_id,
+        impl_id.clone(),
+        "Reduced CLI Instance",
+        reduced_caps,
+    );
+    runtime.add_instance(inst).await;
+
+    let inst_ref = RuntimeInstanceRef::new(impl_id, inst_id);
+    let ws = ExecutionWorkspace::shared_source(PathBuf::from("/workspace"));
+    let handle = runtime
+        .start(RuntimeStartRequest::new(inst_ref, ws))
+        .await
+        .unwrap();
+
+    // Verify handle carries instance's reduced capability
+    assert!(!handle.capabilities.supports(RuntimeCapability::Interrupt));
+
+    // Calling interrupt must fail with UnsupportedCapability
+    let err = runtime.interrupt(&handle.session_ref()).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::UnsupportedCapability {
+            capability: RuntimeCapability::Interrupt,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_35_runtime_config_ref_deserialization_integrity() {
+    assert!(serde_json::from_str::<RuntimeConfigRef>("\"\"").is_err());
+    assert!(serde_json::from_str::<RuntimeConfigRef>("\"   \"").is_err());
+    assert!(serde_json::from_str::<RuntimeConfigRef>("\"\\t\\n\"").is_err());
+
+    let valid: RuntimeConfigRef = serde_json::from_str("\"config/prod.yaml\"").unwrap();
+    assert_eq!(valid.as_str(), "config/prod.yaml");
+}
+
+#[tokio::test]
+async fn test_36_diagnostic_sanitization_comprehensive() {
+    // 1. Case-insensitive keywords
+    let s1 = sanitize_error_message("Error: API_KEY=abc123456 and PASSWORD=supersecret");
+    assert!(!s1.contains("abc123456"));
+    assert!(!s1.contains("supersecret"));
+
+    // 2. Bearer token
+    let s2 = sanitize_error_message("Header: bearer tok_secret_9999");
+    assert!(!s2.contains("tok_secret_9999"));
+
+    // 3. Quotes
+    let s3 = sanitize_error_message("Failed with 'sk-ant-testkey123' token");
+    assert!(!s3.contains("sk-ant-testkey123"));
+
+    // 4. Query string
+    let s4 = sanitize_error_message("URL: http://api.com?token=xyz123&other=param");
+    assert!(!s4.contains("xyz123"));
+    assert!(s4.contains("&other=param"));
+
+    // 5. Basic auth in URI
+    let s5 = sanitize_error_message("Git clone: https://admin:super_secret_pw@github.com/repo.git");
+    assert!(!s5.contains("super_secret_pw"));
+    assert!(s5.contains("admin:[REDACTED_PASSWORD]@github.com"));
+
+    // 6. Multiline
+    let s6 = sanitize_error_message("Line 1\napi_key=mykey123\nLine 3");
+    assert!(!s6.contains("mykey123"));
+    assert!(s6.contains("Line 1\n[REDACTED_API_KEY]\nLine 3"));
+}
+
+#[tokio::test]
+async fn test_37_registry_parallel_discovery_with_fault_tolerance() {
+    let registry = RuntimeRegistry::new();
+
+    let runtime_ok = Arc::new(FakeAgentRuntime::new("runtime-ok"));
+    let runtime_fail = Arc::new(FakeAgentRuntime::new("runtime-fail"));
+    runtime_fail
+        .set_fail_discovery(Some("Daemon connection timed out".to_string()))
+        .await;
+
+    registry.register(runtime_ok).await.unwrap();
+    registry.register(runtime_fail).await.unwrap();
+
+    let outcome = registry.discover_all().await;
+    assert!(!outcome.is_success());
+    assert_eq!(outcome.instances.len(), 1);
+    assert_eq!(
+        outcome.instances[0].implementation_id.as_str(),
+        "runtime-ok"
+    );
+    assert_eq!(outcome.failures.len(), 1);
+    let fail_impl = RuntimeImplementationId::new("runtime-fail").unwrap();
+    assert!(outcome.failures.contains_key(&fail_impl));
+}

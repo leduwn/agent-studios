@@ -97,40 +97,41 @@ pub trait AgentRuntime: Send + Sync {
 
 ---
 
-## 4. Contract Hardening (Milestone M10.1)
+## 4. Contract Hardening & Remediation (Milestone M10.1)
 
-Milestone M10.1 closed 12 architectural contract boundaries prior to concrete adapter development:
+Milestone M10.1 systematically resolved all findings across the external runtime contract:
 
-1. **Multi-Instance Discovery Authority**:
-   - `AgentRuntime::discover()` returns `Vec<DiscoveredRuntimeInstance>`.
-   - Each instance possesses unique `RuntimeInstanceId` (`rt-inst-<uuid>`) and typed `RuntimeAvailability` (`Available` or `Unavailable { reason: SanitizedRuntimeMessage }`).
-2. **Typed Runtime Instance References**:
-   - `RuntimeInstanceRef` (`implementation_id`, `instance_id`, `config_ref: Option<RuntimeConfigRef>`) verified at start boundary before process spawn.
-3. **Three-Tuple Session Ownership Tokens**:
-   - `RuntimeSessionRef` (`implementation_id`, `instance_id`, `session_id`) required across all lifecycle methods (`send`, `interrupt`, `resume`, `stop`, `status`, `events`).
-   - Forged or mismatched tokens are rejected with typed `SessionInstanceMismatch` or `SessionImplementationMismatch`.
-4. **Zero-Plaintext Secret Architecture**:
-   - `RuntimeStartRequest` replaces raw environment maps with typed `EnvironmentVariableBinding`.
-   - Secrets use deferred `SecretReference` and `SecretBackend` from `agent-studios-provider`.
-5. **Structural Diagnostic Sanitization**:
-   - `SanitizedRuntimeMessage` newtype with private inner storage scrubs API tokens and authorization headers on construction and deserialization.
-6. **Production Export Cleanliness**:
-   - Mock/fake runtime (`FakeAgentRuntime`) relocated to `tests/support/fake_runtime.rs`. Zero simulation mocks in production crate exports.
-7. **Stop Semantics & Capability Gating**:
+1. **P1-01: Reliable Event Startup, Subscription, and Gapless Replay**:
+   - `SessionEventHub` coordinates atomic monotonic sequence generation (`EventSequencer`), bounded in-memory replay history (`VecDeque<RuntimeEvent>`), and real-time broadcast (`tokio::sync::broadcast`).
+   - `RuntimeEventSubscription` drains historical events prior to yielding live broadcast events, with sequence deduplication, sequence gap detection (`EventStreamGap`), buffer lag detection (`EventStreamLagged`), and clean terminal closure.
+   - `events_after` and `replay` fail closed with `EventRetentionExceeded` when requested offsets fall outside retained history.
+2. **P1-02: Elimination of Plaintext Credential Bypass**:
+   - `NonSecretValue` custom serializer/deserializer enforces keyword rejection (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `AUTH`, `BEARER`) and prefix rejection (`sk-`, `ghp_`, `gho_`, `xoxb-`, `xoxp-`, `glpat-`, `npm_`).
+   - `EnvironmentVariableBinding::literal` and `RuntimeStartRequest::with_metadata` strictly reject sensitive values.
+   - Secret injection requires `EnvironmentBindingSource::Secret` wrapping validated `SecretReference`.
+3. **P1-03: Strict Pre-Spawn Start Validation**:
+   - `validate_instance_start` and `DiscoveredRuntimeInstance::validate_start_request` enforce implementation identity, instance membership, availability state (`RuntimeAvailability::Available`), supported configuration authority (`supports_config`), and workspace isolation prior to handle creation or side-effect execution.
+4. **P1-04: Canonical Lifecycle Precedence and Terminal Semantics**:
+   - Standardized precedence ordering: Session reference validation -> Terminal state check -> Idempotent stop check -> Per-instance capability check -> State transition validation -> Failure injection -> State mutation -> Correlated event emission.
    - `stop()` on `Stopped` session is strictly idempotent (`Ok(())`).
-   - `stop()` on `Completed` or `Failed` returns typed `TerminalStateError`.
-   - `RuntimeCapability::Stop` checked before termination side effects.
-8. **Fail-Closed Capability Enforcement**:
-   - `RuntimeCapabilities::ensure_supported` rejects `Unknown` and `Unsupported` capabilities fail-closed.
-9. **Concurrency & Registry Discipline**:
-   - `RuntimeRegistry` uses `BTreeMap` for deterministic alphabetical ordering.
-   - Lock-drop-before-await pattern guarantees no mutex/rwlock guards are held across `.await` points.
-10. **Monotonic Event Sequence Authority**:
-    - `RuntimeEvent.sequence` (1..N gapless u64) is the sole deterministic ordering authority. Wall-clock `timestamp` is observational metadata.
-11. **Event Correlation Consistency**:
-    - `RuntimeEventKind::SessionStarted` carries matching authoritative `session_id` and `instance_id`.
-12. **Non-Resurrection Lifecycle Invariants**:
-    - Terminal states (`Stopped`, `Completed`, `Failed`) forbid transition to active states. All operations on terminal sessions fail with `TerminalStateError`.
+   - Operations on terminal states (`Completed`, `Failed`, `Stopped`) fail closed with typed `TerminalStateError`.
+5. **P1-05: Authoritative Event Sequence Enforcement**:
+   - `EventSequencer` strictly generates monotonic sequences starting at 1.
+   - `EventBoundaryValidator` validates ingestion streams: sequence 1 must begin with `SessionStarted`, sequence numbers must be gapless and strictly increasing, session correlation must match, and no events may follow terminal lifecycle states.
+6. **P1-06: Per-Instance Capability Authority**:
+   - Runtime instances declare per-instance `capabilities: RuntimeCapabilities` in `DiscoveredRuntimeInstance`.
+   - `RuntimeSessionHandle` and session state track instance-specific capabilities, overriding global implementation defaults so that restricted instances cannot execute unauthorized actions (e.g. stop/interrupt/resume).
+7. **P2-01: RuntimeConfigRef Deserialization Integrity**:
+   - Custom deserialization on `RuntimeConfigRef` validates trimmed non-empty strings, rejecting whitespace-only, empty, and invalid config identifiers.
+8. **P2-02: Comprehensive Diagnostic Sanitization Coverage**:
+   - `sanitize_error_message` and `SanitizedRuntimeMessage` scrub credentials across all cases: case-insensitive keywords, single/double quoted values, query string parameters (`?key=...`, `&token=...`), and basic authentication URIs (`https://user:pass@host/`).
+9. **P2-03: ExecutionWorkspace Isolation Policy**:
+   - `WorkspaceAccessMode` enum (`ReadOnly`, `Mutating`).
+   - `RuntimeStartRequest::validate` strictly prohibits `ExecutionWorkspace::SharedSource` when `WorkspaceAccessMode::Mutating` is configured.
+10. **P2-04: Fault-Tolerant RuntimeRegistry Discovery**:
+    - `RuntimeRegistry::discover_all` uses `tokio::task::JoinSet` for parallel discovery across registered implementations.
+    - Locks are dropped before `.await` calls to prevent lock contention and deadlocks.
+    - Collects into `RegistryDiscoveryOutcome`, preserving deterministic `BTreeMap` ordering while isolating individual runtime failures into sanitized error diagnostics without failing the entire registry.
 
 ---
 

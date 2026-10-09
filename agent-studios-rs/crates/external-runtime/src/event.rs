@@ -1,7 +1,13 @@
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use agent_studios_protocol::id::ApprovalId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{RwLock, broadcast};
 
+use crate::error::{RuntimeError, SanitizedRuntimeMessage};
 use crate::id::{RuntimeInstanceId, RuntimeSessionId};
 use crate::lifecycle::RuntimeLifecycleState;
 
@@ -36,9 +42,9 @@ pub enum RuntimeEventKind {
     /// Interactive human approval requested by the agent.
     ApprovalRequested {
         approval_id: ApprovalId,
-        description: String,
+        description: SanitizedRuntimeMessage,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
+        command: Option<SanitizedRuntimeMessage>,
     },
     /// External agent produced an output artifact.
     ArtifactProduced { logical_name: String, path: String },
@@ -51,12 +57,17 @@ pub enum RuntimeEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_tokens: Option<u64>,
     },
-    /// Non-fatal diagnostic or log message.
-    Diagnostic { level: String, message: String },
-    /// Active turn was interrupted.
-    Interrupted { reason: String },
-    /// Session or task failed with safe error classification.
-    Failed { safe_error_summary: String },
+    /// Non-fatal diagnostic or log message with sanitized content.
+    Diagnostic {
+        level: String,
+        message: SanitizedRuntimeMessage,
+    },
+    /// Active turn was interrupted with sanitized reason.
+    Interrupted { reason: SanitizedRuntimeMessage },
+    /// Session or task failed with safe, sanitized error summary.
+    Failed {
+        safe_error_summary: SanitizedRuntimeMessage,
+    },
     /// Session or task completed successfully.
     Completed {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +75,29 @@ pub enum RuntimeEventKind {
     },
     /// Session was stopped/terminated.
     Stopped,
+}
+
+impl RuntimeEventKind {
+    /// Returns true if this event marks a permanent terminal lifecycle transition.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Stopped | Self::Completed { .. } | Self::Failed { .. }
+        )
+    }
+
+    /// Returns corresponding lifecycle state if this event changes lifecycle state.
+    pub fn to_lifecycle_state(&self) -> Option<RuntimeLifecycleState> {
+        match self {
+            Self::SessionStarted { .. } => Some(RuntimeLifecycleState::Running),
+            Self::StatusChanged { new_state, .. } => Some(*new_state),
+            Self::Interrupted { .. } => Some(RuntimeLifecycleState::Interrupted),
+            Self::Stopped => Some(RuntimeLifecycleState::Stopped),
+            Self::Completed { .. } => Some(RuntimeLifecycleState::Completed),
+            Self::Failed { .. } => Some(RuntimeLifecycleState::Failed),
+            _ => None,
+        }
+    }
 }
 
 /// Envelope for normalized runtime events, carrying monotonic sequence and timestamp for deterministic correlation.
@@ -83,5 +117,407 @@ impl RuntimeEvent {
             timestamp: Utc::now(),
             kind,
         }
+    }
+}
+
+/// Thread-safe atomic monotonic sequence generator for session events.
+/// Strictly begins at sequence 1.
+#[derive(Debug, Default)]
+pub struct EventSequencer {
+    current: AtomicU64,
+}
+
+impl EventSequencer {
+    pub fn new() -> Self {
+        Self {
+            current: AtomicU64::new(0),
+        }
+    }
+
+    /// Allocates and returns the next monotonic sequence number (starts at 1).
+    pub fn next_sequence(&self) -> u64 {
+        self.current.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Returns the most recently allocated sequence number, or 0 if none allocated yet.
+    pub fn current_sequence(&self) -> u64 {
+        self.current.load(Ordering::SeqCst)
+    }
+}
+
+/// Ingestion boundary validator enforcing monotonic, gapless sequence numbers
+/// and session correlation invariants for authoritative event streams.
+#[derive(Debug, Clone)]
+pub struct EventBoundaryValidator {
+    session_id: RuntimeSessionId,
+    instance_id: RuntimeInstanceId,
+    expected_sequence: u64,
+    terminal_state: Option<RuntimeLifecycleState>,
+}
+
+impl EventBoundaryValidator {
+    pub fn new(session_id: RuntimeSessionId, instance_id: RuntimeInstanceId) -> Self {
+        Self {
+            session_id,
+            instance_id,
+            expected_sequence: 1,
+            terminal_state: None,
+        }
+    }
+
+    /// Validates an incoming event against strict sequence, correlation, and terminal invariants.
+    pub fn validate(&mut self, event: &RuntimeEvent) -> Result<(), RuntimeError> {
+        // 1. Session ID validation
+        if event.session_id != self.session_id {
+            return Err(RuntimeError::EventSessionMismatch {
+                expected: self.session_id,
+                actual: event.session_id,
+                sequence: event.sequence,
+            });
+        }
+
+        // 2. Reject events after terminal state
+        if let Some(terminal) = self.terminal_state {
+            return Err(RuntimeError::EventAfterTerminalState {
+                session_id: self.session_id,
+                terminal_state: terminal,
+                attempted_sequence: event.sequence,
+            });
+        }
+
+        // 3. Sequence zero rejection
+        if event.sequence == 0 {
+            return Err(RuntimeError::InvalidEventSequence {
+                session_id: self.session_id,
+                sequence: 0,
+                reason: SanitizedRuntimeMessage::new(
+                    "Event sequence number 0 is invalid; sequence must start at 1",
+                ),
+            });
+        }
+
+        // 4. Sequence gap, duplicate, or out-of-order rejection
+        if event.sequence != self.expected_sequence {
+            return Err(RuntimeError::InvalidEventSequence {
+                session_id: self.session_id,
+                sequence: event.sequence,
+                reason: SanitizedRuntimeMessage::new(format!(
+                    "Unexpected sequence number: expected {}, received {}",
+                    self.expected_sequence, event.sequence
+                )),
+            });
+        }
+
+        // 5. First event must be SessionStarted with matching instance ID
+        if event.sequence == 1 {
+            match &event.kind {
+                RuntimeEventKind::SessionStarted {
+                    session_id,
+                    instance_id,
+                } => {
+                    if *session_id != self.session_id || *instance_id != self.instance_id {
+                        return Err(RuntimeError::InvalidEventSequence {
+                            session_id: self.session_id,
+                            sequence: 1,
+                            reason: SanitizedRuntimeMessage::new(format!(
+                                "SessionStarted event correlation mismatch: expected session {} instance {}, received session {} instance {}",
+                                self.session_id, self.instance_id, session_id, instance_id
+                            )),
+                        });
+                    }
+                }
+                other => {
+                    return Err(RuntimeError::InvalidEventSequence {
+                        session_id: self.session_id,
+                        sequence: 1,
+                        reason: SanitizedRuntimeMessage::new(format!(
+                            "First event must be SessionStarted, received {:?}",
+                            other
+                        )),
+                    });
+                }
+            }
+        }
+
+        // Advance expected sequence
+        self.expected_sequence += 1;
+
+        // Check if event is terminal
+        if event.kind.is_terminal() {
+            self.terminal_state = event.kind.to_lifecycle_state();
+        }
+
+        Ok(())
+    }
+
+    pub fn expected_sequence(&self) -> u64 {
+        self.expected_sequence
+    }
+}
+
+/// Default maximum events retained in in-memory session history for late replay.
+pub const DEFAULT_EVENT_RETENTION: usize = 1024;
+
+/// Authoritative event hub managing sequence generation, bounded replay history,
+/// and live event broadcasting for an external runtime session.
+pub struct SessionEventHub {
+    session_id: RuntimeSessionId,
+    instance_id: RuntimeInstanceId,
+    retention_limit: usize,
+    sequencer: EventSequencer,
+    history: Arc<RwLock<VecDeque<RuntimeEvent>>>,
+    live_tx: broadcast::Sender<RuntimeEvent>,
+    terminal_state: Arc<RwLock<Option<RuntimeLifecycleState>>>,
+    earliest_retained_sequence: Arc<RwLock<u64>>,
+}
+
+impl SessionEventHub {
+    pub fn new(
+        session_id: RuntimeSessionId,
+        instance_id: RuntimeInstanceId,
+        retention_limit: usize,
+    ) -> Self {
+        let (live_tx, _) = broadcast::channel(retention_limit.max(128));
+        Self {
+            session_id,
+            instance_id,
+            retention_limit,
+            sequencer: EventSequencer::new(),
+            history: Arc::new(RwLock::new(VecDeque::with_capacity(retention_limit))),
+            live_tx,
+            terminal_state: Arc::new(RwLock::new(None)),
+            earliest_retained_sequence: Arc::new(RwLock::new(1)),
+        }
+    }
+
+    pub fn session_id(&self) -> RuntimeSessionId {
+        self.session_id
+    }
+
+    pub fn instance_id(&self) -> RuntimeInstanceId {
+        self.instance_id
+    }
+
+    /// Emits a new event into the session event stream.
+    /// Atomically assigns monotonic sequence number, verifies non-terminal invariant,
+    /// appends to bounded replay history, and broadcasts to live subscribers.
+    pub async fn emit(&self, kind: RuntimeEventKind) -> Result<RuntimeEvent, RuntimeError> {
+        let mut term_guard = self.terminal_state.write().await;
+        if let Some(terminal) = *term_guard {
+            return Err(RuntimeError::EventAfterTerminalState {
+                session_id: self.session_id,
+                terminal_state: terminal,
+                attempted_sequence: self.sequencer.current_sequence() + 1,
+            });
+        }
+
+        let sequence = self.sequencer.next_sequence();
+        let event = RuntimeEvent::new(self.session_id, sequence, kind.clone());
+
+        if kind.is_terminal() {
+            *term_guard = kind.to_lifecycle_state();
+        }
+        drop(term_guard);
+
+        let mut hist_guard = self.history.write().await;
+        if hist_guard.len() >= self.retention_limit {
+            hist_guard.pop_front();
+            let mut earliest_guard = self.earliest_retained_sequence.write().await;
+            if let Some(first) = hist_guard.front() {
+                *earliest_guard = first.sequence;
+            }
+        }
+        hist_guard.push_back(event.clone());
+        drop(hist_guard);
+
+        let _ = self.live_tx.send(event.clone());
+        Ok(event)
+    }
+
+    /// Ingests an externally constructed event into the hub, enforcing sequence validation.
+    pub async fn ingest(&self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+        let mut term_guard = self.terminal_state.write().await;
+        if let Some(terminal) = *term_guard {
+            return Err(RuntimeError::EventAfterTerminalState {
+                session_id: self.session_id,
+                terminal_state: terminal,
+                attempted_sequence: event.sequence,
+            });
+        }
+
+        if event.session_id != self.session_id {
+            return Err(RuntimeError::EventSessionMismatch {
+                expected: self.session_id,
+                actual: event.session_id,
+                sequence: event.sequence,
+            });
+        }
+
+        if event.sequence == 0 {
+            return Err(RuntimeError::InvalidEventSequence {
+                session_id: self.session_id,
+                sequence: 0,
+                reason: SanitizedRuntimeMessage::new("Sequence cannot be 0"),
+            });
+        }
+
+        if event.kind.is_terminal() {
+            *term_guard = event.kind.to_lifecycle_state();
+        }
+        drop(term_guard);
+
+        let mut hist_guard = self.history.write().await;
+        if hist_guard.len() >= self.retention_limit {
+            hist_guard.pop_front();
+            let mut earliest_guard = self.earliest_retained_sequence.write().await;
+            if let Some(first) = hist_guard.front() {
+                *earliest_guard = first.sequence;
+            }
+        }
+        hist_guard.push_back(event.clone());
+        drop(hist_guard);
+
+        let _ = self.live_tx.send(event);
+        Ok(())
+    }
+
+    /// Subscribes to the session event stream.
+    /// Delivers historical events from `after_sequence` followed by live events without gaps or duplicates.
+    pub async fn subscribe(
+        &self,
+        after_sequence: Option<u64>,
+    ) -> Result<RuntimeEventSubscription, RuntimeError> {
+        // 1. Subscribe to live broadcast before reading history to prevent drop window
+        let live_rx = self.live_tx.subscribe();
+
+        // 2. Snapshot history under read lock
+        let hist_guard = self.history.read().await;
+        let earliest = *self.earliest_retained_sequence.read().await;
+
+        let requested_seq = after_sequence.unwrap_or(0);
+
+        // Check if requested sequence is older than retained history
+        if requested_seq > 0 && requested_seq < earliest && !hist_guard.is_empty() {
+            return Err(RuntimeError::EventRetentionExceeded {
+                session_id: self.session_id,
+                requested_sequence: requested_seq,
+                earliest_available_sequence: earliest,
+            });
+        }
+
+        let replay_events: VecDeque<RuntimeEvent> = hist_guard
+            .iter()
+            .filter(|ev| ev.sequence > requested_seq)
+            .cloned()
+            .collect();
+        drop(hist_guard);
+
+        let last_seen_sequence = requested_seq;
+
+        Ok(RuntimeEventSubscription {
+            session_id: self.session_id,
+            replay_queue: replay_events,
+            live_rx,
+            last_seen_sequence,
+            is_closed: false,
+        })
+    }
+
+    /// Returns a snapshot of all recorded events in memory.
+    pub async fn recorded_events(&self) -> Vec<RuntimeEvent> {
+        let hist_guard = self.history.read().await;
+        hist_guard.iter().cloned().collect()
+    }
+}
+
+/// Active subscription to a session's normalized event stream.
+/// Transparently yields historical replay events first, then seamlessly streams live events.
+pub struct RuntimeEventSubscription {
+    session_id: RuntimeSessionId,
+    replay_queue: VecDeque<RuntimeEvent>,
+    live_rx: broadcast::Receiver<RuntimeEvent>,
+    last_seen_sequence: u64,
+    is_closed: bool,
+}
+
+impl RuntimeEventSubscription {
+    pub fn session_id(&self) -> RuntimeSessionId {
+        self.session_id
+    }
+
+    pub fn last_seen_sequence(&self) -> u64 {
+        self.last_seen_sequence
+    }
+
+    /// Fetches the next event in the stream.
+    /// Replays historical events first, then yields live events without duplication.
+    /// Returns Ok(None) when the stream has terminated.
+    pub async fn next_event(&mut self) -> Result<Option<RuntimeEvent>, RuntimeError> {
+        if self.is_closed {
+            return Ok(None);
+        }
+
+        // 1. Drain replay queue first
+        if let Some(event) = self.replay_queue.pop_front() {
+            self.last_seen_sequence = event.sequence;
+            if event.kind.is_terminal() && self.replay_queue.is_empty() {
+                self.is_closed = true;
+            }
+            return Ok(Some(event));
+        }
+
+        // 2. Pull from live broadcast channel with deduplication against replay
+        loop {
+            match self.live_rx.recv().await {
+                Ok(event) => {
+                    // Deduplicate events that were already observed in replay queue
+                    if event.sequence <= self.last_seen_sequence {
+                        continue;
+                    }
+
+                    // Check for sequence gap in live stream
+                    if self.last_seen_sequence > 0 && event.sequence > self.last_seen_sequence + 1 {
+                        return Err(RuntimeError::EventStreamGap {
+                            session_id: self.session_id,
+                            expected_sequence: self.last_seen_sequence + 1,
+                            received_sequence: event.sequence,
+                        });
+                    }
+
+                    self.last_seen_sequence = event.sequence;
+                    if event.kind.is_terminal() {
+                        self.is_closed = true;
+                    }
+                    return Ok(Some(event));
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    return Err(RuntimeError::EventStreamLagged {
+                        session_id: self.session_id,
+                        skipped_count: skipped,
+                        expected_sequence: self.last_seen_sequence + 1,
+                    });
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    self.is_closed = true;
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    /// Alias for `next_event`.
+    pub async fn recv(&mut self) -> Result<Option<RuntimeEvent>, RuntimeError> {
+        self.next_event().await
+    }
+}
+
+impl std::fmt::Debug for RuntimeEventSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeEventSubscription")
+            .field("session_id", &self.session_id)
+            .field("replay_queue", &self.replay_queue)
+            .field("last_seen_sequence", &self.last_seen_sequence)
+            .field("is_closed", &self.is_closed)
+            .finish()
     }
 }

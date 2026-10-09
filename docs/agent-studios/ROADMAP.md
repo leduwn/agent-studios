@@ -121,16 +121,18 @@
 - Strict lifecycle state machine with active/resumable `Interrupted` and fail-closed terminal transitions (`Stopped`, `Completed`, `Failed`).
 - Tristate capability profiles across 16 dimensions (`Supported`, `Unsupported`, `Unknown`).
 - Monotonically numbered event streams with typed event kinds and regex-free secret scrubbing.
-- Closed 12 contract boundaries in M10.1:
-  - Multi-instance discovery authority (`DiscoveredRuntimeInstance`, `RuntimeAvailability`).
-  - Typed `RuntimeInstanceRef` verified at start boundary and 3-tuple `RuntimeSessionRef` ownership tokens enforced across all methods.
-  - Zero-plaintext secret architecture with `EnvironmentVariableBinding` using `SecretReference` / `SecretBackend`.
-  - Structural error sanitization newtype (`SanitizedRuntimeMessage`) preventing secret leakage.
-  - Relocated fake runtime out of production exports into `tests/support/fake_runtime.rs`.
-  - Stop semantics (idempotent `Stopped`, `TerminalStateError` on `Completed`/`Failed`, `RuntimeCapability::Stop` enforcement).
-  - Concurrency discipline (`BTreeMap` registry, lock-drop-before-await pattern).
-  - Event ordering authority (`sequence` number authority, observational timestamps).
-  - Terminal non-resurrection invariants verified by 24 contract regression tests.
+- Remediated all 10 M10.1 contract review findings (P1-01 to P1-06, P2-01 to P2-04):
+  - P1-01: Reliable event startup, subscription, and replay (`SessionEventHub`, `RuntimeEventSubscription`, replay before broadcast, gap/lag detection, `EventRetentionExceeded`).
+  - P1-02: Elimination of plaintext credential bypass (`NonSecretValue`, forbidden keywords/prefixes, custom serde validation).
+  - P1-03: Strict pre-spawn start validation (`validate_instance_start`, supported configuration checks, workspace isolation).
+  - P1-04: Canonical lifecycle precedence and terminal semantics (validated ordering, idempotent stop, fail-closed terminal states).
+  - P1-05: Authoritative event sequence enforcement (`EventSequencer` monotonic from 1, `EventBoundaryValidator` boundary checking, post-terminal rejection).
+  - P1-06: Per-instance capability authority (instance capabilities override global defaults).
+  - P2-01: `RuntimeConfigRef` deserialization integrity (trimmed non-empty string validation).
+  - P2-02: Diagnostic sanitization coverage (case-insensitive, quoted, query string, basic auth URI scrubbing).
+  - P2-03: `ExecutionWorkspace` isolation policy (`WorkspaceAccessMode::Mutating` prohibits `SharedSource`).
+  - P2-04: Fault-tolerant `RuntimeRegistry` discovery (`JoinSet` concurrency, lock drop before await, `RegistryDiscoveryOutcome` failure isolation).
+- Full 40-test contract regression matrix covering all findings.
 
 ### M11: OpenCode Runtime Adapter [PLANNED]
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.

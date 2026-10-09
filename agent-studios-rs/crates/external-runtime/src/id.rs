@@ -214,7 +214,7 @@ impl<'de> Deserialize<'de> for RuntimeSessionId {
 }
 
 /// Opaque typed reference for an external runtime configuration document or identifier.
-#[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
 pub struct RuntimeConfigRef(String);
 
 impl RuntimeConfigRef {
@@ -247,5 +247,24 @@ impl FromStr for RuntimeConfigRef {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::new(s)
+    }
+}
+
+impl Serialize for RuntimeConfigRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RuntimeConfigRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::new(s).map_err(serde::de::Error::custom)
     }
 }

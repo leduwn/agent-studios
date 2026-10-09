@@ -1,10 +1,9 @@
 use async_trait::async_trait;
-use tokio::sync::broadcast;
 
 use crate::capabilities::RuntimeCapabilities;
 use crate::discovery::DiscoveredRuntimeInstance;
 use crate::error::RuntimeError;
-use crate::event::RuntimeEvent;
+use crate::event::RuntimeEventSubscription;
 use crate::handle::{RuntimeSessionHandle, RuntimeSessionRef, RuntimeStartRequest};
 use crate::id::RuntimeImplementationId;
 use crate::input::RuntimeInput;
@@ -54,9 +53,18 @@ pub trait AgentRuntime: Send + Sync {
         session: &RuntimeSessionRef,
     ) -> Result<RuntimeLifecycleState, RuntimeError>;
 
-    /// Subscribes to the broadcast stream of normalized events emitted by the session.
+    /// Subscribes to the normalized event stream emitted by the session, delivering replay history followed by live events.
     async fn events(
         &self,
         session: &RuntimeSessionRef,
-    ) -> Result<broadcast::Receiver<RuntimeEvent>, RuntimeError>;
+    ) -> Result<RuntimeEventSubscription, RuntimeError> {
+        self.events_after(session, None).await
+    }
+
+    /// Subscribes to the normalized event stream after a specific sequence number.
+    async fn events_after(
+        &self,
+        session: &RuntimeSessionRef,
+        after_sequence: Option<u64>,
+    ) -> Result<RuntimeEventSubscription, RuntimeError>;
 }

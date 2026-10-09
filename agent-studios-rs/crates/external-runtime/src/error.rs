@@ -3,8 +3,49 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::capabilities::RuntimeCapability;
-use crate::id::{RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId};
+use crate::id::{RuntimeConfigRef, RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId};
 use crate::lifecycle::RuntimeLifecycleState;
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let needle_bytes = needle.as_bytes();
+    let haystack_bytes = haystack.as_bytes();
+    if needle_bytes.len() > haystack_bytes.len() {
+        return None;
+    }
+    for (i, window) in haystack_bytes.windows(needle_bytes.len()).enumerate() {
+        if window.eq_ignore_ascii_case(needle_bytes) && haystack.is_char_boundary(i) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn extract_token_len(after: &str) -> usize {
+    if let Some(inner) = after.strip_prefix('"') {
+        inner.find('"').map(|i| i + 2).unwrap_or(after.len())
+    } else if let Some(inner) = after.strip_prefix('\'') {
+        inner.find('\'').map(|i| i + 2).unwrap_or(after.len())
+    } else {
+        after
+            .char_indices()
+            .find(|(_, c)| c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\'')
+            .map(|(i, _)| i)
+            .unwrap_or(after.len())
+    }
+}
+
+fn extract_val_span(after: &str) -> (usize, usize) {
+    let ws_len = after
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let token_len = extract_token_len(&after[ws_len..]);
+    (ws_len, token_len)
+}
 
 /// Strips common secret patterns (API keys, bearer tokens, passwords) from diagnostic strings.
 pub fn sanitize_error_message(input: &str) -> String {
@@ -13,11 +54,7 @@ pub fn sanitize_error_message(input: &str) -> String {
     // Redact sk-ant-* Anthropic API keys directly
     while let Some(idx) = sanitized.find("sk-ant-") {
         let after = &sanitized[idx..];
-        let token_bytes = after
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\'')
-            .map(|(i, _)| i)
-            .unwrap_or(after.len());
+        let token_bytes = extract_token_len(after);
         if token_bytes > 0 {
             sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_API_KEY]");
         } else {
@@ -28,11 +65,7 @@ pub fn sanitize_error_message(input: &str) -> String {
     // Redact ghp_* GitHub tokens directly
     while let Some(idx) = sanitized.find("ghp_") {
         let after = &sanitized[idx..];
-        let token_bytes = after
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\'')
-            .map(|(i, _)| i)
-            .unwrap_or(after.len());
+        let token_bytes = extract_token_len(after);
         if token_bytes > 0 {
             sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_GITHUB_TOKEN]");
         } else {
@@ -40,19 +73,31 @@ pub fn sanitize_error_message(input: &str) -> String {
         }
     }
 
+    // Redact other known secret prefixes
+    for prefix in &["gho_", "glpat-", "xoxb-", "xoxp-", "npm_"] {
+        while let Some(idx) = sanitized.find(prefix) {
+            let after = &sanitized[idx..];
+            let token_bytes = extract_token_len(after);
+            if token_bytes > 0 {
+                sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_TOKEN]");
+            } else {
+                break;
+            }
+        }
+    }
+
     // Redact Bearer tokens
-    while let Some(idx) = sanitized.to_lowercase().find("bearer ") {
+    while let Some(idx) = find_ascii_case_insensitive(&sanitized, "bearer ") {
         let after = &sanitized[idx + 7..];
         if after.starts_with("[REDACTED") {
             break;
         }
-        let token_bytes = after
-            .char_indices()
-            .find(|(_, c)| c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\'')
-            .map(|(i, _)| i)
-            .unwrap_or(after.len());
+        let (ws_len, token_bytes) = extract_val_span(after);
         if token_bytes > 0 {
-            sanitized.replace_range(idx..idx + 7 + token_bytes, "[REDACTED_BEARER_TOKEN]");
+            sanitized.replace_range(
+                idx..idx + 7 + ws_len + token_bytes,
+                "[REDACTED_BEARER_TOKEN]",
+            );
         } else {
             break;
         }
@@ -60,21 +105,15 @@ pub fn sanitize_error_message(input: &str) -> String {
 
     // Redact api_key / apikey / x-api-key patterns
     for prefix in &["api_key=", "api-key=", "apikey=", "api_key:", "x-api-key:"] {
-        while let Some(idx) = sanitized.to_lowercase().find(prefix) {
+        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
             let val_start = idx + prefix.len();
             let after = &sanitized[val_start..];
             if after.starts_with("[REDACTED") {
                 break;
             }
-            let val_bytes = after
-                .char_indices()
-                .find(|(_, c)| {
-                    c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\''
-                })
-                .map(|(i, _)| i)
-                .unwrap_or(after.len());
+            let (ws_len, val_bytes) = extract_val_span(after);
             if val_bytes > 0 {
-                sanitized.replace_range(idx..val_start + val_bytes, "[REDACTED_API_KEY]");
+                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_API_KEY]");
             } else {
                 break;
             }
@@ -82,26 +121,79 @@ pub fn sanitize_error_message(input: &str) -> String {
     }
 
     // Redact secret= patterns
-    for prefix in &["secret=", "secret:", "password="] {
-        while let Some(idx) = sanitized.to_lowercase().find(prefix) {
+    for prefix in &["secret=", "secret:", "password=", "passwd=", "pwd="] {
+        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
             let val_start = idx + prefix.len();
             let after = &sanitized[val_start..];
             if after.starts_with("[REDACTED") {
                 break;
             }
-            let val_bytes = after
-                .char_indices()
-                .find(|(_, c)| {
-                    c.is_whitespace() || *c == ';' || *c == '&' || *c == '"' || *c == '\''
-                })
-                .map(|(i, _)| i)
-                .unwrap_or(after.len());
+            let (ws_len, val_bytes) = extract_val_span(after);
             if val_bytes > 0 {
-                sanitized.replace_range(idx..val_start + val_bytes, "[REDACTED_SECRET]");
+                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_SECRET]");
             } else {
                 break;
             }
         }
+    }
+
+    // Redact general sk- tokens (OpenAI project/admin keys, etc.)
+    for prefix in &["sk-proj-", "sk-admin-", "sk-svcacct-", "sk-"] {
+        while let Some(idx) = sanitized.find(prefix) {
+            let after = &sanitized[idx..];
+            if after.starts_with("[REDACTED") {
+                break;
+            }
+            let token_bytes = extract_token_len(after);
+            if token_bytes > 0 {
+                sanitized.replace_range(idx..idx + token_bytes, "[REDACTED_API_KEY]");
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Redact token=, token:, access_token=, refresh_token=, auth=, authorization:
+    for prefix in &[
+        "token=",
+        "token:",
+        "access_token=",
+        "refresh_token=",
+        "auth=",
+        "authorization:",
+    ] {
+        while let Some(idx) = find_ascii_case_insensitive(&sanitized, prefix) {
+            let val_start = idx + prefix.len();
+            let after = &sanitized[val_start..];
+            if after.starts_with("[REDACTED") {
+                break;
+            }
+            let (ws_len, val_bytes) = extract_val_span(after);
+            if val_bytes > 0 {
+                sanitized.replace_range(idx..val_start + ws_len + val_bytes, "[REDACTED_TOKEN]");
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Redact embedded user:password credentials in URIs (e.g. https://user:pass@host)
+    while let Some(idx) = sanitized.find("://") {
+        let after_scheme = &sanitized[idx + 3..];
+        if let Some(at_idx) = after_scheme.find('@') {
+            let user_info = &after_scheme[..at_idx];
+            if let Some(colon_idx) = user_info.find(':') {
+                let pass_start = idx + 3 + colon_idx + 1;
+                let pass_end = idx + 3 + at_idx;
+                if pass_end > pass_start
+                    && !sanitized[pass_start..pass_end].starts_with("[REDACTED")
+                {
+                    sanitized.replace_range(pass_start..pass_end, "[REDACTED_PASSWORD]");
+                    continue;
+                }
+            }
+        }
+        break;
     }
 
     sanitized
@@ -279,6 +371,18 @@ pub enum RuntimeError {
     #[error("Unknown runtime instance: {instance_id}")]
     UnknownInstance { instance_id: RuntimeInstanceId },
 
+    #[error("Runtime instance unavailable: {instance_id} ({reason})")]
+    InstanceUnavailable {
+        instance_id: RuntimeInstanceId,
+        reason: SanitizedRuntimeMessage,
+    },
+
+    #[error("Unsupported configuration for instance {instance_id}: {config_ref}")]
+    UnsupportedConfiguration {
+        instance_id: RuntimeInstanceId,
+        config_ref: RuntimeConfigRef,
+    },
+
     #[error(
         "Terminal state violation: session {session_id} is in terminal state '{current_state}', action '{attempted_action}' is forbidden"
     )]
@@ -288,11 +392,85 @@ pub enum RuntimeError {
         attempted_action: String,
     },
 
+    #[error(
+        "Event stream lagged for session {session_id}: skipped {skipped_count} events (expected sequence: {expected_sequence})"
+    )]
+    EventStreamLagged {
+        session_id: RuntimeSessionId,
+        skipped_count: u64,
+        expected_sequence: u64,
+    },
+
+    #[error(
+        "Event retention exceeded for session {session_id}: requested sequence {requested_sequence} is older than earliest retained sequence {earliest_available_sequence}"
+    )]
+    EventRetentionExceeded {
+        session_id: RuntimeSessionId,
+        requested_sequence: u64,
+        earliest_available_sequence: u64,
+    },
+
+    #[error(
+        "Event session mismatch: event belongs to session {actual}, expected session {expected} (sequence: {sequence})"
+    )]
+    EventSessionMismatch {
+        expected: RuntimeSessionId,
+        actual: RuntimeSessionId,
+        sequence: u64,
+    },
+
+    #[error("Invalid event sequence for session {session_id} at sequence {sequence}: {reason}")]
+    InvalidEventSequence {
+        session_id: RuntimeSessionId,
+        sequence: u64,
+        reason: SanitizedRuntimeMessage,
+    },
+
+    #[error(
+        "Event emission rejected for session {session_id}: session is in terminal state '{terminal_state}' (attempted sequence: {attempted_sequence})"
+    )]
+    EventAfterTerminalState {
+        session_id: RuntimeSessionId,
+        terminal_state: RuntimeLifecycleState,
+        attempted_sequence: u64,
+    },
+
+    #[error(
+        "Event stream sequence gap detected for session {session_id}: expected sequence {expected_sequence}, received sequence {received_sequence}"
+    )]
+    EventStreamGap {
+        session_id: RuntimeSessionId,
+        expected_sequence: u64,
+        received_sequence: u64,
+    },
+
     #[error("Internal runtime error: {reason}")]
     Internal { reason: SanitizedRuntimeMessage },
 }
 
 impl RuntimeError {
+    /// Constructs an InstanceUnavailable error.
+    pub fn instance_unavailable(
+        instance_id: RuntimeInstanceId,
+        reason: impl Into<SanitizedRuntimeMessage>,
+    ) -> Self {
+        Self::InstanceUnavailable {
+            instance_id,
+            reason: reason.into(),
+        }
+    }
+
+    /// Constructs an UnsupportedConfiguration error.
+    pub fn unsupported_configuration(
+        instance_id: RuntimeInstanceId,
+        config_ref: RuntimeConfigRef,
+    ) -> Self {
+        Self::UnsupportedConfiguration {
+            instance_id,
+            config_ref,
+        }
+    }
+
     /// Constructs a sanitized StartupFailed error.
     pub fn startup_failed(reason: impl Into<SanitizedRuntimeMessage>) -> Self {
         Self::StartupFailed {
