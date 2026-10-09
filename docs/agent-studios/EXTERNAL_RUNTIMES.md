@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
-> **Status**: Planned Architecture Specification (Target: Milestones M10–M12)
-> **Current Reality**: Internal Codex (`codex-rs`) is the only active production runtime. External runtimes are **PLANNED**.
+> **Status**: Interface Implemented (Milestone M10 COMPLETED; Adapters M11–M12 PLANNED)
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface and contract test matrix are **IMPLEMENTED**. Adapters are **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -28,14 +28,14 @@ The External Runtime subsystem integrates these distinct CLI agents into the Age
 │ Runtime Engine                 │ Status                         │
 ├────────────────────────────────┼────────────────────────────────┤
 │ Internal Codex (`codex-rs`)    │ [IMPLEMENTED & PRODUCTION]     │
-│ External Runtime API (M10)     │ [PLANNED]                      │
+│ External Runtime API (M10)     │ [IMPLEMENTED & TESTED]         │
 │ OpenCode Adapter (M11)         │ [PLANNED]                      │
 │ Claude Code Adapter (M12)      │ [PLANNED]                      │
 │ External Codex CLI Adapter     │ [PLANNED]                      │
 └────────────────────────────────┴────────────────────────────────┘
 ```
 
-Future agents and developers must never treat external runtimes as currently implemented. The `AgentRuntime` trait and child adapters are planned roadmap deliverables.
+The vendor-neutral `agent-studios-external-runtime` crate defines the authoritative interface, strongly-typed identifiers, lifecycle state machine, tristate capability model, event streaming, and registry. Concrete CLI adapters for OpenCode and Claude Code are scheduled for M11 and M12.
 
 ---
 
@@ -45,27 +45,53 @@ External runtimes implement a standardized asynchronous lifecycle trait that dec
 
 ```rust
 #[async_trait]
-pub trait AgentRuntime: Send + Sync + 'static {
-    /// Unique identifier for this runtime instance
-    fn runtime_id(&self) -> RuntimeId;
+pub trait AgentRuntime: Send + Sync {
+    /// Returns the unique implementation identifier for this runtime.
+    fn implementation_id(&self) -> &RuntimeImplementationId;
 
-    /// Discover available capabilities (tools, streaming, diffs)
-    async fn capabilities(&self) -> RuntimeCapabilitySet;
+    /// Discovers runtime availability, local binary path, and metadata in the environment.
+    async fn discover(&self) -> Result<DiscoveredRuntime, RuntimeError>;
 
-    /// Prepare isolated execution environment (worktree, env, secrets)
-    async fn prepare(&self, ctx: &RuntimePrepareContext) -> Result<(), RuntimeError>;
+    /// Advertises the static or dynamic capability profile supported by this runtime.
+    async fn capabilities(&self) -> RuntimeCapabilities;
 
-    /// Spawn or connect to the agent process
-    async fn start(&self, req: &RuntimeStartRequest) -> Result<RuntimeSessionHandle, RuntimeError>;
+    /// Starts a new external runtime process or session according to the start request.
+    async fn start(
+        &self,
+        request: RuntimeStartRequest,
+    ) -> Result<RuntimeSessionHandle, RuntimeError>;
 
-    /// Submit a turn or task prompt to the agent
-    async fn submit_turn(&self, handle: &RuntimeSessionHandle, turn: &TurnInput) -> Result<TurnStream, RuntimeError>;
+    /// Sends typed input (user text, continuation, or approval response) to an active session.
+    async fn send(
+        &self,
+        session_id: &RuntimeSessionId,
+        input: RuntimeInput,
+    ) -> Result<(), RuntimeError>;
 
-    /// Interrupt an active turn safely
-    async fn interrupt(&self, handle: &RuntimeSessionHandle) -> Result<(), RuntimeError>;
+    /// Interrupts the active execution turn while keeping the session process and context intact.
+    async fn interrupt(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError>;
 
-    /// Terminate the runtime process and clean up resources
-    async fn terminate(&self, handle: &RuntimeSessionHandle) -> Result<RuntimeExitStatus, RuntimeError>;
+    /// Resumes execution after interruption if the runtime advertises `RuntimeCapability::Resume`.
+    async fn resume(
+        &self,
+        session_id: &RuntimeSessionId,
+        input: Option<RuntimeInput>,
+    ) -> Result<(), RuntimeError>;
+
+    /// Terminates the runtime session permanently.
+    async fn stop(&self, session_id: &RuntimeSessionId) -> Result<(), RuntimeError>;
+
+    /// Queries the current lifecycle state of a session.
+    async fn status(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<RuntimeLifecycleState, RuntimeError>;
+
+    /// Subscribes to the broadcast stream of normalized events emitted by the session.
+    async fn events(
+        &self,
+        session_id: &RuntimeSessionId,
+    ) -> Result<broadcast::Receiver<RuntimeEvent>, RuntimeError>;
 }
 ```
 

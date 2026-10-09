@@ -114,10 +114,14 @@
 - **M09.3 (Deterministic Patch Reconciliation & Final Gate)**: Reconciliation engine validating patches via `git apply --check` and applying to integration workspaces. Safe worktree retention (zero destructive `git reset --hard` or `git clean -fdx`). Non-conflated state transitions (`Blocked(ReconciliationConflict)` != `Cancelled`). Full end-to-end WireMock integration passing all quality gates.
 - **M09.7 (Orphan-Thread Safety Fix)**: Enforces safe thread shutdown and removal invariant (`shutdown_and_wait_thread.await?` before `remove_thread_if_matches`), preventing untracked orphan threads on timeout or failure.
 
-### M10: External Runtime Interface [PLANNED]
-- Define standardized `AgentRuntime` lifecycle interface (prepare, start, submit turn, interrupt, terminate).
-- Establish process containment models (evaluating Windows Job Objects / AppContainer candidates for Windows, directory confinement, environment sanitization; Linux/macOS containment as future exploration).
-- Define structured JSON-RPC / SSE communication protocol for non-Codex agents.
+### M10: External Runtime Interface [COMPLETED]
+- Establish vendor-neutral `agent-studios-external-runtime` crate with zero provider coupling.
+- Define asynchronous `AgentRuntime` lifecycle trait (`discover`, `capabilities`, `start`, `send`, `interrupt`, `resume`, `stop`, `status`, `events`).
+- Strongly-typed identifier families with wire collision prevention (`RuntimeImplementationId`, `rt-inst-<uuid>`, `rt-sess-<uuid>`).
+- Strict lifecycle state machine with active/resumable `Interrupted` and fail-closed terminal transitions (`Stopped`, `Completed`, `Failed`).
+- Tristate capability profiles across 16 dimensions (`Supported`, `Unsupported`, `Unknown`).
+- Monotonically numbered event streams with typed event kinds and regex-free secret scrubbing.
+- In-process `FakeAgentRuntime` and comprehensive Section 20 contract matrices (A through M) verified.
 
 ### M11: OpenCode Runtime Adapter [PLANNED]
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.
