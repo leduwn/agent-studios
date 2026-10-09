@@ -1876,3 +1876,611 @@ async fn test_46_r09_shared_source_workspace_strict_fail_closed() {
     );
     assert!(req_managed.validate().is_ok());
 }
+
+// ============================================================================
+// Third-Round Closure Tests (SR3-01 to SR3-06)
+// ============================================================================
+
+#[tokio::test]
+async fn test_47_sr3_01_retention_capacity_1_bookkeeping() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+
+    // 1. Retention capacity 1 with emit()
+    let hub1 = SessionEventHub::new(session_id, instance_id, 1);
+    let ev1 = hub1
+        .emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(ev1.sequence, 1);
+
+    let ev2 = hub1
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "event 2".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(ev2.sequence, 2);
+
+    // Initial subscription must fail closed because sequence 1 was evicted
+    let err_none = hub1.subscribe(None).await.unwrap_err();
+    assert!(matches!(
+        err_none,
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence: 0,
+            earliest_available_sequence: 2,
+            ..
+        }
+    ));
+
+    // after_sequence = Some(0) must fail closed
+    let err_0 = hub1.subscribe(Some(0)).await.unwrap_err();
+    assert!(matches!(
+        err_0,
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence: 0,
+            earliest_available_sequence: 2,
+            ..
+        }
+    ));
+
+    // after_sequence = Some(1) (E - 1) succeeds and replays sequence 2
+    let mut sub_1 = hub1.subscribe(Some(1)).await.unwrap();
+    let replayed = sub_1.next_event().await.unwrap().unwrap();
+    assert_eq!(replayed.sequence, 2);
+
+    // after_sequence = Some(2) succeeds with empty replay
+    let sub_2 = hub1.subscribe(Some(2)).await.unwrap();
+    assert_eq!(sub_2.last_seen_sequence(), 2);
+
+    // after_sequence = Some(3) fails with InvalidReplayOffset
+    let err_3 = hub1.subscribe(Some(3)).await.unwrap_err();
+    assert!(matches!(
+        err_3,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence: 3,
+            latest_available_sequence: 2,
+            ..
+        }
+    ));
+
+    // 2. Retention capacity 1 with ingest()
+    let hub_ingest = SessionEventHub::new(session_id, instance_id, 1);
+    hub_ingest
+        .ingest(RuntimeEvent::new(
+            session_id,
+            1,
+            RuntimeEventKind::SessionStarted {
+                session_id,
+                instance_id,
+            },
+        ))
+        .await
+        .unwrap();
+    hub_ingest
+        .ingest(RuntimeEvent::new(
+            session_id,
+            2,
+            RuntimeEventKind::OutputDelta {
+                text: "ingested 2".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let err_ingest_none = hub_ingest.subscribe(None).await.unwrap_err();
+    assert!(matches!(
+        err_ingest_none,
+        RuntimeError::EventRetentionExceeded {
+            requested_sequence: 0,
+            earliest_available_sequence: 2,
+            ..
+        }
+    ));
+    let mut sub_ingest = hub_ingest.subscribe(Some(1)).await.unwrap();
+    assert_eq!(sub_ingest.next_event().await.unwrap().unwrap().sequence, 2);
+
+    // 3. Retention capacity 2: sequences 1, 2, 3
+    let hub2 = SessionEventHub::new(session_id, instance_id, 2);
+    hub2.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    hub2.emit(RuntimeEventKind::OutputDelta {
+        text: "delta 2".into(),
+    })
+    .await
+    .unwrap();
+    hub2.emit(RuntimeEventKind::OutputDelta {
+        text: "delta 3".into(),
+    })
+    .await
+    .unwrap();
+
+    // Offset 0 rejected (E is 2)
+    assert!(matches!(
+        hub2.subscribe(Some(0)).await.unwrap_err(),
+        RuntimeError::EventRetentionExceeded {
+            earliest_available_sequence: 2,
+            ..
+        }
+    ));
+    // Offset 1 succeeds and replays [2, 3]
+    let mut sub_cap2 = hub2.subscribe(Some(1)).await.unwrap();
+    assert_eq!(sub_cap2.next_event().await.unwrap().unwrap().sequence, 2);
+    assert_eq!(sub_cap2.next_event().await.unwrap().unwrap().sequence, 3);
+}
+
+#[tokio::test]
+async fn test_48_sr3_02_strictly_single_session_started_validation() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+
+    let mut validator = EventBoundaryValidator::new(session_id, instance_id);
+
+    // 1. Sequence 1 must be SessionStarted
+    let valid_start = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    validator.validate(&valid_start).unwrap();
+    assert_eq!(validator.expected_sequence(), 2);
+
+    // 2. Duplicate SessionStarted at sequence 2 is rejected
+    let dup_start = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    let err_dup = validator.validate(&dup_start).unwrap_err();
+    assert!(matches!(
+        err_dup,
+        RuntimeError::InvalidEventSequence { sequence: 2, .. }
+    ));
+    // Validator expected sequence must not advance on rejected event
+    assert_eq!(validator.expected_sequence(), 2);
+
+    // 3. Duplicate SessionStarted with foreign session/instance ID at sequence 2 rejected
+    let dup_foreign = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::SessionStarted {
+            session_id: RuntimeSessionId::generate(),
+            instance_id: RuntimeInstanceId::generate(),
+        },
+    );
+    assert!(matches!(
+        validator.validate(&dup_foreign).unwrap_err(),
+        RuntimeError::InvalidEventSequence { sequence: 2, .. }
+    ));
+    assert_eq!(validator.expected_sequence(), 2);
+
+    // 4. Valid non-SessionStarted event at sequence 2 succeeds
+    let valid_seq2 = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::OutputDelta {
+            text: "delta".into(),
+        },
+    );
+    validator.validate(&valid_seq2).unwrap();
+    assert_eq!(validator.expected_sequence(), 3);
+
+    // 5. Duplicate SessionStarted through SessionEventHub::emit() rejected
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    let hub_dup_err = hub
+        .emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        hub_dup_err,
+        RuntimeError::InvalidEventSequence { sequence: 2, .. }
+    ));
+    assert_eq!(hub.recorded_events().await.len(), 1);
+
+    // 6. Duplicate SessionStarted through SessionEventHub::ingest() rejected
+    let ingest_dup = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    let ingest_dup_err = hub.ingest(ingest_dup).await.unwrap_err();
+    assert!(matches!(
+        ingest_dup_err,
+        RuntimeError::InvalidEventSequence { sequence: 2, .. }
+    ));
+    assert_eq!(hub.recorded_events().await.len(), 1);
+}
+
+struct PanickingAgentRuntime {
+    id: RuntimeImplementationId,
+    panic_message: String,
+}
+
+impl PanickingAgentRuntime {
+    fn new(name: &str, panic_message: &str) -> Self {
+        Self {
+            id: RuntimeImplementationId::new(name).unwrap(),
+            panic_message: panic_message.to_string(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentRuntime for PanickingAgentRuntime {
+    fn implementation_id(&self) -> &RuntimeImplementationId {
+        &self.id
+    }
+
+    async fn discover(&self) -> Result<Vec<DiscoveredRuntimeInstance>, RuntimeError> {
+        panic!("{}", self.panic_message);
+    }
+
+    async fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::default()
+    }
+
+    async fn start(
+        &self,
+        _request: RuntimeStartRequest,
+    ) -> Result<RuntimeSessionHandle, RuntimeError> {
+        Err(RuntimeError::startup_failed("panicking runtime"))
+    }
+
+    async fn send(
+        &self,
+        _session: &RuntimeSessionRef,
+        _input: RuntimeInput,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::send_failed(
+            RuntimeSessionId::generate(),
+            "unsupported",
+        ))
+    }
+
+    async fn interrupt(&self, _session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
+        Err(RuntimeError::interruption_failed(
+            RuntimeSessionId::generate(),
+            "unsupported",
+        ))
+    }
+
+    async fn resume(
+        &self,
+        _session: &RuntimeSessionRef,
+        _input: Option<RuntimeInput>,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::resume_failed(
+            RuntimeSessionId::generate(),
+            "unsupported",
+        ))
+    }
+
+    async fn stop(&self, _session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
+        Err(RuntimeError::stop_failed(
+            RuntimeSessionId::generate(),
+            "unsupported",
+        ))
+    }
+
+    async fn status(
+        &self,
+        _session: &RuntimeSessionRef,
+    ) -> Result<RuntimeLifecycleState, RuntimeError> {
+        Ok(RuntimeLifecycleState::Running)
+    }
+
+    async fn events_after(
+        &self,
+        _session: &RuntimeSessionRef,
+        _after_sequence: Option<u64>,
+    ) -> Result<RuntimeEventSubscription, RuntimeError> {
+        Err(RuntimeError::Internal {
+            reason: SanitizedRuntimeMessage::new("unsupported"),
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_49_sr3_03_sr3_05_real_registry_worker_panic_attribution() {
+    let registry = RuntimeRegistry::new();
+
+    let canary = "SECRET_CANARY_sk-ant-api03-TOP_SECRET_CREDENTIAL";
+    let panicking_runtime = Arc::new(PanickingAgentRuntime::new("panicking-impl", canary));
+    let healthy_runtime = Arc::new(FakeAgentRuntime::new("healthy-impl"));
+    let failing_runtime = Arc::new(FakeAgentRuntime::new("failing-impl"));
+    failing_runtime
+        .set_fail_discovery(Some("Explicit typed failure".into()))
+        .await;
+
+    registry.register(panicking_runtime).await.unwrap();
+    registry.register(healthy_runtime).await.unwrap();
+    registry.register(failing_runtime).await.unwrap();
+
+    let outcome = registry.discover_all().await;
+
+    // 1. Healthy instances are successfully returned
+    assert_eq!(outcome.instances.len(), 1);
+    assert_eq!(
+        outcome.instances[0].implementation_id.as_str(),
+        "healthy-impl"
+    );
+
+    // 2. Both failures (panic and typed err) are present
+    assert_eq!(outcome.failures.len(), 2);
+
+    let panic_id = RuntimeImplementationId::new("panicking-impl").unwrap();
+    assert!(outcome.failures.contains_key(&panic_id));
+    let panic_failure = outcome.failures.get(&panic_id).unwrap().to_string();
+
+    // 3. Panic diagnostic is properly attributed and classified
+    assert!(panic_failure.contains("panicked"));
+    assert!(panic_failure.contains("panicking-impl"));
+
+    // 4. Raw canary secret payload is NEVER exposed in the failure diagnostic
+    assert!(
+        !panic_failure.contains("SECRET_CANARY"),
+        "Sanitized message must not contain secret canary"
+    );
+    assert!(
+        !panic_failure.contains("sk-ant-"),
+        "Sanitized message must not contain api key prefix"
+    );
+
+    let fail_id = RuntimeImplementationId::new("failing-impl").unwrap();
+    assert!(outcome.failures.contains_key(&fail_id));
+    let err_msg = outcome.failures.get(&fail_id).unwrap().to_string();
+    assert!(err_msg.contains("Explicit typed failure"));
+}
+
+#[tokio::test]
+async fn test_50_sr3_04_real_concurrent_event_emission() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 250));
+
+    // Emit sequence 1 SessionStarted
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    // Subscribe before concurrent emission to test live stream delivery
+    let mut live_sub = hub.subscribe(Some(1)).await.unwrap();
+
+    let num_producers = 10;
+    let events_per_producer = 10;
+    let barrier = Arc::new(Barrier::new(num_producers));
+
+    let mut handles = Vec::new();
+    for producer_idx in 0..num_producers {
+        let hub_clone = Arc::clone(&hub);
+        let barrier_clone = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier_clone.wait().await;
+            for i in 0..events_per_producer {
+                hub_clone
+                    .emit(RuntimeEventKind::OutputDelta {
+                        text: format!("producer-{producer_idx}-event-{i}"),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let recorded = hub.recorded_events().await;
+    // Exactly 101 events (1 SessionStarted + 10 * 10 OutputDelta)
+    assert_eq!(recorded.len(), 101);
+
+    // Verify sequences are strictly gapless and monotonic from 1 to 101
+    let mut seen_sequences = HashSet::new();
+    for (idx, event) in recorded.iter().enumerate() {
+        let expected_seq = (idx + 1) as u64;
+        assert_eq!(event.sequence, expected_seq);
+        assert_eq!(event.session_id, session_id);
+        assert!(seen_sequences.insert(event.sequence));
+    }
+    assert_eq!(seen_sequences.len(), 101);
+
+    // Verify live subscription received 100 events in strictly ascending sequence
+    for expected_seq in 2..=101 {
+        let ev = live_sub.next_event().await.unwrap().unwrap();
+        assert_eq!(ev.sequence, expected_seq);
+    }
+
+    // Now test concurrent terminal transition attempts
+    let terminal_barrier = Arc::new(Barrier::new(5));
+    let mut term_handles = Vec::new();
+    for i in 0..5 {
+        let hub_clone = Arc::clone(&hub);
+        let b_clone = Arc::clone(&terminal_barrier);
+        term_handles.push(tokio::spawn(async move {
+            b_clone.wait().await;
+            if i % 2 == 0 {
+                hub_clone.emit(RuntimeEventKind::Stopped).await
+            } else {
+                hub_clone
+                    .emit(RuntimeEventKind::Completed {
+                        summary: Some("done".into()),
+                    })
+                    .await
+            }
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut rejection_count = 0;
+    for h in term_handles {
+        let res = h.await.unwrap();
+        match res {
+            Ok(ev) => {
+                success_count += 1;
+                assert_eq!(ev.sequence, 102);
+            }
+            Err(RuntimeError::EventAfterTerminalState { .. }) => {
+                rejection_count += 1;
+            }
+            Err(other) => {
+                panic!(
+                    "Unexpected error from concurrent terminal transition: {:?}",
+                    other
+                )
+            }
+        }
+    }
+    assert_eq!(success_count, 1, "Exactly one terminal event must succeed");
+    assert_eq!(
+        rejection_count, 4,
+        "Remaining terminal transitions must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn test_51_sr3_06_future_replay_offset_validation_and_terminal_completion() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+
+    // 1. Empty hub (latest sequence is 0)
+    let empty_hub = SessionEventHub::new(session_id, instance_id, 10);
+
+    // after_sequence = None (requested 0) succeeds on empty hub
+    let sub_none = empty_hub.subscribe(None).await;
+    assert!(sub_none.is_ok());
+
+    // after_sequence = Some(0) succeeds on empty hub
+    let sub_0 = empty_hub.subscribe(Some(0)).await;
+    assert!(sub_0.is_ok());
+
+    // after_sequence = Some(1) fails with InvalidReplayOffset (1 > 0)
+    let err_future1 = empty_hub.subscribe(Some(1)).await.unwrap_err();
+    assert!(matches!(
+        err_future1,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence: 1,
+            latest_available_sequence: 0,
+            ..
+        }
+    ));
+
+    // after_sequence = Some(u64::MAX) fails without arithmetic overflow
+    let err_max = empty_hub.subscribe(Some(u64::MAX)).await.unwrap_err();
+    assert!(matches!(
+        err_max,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence,
+            latest_available_sequence: 0,
+            ..
+        } if requested_sequence == u64::MAX
+    ));
+
+    // 2. Hub with 3 events
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    hub.emit(RuntimeEventKind::OutputDelta { text: "1".into() })
+        .await
+        .unwrap();
+    hub.emit(RuntimeEventKind::OutputDelta { text: "2".into() })
+        .await
+        .unwrap();
+
+    // Valid subscription at latest sequence 3 (empty replay, ready for live)
+    let sub_at_latest = hub.subscribe(Some(3)).await;
+    assert!(sub_at_latest.is_ok());
+
+    // Subscription beyond latest sequence 3 fails
+    let err_beyond = hub.subscribe(Some(4)).await.unwrap_err();
+    assert!(matches!(
+        err_beyond,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence: 4,
+            latest_available_sequence: 3,
+            ..
+        }
+    ));
+
+    let err_far_future = hub.subscribe(Some(100)).await.unwrap_err();
+    assert!(matches!(
+        err_far_future,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence: 100,
+            latest_available_sequence: 3,
+            ..
+        }
+    ));
+
+    // 3. Terminal session deterministic subscription completion
+    let term_ev = hub.emit(RuntimeEventKind::Stopped).await.unwrap();
+    assert_eq!(term_ev.sequence, 4);
+
+    // Subscribing at terminal sequence 4 must complete immediately without hanging
+    let mut term_sub = hub.subscribe(Some(4)).await.unwrap();
+    let term_next = term_sub.next_event().await.unwrap();
+    assert!(
+        term_next.is_none(),
+        "Must return Ok(None) immediately for terminal subscription at latest"
+    );
+
+    // Subscribing at offset 2 replays event 3 and terminal event 4, then closes
+    let mut replay_sub = hub.subscribe(Some(2)).await.unwrap();
+    let ev3 = replay_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(ev3.sequence, 3);
+    let ev4 = replay_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(ev4.sequence, 4);
+    assert!(matches!(ev4.kind, RuntimeEventKind::Stopped));
+    let ev_end = replay_sub.next_event().await.unwrap();
+    assert!(
+        ev_end.is_none(),
+        "Stream must close cleanly after yielding terminal replay event"
+    );
+
+    // Subscription beyond terminal sequence 4 still fails with InvalidReplayOffset
+    let err_after_term = hub.subscribe(Some(5)).await.unwrap_err();
+    assert!(matches!(
+        err_after_term,
+        RuntimeError::InvalidReplayOffset {
+            requested_sequence: 5,
+            latest_available_sequence: 4,
+            ..
+        }
+    ));
+}

@@ -4,9 +4,17 @@
 //! normalized event model, session event hub with replay history, non-secret value validation,
 //! strict start validation, and thread-safe runtime registry.
 //!
-//! All contracts are verified by a comprehensive 51-test contract and regression test suite
+//! All contracts are verified by a comprehensive 56-test contract and regression test suite
 //! covering atomic event serialization, boundary validation, credential sanitization,
 //! lifecycle error precedence, and fail-closed workspace containment.
+//!
+//! # Workspace Policy and Process Sandboxing Scope
+//!
+//! Milestone M10 enforces typed policy boundaries at the API and request layer (for example,
+//! strictly rejecting [`ExecutionWorkspace::SharedSource`] workspaces across all access modes
+//! and forbidding plaintext credentials in configuration). M10 does **not** provide kernel-level
+//! or OS-level process sandboxing (cgroups, namespaces, seccomp, AppArmor, or Windows Job Objects).
+//! OS-level runtime sandboxing and process containment are deferred to Milestone M11.
 //!
 //! # Core Subsystems
 //!

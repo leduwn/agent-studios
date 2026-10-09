@@ -143,10 +143,21 @@
   - R08: Iterative credential sanitization across multi-URL strings and query parameters without truncation.
   - R09: Strict fail-closed rejection of `ExecutionWorkspace::SharedSource` under all access modes.
   - R10: Full documentation, roadmap, and evidence alignment across all contracts.
-- 51-test contract verification suite (49 contract regression tests + 2 unit tests) passing with zero failures.
+- Remediated all 8 third-round targeted closure findings (SR3-01 to SR3-08):
+  - SR3-01: Correct retention capacity 1 bookkeeping in `event.rs` so `earliest_retained_sequence` is never stale.
+  - SR3-02: Strictly single authoritative `SessionStarted` validation in `EventBoundaryValidator` (rejects duplicates without state mutation).
+  - SR3-03: Sanitize registry worker panic diagnostics before logging to `tracing::error!()`.
+  - SR3-04: Multi-producer Tokio barrier concurrency tests (10 producers, 100 events, 5 competing terminals) proving monotonic gapless event streams.
+  - SR3-05: Real registry worker panic attribution with sensitive credential canary and elimination of task mapping races.
+  - SR3-06: Typed `InvalidReplayOffset` validation and deterministic terminal subscription completion.
+  - SR3-07: Clarified workspace isolation scope: M10 enforces typed request/policy boundaries (rejecting `SharedSource`); OS process sandboxing is deferred to M11.
+  - SR3-08: Complete milestone quality gates (fmt, clippy, workspace tests, builds) and review artifact generation.
+- 56-test contract verification suite (54 contract regression tests + 2 unit tests) passing with zero failures.
 
-### M11: OpenCode Runtime Adapter [PLANNED]
+### M11: OpenCode Runtime Adapter & OS Process Sandboxing [PLANNED]
+
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.
+- Implement OS-level process sandboxing and containment (Windows Job Objects / AppContainer, Linux cgroups/namespaces).
 - Map OpenCode provider configurations to Agent Studios `ProviderCatalog` instances.
 - Translate OpenCode session steps into Control Plane `Task` and `Run` entities.
 

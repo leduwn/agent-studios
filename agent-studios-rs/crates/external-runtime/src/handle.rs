@@ -431,6 +431,10 @@ impl RuntimeStartRequest {
 
     /// Validates start request invariants, enforcing workspace isolation rules,
     /// environment variable binding integrity, and metadata credential sanitization.
+    ///
+    /// Note: Milestone M10 enforces typed API and workspace policy boundaries at the protocol/request
+    /// layer (strictly rejecting SharedSource workspaces and plaintext credentials). It does not provide
+    /// kernel-level or OS-level process sandboxing; OS-level runtime containment primitives are deferred to Milestone M11.
     pub fn validate(&self) -> Result<(), RuntimeError> {
         // Enforce strict workspace isolation (SharedSource strictly forbidden under all access modes pending M11)
         if matches!(self.workspace, ExecutionWorkspace::SharedSource { .. }) {

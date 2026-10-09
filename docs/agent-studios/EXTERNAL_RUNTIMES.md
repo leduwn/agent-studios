@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
 > **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; Adapters M11–M12 PLANNED)
-> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 51-test contract verification suite (49 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 56-test contract verification suite (54 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -156,22 +156,40 @@ Milestone M10.1 systematically resolved all findings across the external runtime
 - **R07 (P2): Registry Worker Panic Attribution**: `RuntimeRegistry::discover_all()` tracks implementation identity across task panics and cancellations on `JoinSet` and reports typed sanitized failures in `outcome.failures`.
 - **R08 (P1): Multi-URL and Query Parameter Credential Sanitization**: `sanitize_error_message()` iteratively processes and redacts all credential-bearing URIs and query parameters without early truncation.
 - **R09 (P2): ReadOnly Workspace Policy Demonstrated Enforcement**: Fail closed on `ExecutionWorkspace::SharedSource` under all access modes (including `ReadOnly`) with `RuntimeError::InvalidWorkspaceAccess` pending M11 verified containment primitives.
-- **R10 (P2): Documentation & Evidence Alignment**: Comprehensive alignment across architecture docs, roadmap, trait signatures, and 51 passing tests (49 contract regression tests + 2 unit tests).
+- **R10 (P2): Documentation & Evidence Alignment**: Comprehensive alignment across architecture docs, roadmap, trait signatures, and passing test suites.
+
+### Round 3 Targeted Closure Matrix (SR3-01 to SR3-08)
+
+- **SR3-01 (P1): Replay Retention Bookkeeping & Capacity 1 Correctness**: Unified history append and retention management in `HubState::record_event()` ensures `earliest_retained_sequence` is continuously synchronized with `state.history.front().unwrap().sequence`, eliminating stale sequence indices when capacity is 1 or buffer evictions occur.
+- **SR3-02 (P1): Strictly Single Authoritative SessionStarted Validation**: `EventBoundaryValidator` validates that sequence 1 must be `SessionStarted` matching session and instance IDs, and strictly rejects any duplicate `SessionStarted` attempt at `sequence > 1` without sequence counter advance or state mutation.
+- **SR3-03 (P1): Panic Diagnostic Log Sanitization in Registry**: Registry worker panic and cancellation handlers use stable classified log messages without interpolating untrusted `JoinError` or panic payloads into `tracing::error!()`.
+- **SR3-04 (P2): High-Concurrency Tokio Event Emission & Competing Terminals**: Real multi-task Tokio concurrency tests (`test_50_sr3_04_real_concurrent_event_emission`) with 10 producers, 100 events, barrier synchronization, and 5 competing terminal transitions verifying strict monotonicity, gapless sequencing, and single-winner terminal closure.
+- **SR3-05 (P2): Registry Worker Panic Attribution with Sensitive Canary & Race Elimination**: Worker tasks map `handle.id()` synchronously on the spawning thread into `task_map`, eliminating task attribution races. Verified via `test_49_sr3_03_sr3_05_real_registry_worker_panic_attribution` with a synthetic sensitive credential canary that is never leaked to logs or outcome diagnostics.
+- **SR3-06 (P2): Future Replay Offset Validation & Deterministic Terminal Completion**: Added typed `RuntimeError::InvalidReplayOffset` for subscription requests where `after_sequence > latest_committed`. Subscribing to an already-terminal session at latest committed sequence immediately sets `is_closed: true` and cleanly returns `Ok(None)` without hanging on broadcast.
+- **SR3-07 (P2): Workspace Isolation Policy vs OS Sandboxing Scope Clarification**: Architecture docs, roadmap, and crate doc comments explicitly state that M10 enforces typed API and workspace policy boundaries at the request layer (rejecting `SharedSource`), while kernel/OS-level process sandboxing is deferred to M11.
+- **SR3-08 (P2): Milestone Quality Gates & Review Artifacts**: 56 tests passing (54 contract tests + 2 unit tests), workspace fmt, clippy pedantic green, zero diff under `codex-rs/`, and complete review bundle exported.
 
 ---
 
-## 5. Process Containment & Isolation
+## 5. Workspace Isolation Policy & Process Containment Scope
 
-Because external runtimes execute foreign CLI binaries (Node.js, Python, or Go processes), Agent Studios enforces strict process containment:
+> **Important Boundary Clarification (SR3-07)**:  
+> Milestone M10 enforces **typed policy boundaries** at the API, configuration, and request level:
+>
+> - Rejecting `ExecutionWorkspace::SharedSource` across all access modes (`ReadOnly` and `Mutating`) to prevent unmanaged host repository access.
+> - Rejecting plaintext credentials and forbidden keywords in metadata and literal environment bindings.
+> - Enforcing pre-spawn validation of instance identity, availability, and supported configurations.
+>
+> Milestone M10 does **NOT** provide kernel-level or OS-level process sandboxing (such as Linux cgroups, namespaces, seccomp, AppArmor, or Windows Job Objects/AppContainer). OS-level process isolation and containment primitives are explicitly scheduled for **Milestone M11** alongside concrete CLI adapters.
 
-1. **Subprocess Sandboxing (Planned Candidate / Future Exploration in M10+)**:
-   - On Windows: Windows Job Objects and AppContainer are planned candidates for process containment with CPU, memory, and handle quotas.
-   - On Linux/macOS: Linux cgroups/namespaces and macOS sandbox-exec are future exploration for platform containment.
+1. **Subprocess Sandboxing (Deferred to M11)**:
+   - On Windows: Windows Job Objects and AppContainer will be evaluated in M11 for OS-level CPU, memory, network, and handle quotas.
+   - On Linux/macOS: Linux cgroups/namespaces and platform containment will be implemented in M11 alongside adapter execution.
 2. **Directory Confinement**:
    - External processes are strictly rooted in their assigned isolated Git worktree (`cwd`).
-   - Access to parent repositories, global directories, or sibling worktrees is blocked at the OS or path-mapping level.
+   - Access to parent repositories, global directories, or sibling worktrees is blocked at the workspace policy level in M10 and at the OS boundary in M11.
 3. **Environment Sanitization**:
-   - Environment variables are scrubbed. Global API keys and tokens are never leaked into the child process environment unless explicitly configured for that specific runtime instance.
+   - Environment variables are scrubbed. Global API keys and tokens are never leaked into the child process environment unless explicitly configured for that specific runtime instance via validated `SecretReference` bindings.
 4. **Structured Stdout / SSE Parsing**:
    - The Control Plane communicates with external agents over structured protocols (JSON-RPC over stdin/stdout or local SSE sockets).
    - Unstructured terminal output is captured in raw execution logs, but state transitions are driven strictly by typed events.

@@ -240,6 +240,14 @@ impl EventBoundaryValidator {
                     });
                 }
             }
+        } else if matches!(&event.kind, RuntimeEventKind::SessionStarted { .. }) {
+            return Err(RuntimeError::InvalidEventSequence {
+                session_id: self.session_id,
+                sequence: event.sequence,
+                reason: SanitizedRuntimeMessage::new(
+                    "Duplicate SessionStarted event: SessionStarted is authoritative and permitted strictly once at sequence 1",
+                ),
+            });
         }
 
         // Advance expected sequence
@@ -272,6 +280,19 @@ struct HubState {
     validator: EventBoundaryValidator,
     history: VecDeque<RuntimeEvent>,
     earliest_retained_sequence: u64,
+}
+
+impl HubState {
+    fn record_event(&mut self, event: RuntimeEvent, retention_limit: usize) {
+        let limit = retention_limit.max(1);
+        self.history.push_back(event);
+        while self.history.len() > limit {
+            self.history.pop_front();
+        }
+        if let Some(first) = self.history.front() {
+            self.earliest_retained_sequence = first.sequence;
+        }
+    }
 }
 
 /// Authoritative event hub managing sequence generation, bounded replay history,
@@ -332,14 +353,7 @@ impl SessionEventHub {
         let event = RuntimeEvent::new(self.session_id, sequence, kind);
 
         state.validator.validate(&event)?;
-
-        if state.history.len() >= self.retention_limit {
-            state.history.pop_front();
-            if let Some(first) = state.history.front() {
-                state.earliest_retained_sequence = first.sequence;
-            }
-        }
-        state.history.push_back(event.clone());
+        state.record_event(event.clone(), self.retention_limit);
 
         let _ = self.live_tx.send(event.clone());
         Ok(event)
@@ -351,14 +365,7 @@ impl SessionEventHub {
         let mut state = self.state.write().await;
         // Validate against state machine - rejects before mutating any hub state
         state.validator.validate(&event)?;
-
-        if state.history.len() >= self.retention_limit {
-            state.history.pop_front();
-            if let Some(first) = state.history.front() {
-                state.earliest_retained_sequence = first.sequence;
-            }
-        }
-        state.history.push_back(event.clone());
+        state.record_event(event.clone(), self.retention_limit);
 
         let _ = self.live_tx.send(event);
         Ok(())
@@ -373,12 +380,23 @@ impl SessionEventHub {
         // 1. Subscribe to live broadcast before reading history to prevent drop window
         let live_rx = self.live_tx.subscribe();
 
-        // 2. Snapshot history under read lock
+        // 2. Snapshot history and state under read lock
         let state = self.state.read().await;
         let earliest = state.earliest_retained_sequence;
+        let latest_committed = state.history.back().map(|ev| ev.sequence).unwrap_or(0);
+        let is_terminal = state.validator.terminal_state().is_some();
 
         let requested_seq = after_sequence.unwrap_or(0);
         let expected_first_seq = requested_seq.saturating_add(1);
+
+        // Check if requested sequence is in the future beyond latest committed
+        if requested_seq > latest_committed {
+            return Err(RuntimeError::InvalidReplayOffset {
+                session_id: self.session_id,
+                requested_sequence: requested_seq,
+                latest_available_sequence: latest_committed,
+            });
+        }
 
         // Check if requested sequence is older than retained history
         // When earliest is E, after_sequence = Some(E - 1) means expected_first_seq = E, which is valid.
@@ -399,14 +417,14 @@ impl SessionEventHub {
             .collect();
         drop(state);
 
-        let last_seen_sequence = requested_seq;
+        let is_already_finished = replay_events.is_empty() && is_terminal;
 
         Ok(RuntimeEventSubscription {
             session_id: self.session_id,
             replay_queue: replay_events,
             live_rx,
-            last_seen_sequence,
-            is_closed: false,
+            last_seen_sequence: requested_seq,
+            is_closed: is_already_finished,
         })
     }
 
@@ -447,7 +465,7 @@ impl RuntimeEventSubscription {
         // 1. Drain replay queue first
         if let Some(event) = self.replay_queue.pop_front() {
             self.last_seen_sequence = event.sequence;
-            if event.kind.is_terminal() && self.replay_queue.is_empty() {
+            if event.kind.is_terminal() {
                 self.is_closed = true;
             }
             return Ok(Some(event));

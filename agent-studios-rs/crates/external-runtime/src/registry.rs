@@ -139,22 +139,17 @@ impl RuntimeRegistry {
                 .collect()
         }; // Lock dropped before await
 
-        let task_map = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-            tokio::task::Id,
-            RuntimeImplementationId,
-        >::new()));
-
+        let mut task_map =
+            std::collections::HashMap::<tokio::task::Id, RuntimeImplementationId>::new();
         let mut join_set = JoinSet::new();
+
         for (id, runtime) in entries.clone() {
-            let task_map = Arc::clone(&task_map);
             let impl_id = id.clone();
-            join_set.spawn(async move {
-                if let Some(task_id) = tokio::task::try_id() {
-                    task_map.lock().unwrap().insert(task_id, impl_id.clone());
-                }
+            let handle = join_set.spawn(async move {
                 let res = runtime.discover().await;
                 (impl_id, res)
             });
+            task_map.insert(handle.id(), id);
         }
 
         let mut collected: BTreeMap<
@@ -167,19 +162,26 @@ impl RuntimeRegistry {
         while let Some(join_res) = join_set.join_next().await {
             match join_res {
                 Ok((id, discover_res)) => {
+                    task_map.retain(|_, v| v != &id);
                     collected.insert(id, discover_res);
                 }
                 Err(panic_err) => {
                     let task_id = panic_err.id();
-                    let attributed_id = task_map.lock().unwrap().remove(&task_id);
-                    let reason = if panic_err.is_panic() {
-                        format!("Runtime discovery worker panicked: {panic_err}")
+                    let attributed_id = task_map.remove(&task_id);
+                    let action = if panic_err.is_panic() {
+                        "panicked"
                     } else {
-                        format!("Runtime discovery worker cancelled: {panic_err}")
+                        "was cancelled"
                     };
-                    tracing::error!("{reason}");
+                    let log_msg = match &attributed_id {
+                        Some(id) => {
+                            format!("Runtime discovery worker for implementation '{id}' {action}")
+                        }
+                        None => format!("Runtime discovery worker {action}"),
+                    };
+                    tracing::error!("{log_msg}");
                     if let Some(id) = attributed_id {
-                        worker_failures.insert(id, SanitizedRuntimeMessage::new(reason));
+                        worker_failures.insert(id, SanitizedRuntimeMessage::new(log_msg));
                     }
                 }
             }

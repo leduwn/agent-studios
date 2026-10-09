@@ -411,6 +411,15 @@ pub enum RuntimeError {
     },
 
     #[error(
+        "Invalid replay offset for session {session_id}: requested sequence {requested_sequence} exceeds latest committed sequence {latest_available_sequence}"
+    )]
+    InvalidReplayOffset {
+        session_id: RuntimeSessionId,
+        requested_sequence: u64,
+        latest_available_sequence: u64,
+    },
+
+    #[error(
         "Event session mismatch: event belongs to session {actual}, expected session {expected} (sequence: {sequence})"
     )]
     EventSessionMismatch {
@@ -452,6 +461,19 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Constructs an InvalidReplayOffset error.
+    pub fn invalid_replay_offset(
+        session_id: RuntimeSessionId,
+        requested_sequence: u64,
+        latest_available_sequence: u64,
+    ) -> Self {
+        Self::InvalidReplayOffset {
+            session_id,
+            requested_sequence,
+            latest_available_sequence,
+        }
+    }
+
     /// Constructs an InvalidWorkspaceAccess error.
     pub fn invalid_workspace_access(reason: impl Into<SanitizedRuntimeMessage>) -> Self {
         Self::InvalidWorkspaceAccess {
