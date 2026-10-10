@@ -4,10 +4,11 @@
 //! normalized event model, session event hub with replay history, non-secret value validation,
 //! strict start validation, and thread-safe runtime registry.
 //!
-//! All contracts are verified by a comprehensive 63-test contract and regression test suite
-//! covering atomic event serialization, boundary validation, credential sanitization,
-//! lifecycle error precedence, concurrent multi-subscriber replay handoff, retention overflow,
-//! lag recovery, and fail-closed workspace containment.
+//! All contracts are verified by a comprehensive 70-test contract and regression test suite
+//! (68 integration contract tests and 2 unit tests) covering atomic event serialization,
+//! boundary validation, payload-independent diagnostic kind classification, canary leak prevention,
+//! state mutation protection, credential sanitization, lifecycle error precedence, concurrent
+//! multi-subscriber replay handoff, retention overflow, lag recovery, and fail-closed workspace containment.
 //!
 //! # Workspace Policy, Process Panic Boundary, and Sandboxing Scope
 //!

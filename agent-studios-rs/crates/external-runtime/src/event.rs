@@ -101,6 +101,28 @@ impl RuntimeEventKind {
             _ => None,
         }
     }
+
+    /// Returns a stable, payload-independent static identifier for this event variant.
+    ///
+    /// Used strictly for safe diagnostic classification and rejection messages
+    /// without disclosing sensitive, opaque, or untrusted payload contents.
+    pub fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::SessionStarted { .. } => "session_started",
+            Self::StatusChanged { .. } => "status_changed",
+            Self::OutputDelta { .. } => "output_delta",
+            Self::ToolStarted { .. } => "tool_started",
+            Self::ToolCompleted { .. } => "tool_completed",
+            Self::ApprovalRequested { .. } => "approval_requested",
+            Self::ArtifactProduced { .. } => "artifact_produced",
+            Self::UsageUpdated { .. } => "usage_updated",
+            Self::Diagnostic { .. } => "diagnostic",
+            Self::Interrupted { .. } => "interrupted",
+            Self::Failed { .. } => "failed",
+            Self::Completed { .. } => "completed",
+            Self::Stopped => "stopped",
+        }
+    }
 }
 
 /// Envelope for normalized runtime events, carrying monotonic sequence and timestamp for deterministic correlation.
@@ -234,8 +256,8 @@ impl EventBoundaryValidator {
                         session_id: self.session_id,
                         sequence: 1,
                         reason: SanitizedRuntimeMessage::new(format!(
-                            "First event must be SessionStarted, received {:?}",
-                            other
+                            "First event must be SessionStarted; received event kind: {}",
+                            other.diagnostic_kind()
                         )),
                     });
                 }

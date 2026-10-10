@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
 > **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; Adapters M11–M12 PLANNED)
-> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 56-test contract verification suite (54 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 70-test contract verification suite (68 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -183,6 +183,23 @@ Milestone M10.1 systematically resolved all findings across the external runtime
   - Verified competing terminal transitions across diverse terminal kinds (`Completed`, `Failed`, `Stopped`, `StatusChanged`) where exactly one terminal transition wins, remainders fail closed with `EventAfterTerminalState`, and subscribers finish deterministically (`test_57`).
 - **SR4-03 (P2 VERIFICATION): Full Quality Gates & Review Artifacts**:
   - 63 tests passing (61 contract regression tests + 2 unit tests), zero warnings, workspace fmt green, workspace clippy pedantic green, 20 repeated concurrency test runs, zero diff under `codex-rs/`, and complete review bundle exported.
+
+### Round 5 Final Diagnostic Security Closure Matrix (SR5-01)
+
+- **SR5-01 (P1 SECURITY): Untrusted Event Payload Disclosure Remediation**:
+  - **Root Cause**: `EventBoundaryValidator::validate()` previously rejected invalid first events using Rust Debug formatting (`received {:?}", other`), copying arbitrary untrusted payload strings into the error diagnostic. `SanitizedRuntimeMessage` only redacts recognized credential patterns (`sk-`, `ghp_`), allowing opaque secrets, proprietary business data, and confidential prompt payloads to leak into logs, telemetry, and error responses.
+  - **Production Remediation**: Implemented `pub fn diagnostic_kind(&self) -> &'static str` on `RuntimeEventKind`, returning stable, payload-independent static classification identifiers (e.g., `"output_delta"`, `"tool_started"`, `"approval_requested"`). Rejection diagnostic updated to safe format: `"First event must be SessionStarted; received event kind: {}"`.
+  - **Atomicity & State Protection**: Ingestion boundary validation failure rejects immediately without mutating `HubState` (zero history append, zero sequence advance, no terminal state mutation, no subscriber broadcast). Valid sequence 1 `SessionStarted` and sequence 2 `OutputDelta` can subsequently be ingested cleanly.
+  - **Diagnostic Path Audit**: Comprehensive audit across all external-runtime source modules (`error.rs`, `handle.rs`, `registry.rs`, `lifecycle.rs`, `discovery.rs`, `input.rs`); verified zero equivalent payload disclosure paths remain.
+  - **Adversarial Verification Suite**: Added 7 focused adversarial regression tests (`test_58` through `test_64`):
+    - `test_58`: Unknown-format confidential canary (`CONFIDENTIAL_VALUE_8472`) in `OutputDelta` rejected with zero leak in Display, Debug, or reason string.
+    - `test_59`: Multiple unrecognized canaries (`PRIVATE_BUSINESS_DATA_4918`, `INTERNAL_PROMPT_FRAGMENT_5932`, `OPAQUE_CONFIDENTIAL_BLOB_7284`) verified leak-free.
+    - `test_60`: All payload-bearing event variants (`ToolStarted`, `ToolCompleted`, `ApprovalRequested`, `ArtifactProduced`, `Diagnostic`, `Interrupted`, `Failed`, `Completed`) verified using payload-independent static classifications.
+    - `test_61`: Serde JSON serialization and Display/Debug formatting leak protection verified.
+    - `test_62`: State mutation protection and replay stream atomicity verified.
+    - `test_63`: Duplicate startup regression prevention verified (duplicate `SessionStarted` rejected without sequence advance).
+    - `test_64`: Authorized payload delivery verified (valid `OutputDelta` retains arbitrary confidential payload unredacted for authorized consumers).
+  - **Full Quality Gates**: 70 tests passing (68 contract regression tests + 2 unit tests), zero warnings, workspace fmt green, workspace clippy pedantic green, 20 repeated concurrency test runs, zero diff under `codex-rs/`, and complete review bundle exported.
 
 ---
 

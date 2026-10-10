@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_studios_external_runtime::*;
-use agent_studios_protocol::id::WorktreeId;
+use agent_studios_protocol::id::{ApprovalId, WorktreeId};
 use agent_studios_protocol::worktree::ExecutionWorkspace;
 use agent_studios_provider::{ProviderInstanceId, SecretBackend, SecretReference};
 use uuid::Uuid;
@@ -3033,4 +3033,434 @@ async fn test_57_sr4_02_competing_terminals_during_replay_and_live_delivery() {
     // Subsequent subscribe at terminal sequence 11 completes immediately
     let mut late_sub = hub.subscribe(Some(11)).await.unwrap();
     assert!(late_sub.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_58_sr5_01_unknown_format_confidential_canary() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = SessionEventHub::new(session_id, instance_id, 100);
+
+    let canary = "CONFIDENTIAL_VALUE_8472";
+    let invalid_first = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::OutputDelta {
+            text: canary.to_string(),
+        },
+    );
+
+    let err = hub.ingest(invalid_first).await.unwrap_err();
+
+    // 1. Correct typed error
+    match &err {
+        RuntimeError::InvalidEventSequence {
+            session_id: err_sess,
+            sequence,
+            reason,
+        } => {
+            assert_eq!(*err_sess, session_id);
+            assert_eq!(*sequence, 1);
+            let reason_str = reason.as_str();
+            assert!(
+                !reason_str.contains(canary),
+                "Reason must not contain confidential canary"
+            );
+            assert!(
+                reason_str.contains(
+                    "First event must be SessionStarted; received event kind: output_delta"
+                ),
+                "Reason must contain safe diagnostic kind: {reason_str}"
+            );
+        }
+        other => panic!("Expected InvalidEventSequence, got: {other:?}"),
+    }
+
+    // 2. Display and Debug formatting do not leak canary
+    let display_str = format!("{err}");
+    let debug_str = format!("{err:?}");
+    assert!(
+        !display_str.contains(canary),
+        "Display format leaked canary"
+    );
+    assert!(!debug_str.contains(canary), "Debug format leaked canary");
+
+    // 3. Hub recorded events remain empty
+    assert!(hub.recorded_events().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_59_sr5_01_multiple_unrecognized_canaries() {
+    let canaries = [
+        "PRIVATE_BUSINESS_DATA_4918",
+        "INTERNAL_PROMPT_FRAGMENT_5932",
+        "OPAQUE_CONFIDENTIAL_BLOB_7284",
+    ];
+
+    for canary in canaries {
+        let session_id = RuntimeSessionId::generate();
+        let instance_id = RuntimeInstanceId::generate();
+        let mut validator = EventBoundaryValidator::new(session_id, instance_id);
+
+        let event = RuntimeEvent::new(
+            session_id,
+            1,
+            RuntimeEventKind::OutputDelta {
+                text: canary.to_string(),
+            },
+        );
+
+        let err = validator.validate(&event).unwrap_err();
+        let display_out = format!("{err}");
+        let debug_out = format!("{err:?}");
+
+        assert!(
+            !display_out.contains(canary),
+            "Canary '{canary}' leaked in Display: {display_out}"
+        );
+        assert!(
+            !debug_out.contains(canary),
+            "Canary '{canary}' leaked in Debug: {debug_out}"
+        );
+
+        match err {
+            RuntimeError::InvalidEventSequence { reason, .. } => {
+                assert!(
+                    !reason.as_str().contains(canary),
+                    "Canary '{canary}' leaked in reason: {}",
+                    reason.as_str()
+                );
+                assert!(
+                    reason.as_str().contains("output_delta"),
+                    "Reason must classify event kind: {}",
+                    reason.as_str()
+                );
+            }
+            other => panic!("Unexpected error variant: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_60_sr5_01_all_payload_bearing_event_variants_safe_classification() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+
+    let test_cases = vec![
+        (
+            RuntimeEventKind::OutputDelta {
+                text: "SECRET_PAYLOAD_DELTA_001".to_string(),
+            },
+            "output_delta",
+            "SECRET_PAYLOAD_DELTA_001",
+        ),
+        (
+            RuntimeEventKind::ToolStarted {
+                tool_name: "SECRET_TOOL_NAME_002".to_string(),
+                tool_call_id: "SECRET_CALL_ID_002".to_string(),
+            },
+            "tool_started",
+            "SECRET_TOOL_NAME_002",
+        ),
+        (
+            RuntimeEventKind::ToolCompleted {
+                tool_name: "SECRET_TOOL_NAME_003".to_string(),
+                tool_call_id: "SECRET_CALL_ID_003".to_string(),
+                duration_ms: 42,
+                success: true,
+            },
+            "tool_completed",
+            "SECRET_TOOL_NAME_003",
+        ),
+        (
+            RuntimeEventKind::ApprovalRequested {
+                approval_id: ApprovalId::new(),
+                description: SanitizedRuntimeMessage::new("SECRET_APPROVAL_DESC_004"),
+                command: Some(SanitizedRuntimeMessage::new("SECRET_CMD_004")),
+            },
+            "approval_requested",
+            "SECRET_APPROVAL_DESC_004",
+        ),
+        (
+            RuntimeEventKind::ArtifactProduced {
+                logical_name: "SECRET_ART_NAME_005".to_string(),
+                path: "SECRET_ART_PATH_005".to_string(),
+            },
+            "artifact_produced",
+            "SECRET_ART_NAME_005",
+        ),
+        (
+            RuntimeEventKind::Diagnostic {
+                level: "warn".to_string(),
+                message: SanitizedRuntimeMessage::new("SECRET_DIAG_MSG_006"),
+            },
+            "diagnostic",
+            "SECRET_DIAG_MSG_006",
+        ),
+        (
+            RuntimeEventKind::Interrupted {
+                reason: SanitizedRuntimeMessage::new("SECRET_INTERRUPT_REASON_007"),
+            },
+            "interrupted",
+            "SECRET_INTERRUPT_REASON_007",
+        ),
+        (
+            RuntimeEventKind::Failed {
+                safe_error_summary: SanitizedRuntimeMessage::new("SECRET_FAIL_SUMMARY_008"),
+            },
+            "failed",
+            "SECRET_FAIL_SUMMARY_008",
+        ),
+        (
+            RuntimeEventKind::Completed {
+                summary: Some("SECRET_COMPLETION_SUMMARY_009".to_string()),
+            },
+            "completed",
+            "SECRET_COMPLETION_SUMMARY_009",
+        ),
+    ];
+
+    for (kind, expected_kind_str, secret_canary) in test_cases {
+        assert_eq!(kind.diagnostic_kind(), expected_kind_str);
+
+        let mut validator = EventBoundaryValidator::new(session_id, instance_id);
+        let event = RuntimeEvent::new(session_id, 1, kind);
+
+        let err = validator.validate(&event).unwrap_err();
+        let display_out = format!("{err}");
+        let debug_out = format!("{err:?}");
+
+        assert!(
+            !display_out.contains(secret_canary),
+            "Variant {expected_kind_str} leaked canary in Display: {display_out}"
+        );
+        assert!(
+            !debug_out.contains(secret_canary),
+            "Variant {expected_kind_str} leaked canary in Debug: {debug_out}"
+        );
+
+        match err {
+            RuntimeError::InvalidEventSequence { reason, .. } => {
+                assert!(
+                    !reason.as_str().contains(secret_canary),
+                    "Variant {expected_kind_str} leaked canary in reason: {}",
+                    reason.as_str()
+                );
+                assert!(
+                    reason.as_str().contains(expected_kind_str),
+                    "Reason for {expected_kind_str} missing kind classification: {}",
+                    reason.as_str()
+                );
+            }
+            other => {
+                panic!("Expected InvalidEventSequence for {expected_kind_str}, got: {other:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_61_sr5_01_serde_and_formatting_canary_leak_protection() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let mut validator = EventBoundaryValidator::new(session_id, instance_id);
+
+    let canary = "TOP_SECRET_PROPRIETARY_TOKEN_8888";
+    let event = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::OutputDelta {
+            text: canary.to_string(),
+        },
+    );
+
+    let err = validator.validate(&event).unwrap_err();
+
+    let display_str = err.to_string();
+    let debug_str = format!("{err:?}");
+    let serialized_json = serde_json::to_string(&err).expect("RuntimeError must serialize to JSON");
+
+    assert!(!display_str.contains(canary), "Canary found in Display");
+    assert!(!debug_str.contains(canary), "Canary found in Debug");
+    assert!(
+        !serialized_json.contains(canary),
+        "Canary found in serialized JSON"
+    );
+
+    assert!(display_str.contains("output_delta"));
+    assert!(debug_str.contains("output_delta"));
+    assert!(serialized_json.contains("output_delta"));
+}
+
+#[tokio::test]
+async fn test_62_sr5_01_state_mutation_protection_and_replay_atomicity() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 100));
+
+    // 1. Initial subscription before any event
+    let mut sub = hub.subscribe(None).await.unwrap();
+
+    // 2. Ingest invalid first event
+    let canary = "LEAK_CHECK_PAYLOAD_CANARY_555";
+    let invalid_event = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::OutputDelta {
+            text: canary.to_string(),
+        },
+    );
+    let err = hub.ingest(invalid_event).await.unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::InvalidEventSequence { sequence: 1, .. }
+    ));
+
+    // 3. Verify hub history remains completely empty
+    assert!(hub.recorded_events().await.is_empty());
+
+    // 4. Ingest valid sequence 1 SessionStarted; must succeed at sequence 1
+    let valid_start = RuntimeEvent::new(
+        session_id,
+        1,
+        RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        },
+    );
+    hub.ingest(valid_start.clone()).await.unwrap();
+    assert_eq!(hub.recorded_events().await.len(), 1);
+
+    // 5. Ingest valid sequence 2 OutputDelta; must succeed at sequence 2
+    let valid_delta = RuntimeEvent::new(
+        session_id,
+        2,
+        RuntimeEventKind::OutputDelta {
+            text: "legitimate output".to_string(),
+        },
+    );
+    hub.ingest(valid_delta.clone()).await.unwrap();
+    assert_eq!(hub.recorded_events().await.len(), 2);
+
+    // 6. Verify subscriber receives only valid events (sequences 1 and 2)
+    let ev1 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(ev1.sequence, 1);
+    assert!(matches!(ev1.kind, RuntimeEventKind::SessionStarted { .. }));
+
+    let ev2 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(ev2.sequence, 2);
+    assert_eq!(
+        ev2.kind,
+        RuntimeEventKind::OutputDelta {
+            text: "legitimate output".to_string(),
+        }
+    );
+
+    // 7. Verify replay stream from new subscriber contains only valid events
+    let mut replay_sub = hub.subscribe(None).await.unwrap();
+    let r_ev1 = replay_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(r_ev1.sequence, 1);
+    let r_ev2 = replay_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(r_ev2.sequence, 2);
+}
+
+#[tokio::test]
+async fn test_63_sr5_01_duplicate_startup_regression_preservation() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = SessionEventHub::new(session_id, instance_id, 100);
+
+    // 1. Emit sequence 1 SessionStarted
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    // 2. Attempt duplicate SessionStarted at sequence 2 via emit
+    let err = hub
+        .emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        })
+        .await
+        .unwrap_err();
+
+    match err {
+        RuntimeError::InvalidEventSequence {
+            sequence, reason, ..
+        } => {
+            assert_eq!(sequence, 2);
+            assert!(
+                reason.as_str().contains("Duplicate SessionStarted event"),
+                "Expected duplicate SessionStarted message, got: {}",
+                reason.as_str()
+            );
+        }
+        other => panic!("Expected InvalidEventSequence, got: {other:?}"),
+    }
+
+    // 3. Expected sequence must not advance beyond 2
+    // A subsequent valid non-SessionStarted event at sequence 2 must succeed
+    let next_ev = hub
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "valid following delta".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(next_ev.sequence, 2);
+}
+
+#[tokio::test]
+async fn test_64_sr5_01_authorized_payload_delivery_unredacted() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 100));
+
+    // Emit sequence 1 SessionStarted
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    // Subscribe for live reception
+    let mut live_sub = hub.subscribe(Some(1)).await.unwrap();
+
+    // Emit valid OutputDelta containing arbitrary payload
+    let sensitive_content = "CONFIDENTIAL_VALUE_8472: internal authorized payload text";
+    hub.emit(RuntimeEventKind::OutputDelta {
+        text: sensitive_content.to_string(),
+    })
+    .await
+    .unwrap();
+
+    // Verify live delivery preserves original content intact
+    let received = live_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(received.sequence, 2);
+    match received.kind {
+        RuntimeEventKind::OutputDelta { text } => {
+            assert_eq!(
+                text, sensitive_content,
+                "Authorized payload must not be mutated or redacted"
+            );
+        }
+        other => panic!("Expected OutputDelta, got: {other:?}"),
+    }
+
+    // Verify replay delivery also preserves original content intact
+    let mut replay_sub = hub.subscribe(Some(1)).await.unwrap();
+    let replayed = replay_sub.next_event().await.unwrap().unwrap();
+    assert_eq!(replayed.sequence, 2);
+    match replayed.kind {
+        RuntimeEventKind::OutputDelta { text } => {
+            assert_eq!(
+                text, sensitive_content,
+                "Replayed authorized payload must not be mutated or redacted"
+            );
+        }
+        other => panic!("Expected OutputDelta, got: {other:?}"),
+    }
 }

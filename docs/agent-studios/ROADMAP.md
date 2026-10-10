@@ -156,7 +156,9 @@
   - SR4-01: Documented and verified process-level panic output security boundary; proved library cannot safely override `std::panic::set_hook()`; subprocess regression test verified zero canary leakage in registry diagnostics and truthful evaluation of process stderr under default hook.
   - SR4-02: Multi-producer concurrent emission, replay-to-live handoff under active writes, retention overflow/lag recovery, independent subscriber isolation, and competing terminal closure across diverse terminal kinds.
   - SR4-03: Full 10 workspace quality gates executed, 20 repeated concurrency test runs, clean milestone diff audit against `af4b96d17f`, and review bundle exported.
-- 63-test contract verification suite (61 contract regression tests + 2 unit tests) passing with zero failures.
+- Remediated Round 5 diagnostic security closure finding (SR5-01):
+  - SR5-01: Untrusted event payload disclosure remediation in `EventBoundaryValidator::validate()` using stable, static `RuntimeEventKind::diagnostic_kind()` (`"output_delta"`, etc.) instead of formatting raw payload data; verified zero leak in Display, Debug, or reason string across confidential canaries; verified atomic boundary rejection without state mutation or sequence increment; verified authorized unredacted delivery for valid events.
+- 70-test contract verification suite (68 contract regression tests + 2 unit tests) passing with zero failures.
 
 ### M11: OpenCode Runtime Adapter & OS Process Sandboxing [PLANNED]
 
