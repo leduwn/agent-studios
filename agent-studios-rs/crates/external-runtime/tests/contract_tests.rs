@@ -2484,3 +2484,553 @@ async fn test_51_sr3_06_future_replay_offset_validation_and_terminal_completion(
         }
     ));
 }
+
+// ============================================================================
+// Fourth-Round Closure Tests (SR4-01 to SR4-02)
+// ============================================================================
+
+#[tokio::test]
+async fn test_helper_subprocess_worker_panic() {
+    if std::env::var("AGENT_STUDIOS_SUBPROCESS_PANIC_MODE").as_deref() != Ok("1") {
+        return;
+    }
+    let canary = std::env::var("SUBPROCESS_CANARY").unwrap_or_else(|_| "DEFAULT_CANARY".into());
+    let registry = RuntimeRegistry::new();
+    let runtime = Arc::new(PanickingAgentRuntime::new("panicking-impl", &canary));
+    registry.register(runtime).await.unwrap();
+    let outcome = registry.discover_all().await;
+    for (id, msg) in &outcome.failures {
+        println!("REGISTRY_FAILURE_RECORD: [{}] {}", id, msg);
+    }
+}
+
+#[tokio::test]
+async fn test_52_sr4_01_subprocess_panic_boundary_evaluation() {
+    let current_exe = std::env::current_exe().expect("must get current test executable");
+    let canary = "SECRET_CANARY_SUBPROCESS_PROCESS_HOOK_LEAK_TEST_TOKEN_998877";
+
+    let output = std::process::Command::new(current_exe)
+        .args([
+            "--exact",
+            "test_helper_subprocess_worker_panic",
+            "--nocapture",
+        ])
+        .env("AGENT_STUDIOS_SUBPROCESS_PANIC_MODE", "1")
+        .env("SUBPROCESS_CANARY", canary)
+        .output()
+        .expect("must execute test subprocess");
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+    // 1. Registry-controlled diagnostic output on stdout MUST NOT contain the canary secret
+    assert!(
+        stdout_str.contains("REGISTRY_FAILURE_RECORD: [panicking-impl] Runtime discovery worker for implementation 'panicking-impl' panicked"),
+        "Subprocess stdout must contain classified registry failure record, got: {}",
+        stdout_str
+    );
+    assert!(
+        !stdout_str.contains(canary),
+        "Registry-controlled diagnostic output must NEVER leak the canary secret"
+    );
+
+    // 2. Truthfully evaluate process-level stderr:
+    // Rust's default process-global panic hook executes before Tokio catch_unwind
+    // and emits the raw panic payload directly to stderr.
+    // This confirms that process-level stderr cannot be safely intercepted by library code,
+    // establishing that OS-level process sandboxing (M11) is the required containment boundary.
+    let stderr_contains_canary = stderr_str.contains(canary);
+    assert!(
+        stderr_contains_canary,
+        "Rust default process panic hook prints to stderr before catch_unwind; confirms process containment boundary belongs to M11 host isolation"
+    );
+}
+
+#[tokio::test]
+async fn test_53_sr4_02_subscribe_during_concurrent_emission() {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 300));
+
+    // Emit sequence 1 SessionStarted
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    let num_producers = 10;
+    let events_per_producer = 10; // Total 100 nonterminal events
+    let barrier = Arc::new(Barrier::new(num_producers + 1));
+
+    let mut producer_handles = Vec::new();
+    for p_idx in 0..num_producers {
+        let hub_clone = Arc::clone(&hub);
+        let b_clone = Arc::clone(&barrier);
+        producer_handles.push(tokio::spawn(async move {
+            b_clone.wait().await;
+            for i in 0..events_per_producer {
+                hub_clone
+                    .emit(RuntimeEventKind::OutputDelta {
+                        text: format!("prod-{p_idx}-ev-{i}"),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }));
+    }
+
+    // Subscriber task: waits on barrier with producers, then immediately subscribes while producers are emitting
+    let hub_sub = Arc::clone(&hub);
+    let b_sub = Arc::clone(&barrier);
+    let sub_handle = tokio::spawn(async move {
+        b_sub.wait().await;
+        // Subscribe during active emission (after sequence 1)
+        let mut sub = hub_sub.subscribe(Some(1)).await.unwrap();
+        let mut received = Vec::new();
+        // Read 100 events with a timeout to detect hangs
+        while received.len() < 100 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+                .await
+                .expect("timed out waiting for event during concurrent emission")
+                .expect("subscription error")
+                .expect("stream ended prematurely before 100 events");
+            received.push(ev);
+        }
+        received
+    });
+
+    for h in producer_handles {
+        h.await.unwrap();
+    }
+    let received_events = sub_handle.await.unwrap();
+
+    // Verify 100 events received
+    assert_eq!(received_events.len(), 100);
+
+    // Verify no sequence regression, strictly monotonic and gapless sequences from 2 to 101
+    let mut seen = HashSet::new();
+    let mut prev_seq = 1u64;
+    for ev in &received_events {
+        assert_eq!(ev.session_id, session_id);
+        assert_eq!(
+            ev.sequence,
+            prev_seq + 1,
+            "Sequence must be strictly gapless: expected {}, got {}",
+            prev_seq + 1,
+            ev.sequence
+        );
+        assert!(
+            seen.insert(ev.sequence),
+            "Duplicate sequence detected: {}",
+            ev.sequence
+        );
+        prev_seq = ev.sequence;
+    }
+    assert_eq!(prev_seq, 101);
+}
+
+#[tokio::test]
+async fn test_54_sr4_02_replay_live_handoff_under_active_writes() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 300));
+
+    // 1. Create existing history first: sequence 1 to 50
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    for i in 2..=50 {
+        hub.emit(RuntimeEventKind::OutputDelta {
+            text: format!("initial-{i}"),
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(hub.recorded_events().await.len(), 50);
+
+    // 2. Start subscription from valid replay offset Some(25) while other producers actively emit
+    let num_producers = 5;
+    let events_per_producer = 10; // 50 new events: sequences 51 to 100
+    let barrier = Arc::new(Barrier::new(num_producers + 1));
+
+    let mut producer_handles = Vec::new();
+    for p_idx in 0..num_producers {
+        let hub_clone = Arc::clone(&hub);
+        let b_clone = Arc::clone(&barrier);
+        producer_handles.push(tokio::spawn(async move {
+            b_clone.wait().await;
+            for i in 0..events_per_producer {
+                hub_clone
+                    .emit(RuntimeEventKind::OutputDelta {
+                        text: format!("live-p{p_idx}-ev{i}"),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }));
+    }
+
+    let hub_sub = Arc::clone(&hub);
+    let b_sub = Arc::clone(&barrier);
+    let sub_handle = tokio::spawn(async move {
+        // Subscribe from offset 25
+        let mut sub = hub_sub.subscribe(Some(25)).await.unwrap();
+        b_sub.wait().await;
+
+        let mut received = Vec::new();
+        // Expect events 26 through 100 = 75 events
+        while received.len() < 75 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+                .await
+                .expect("timed out waiting for event during replay/live handoff")
+                .expect("subscription error")
+                .expect("stream ended prematurely");
+            received.push(ev);
+        }
+        (sub, received)
+    });
+
+    for h in producer_handles {
+        h.await.unwrap();
+    }
+    let (mut sub, received_events) = sub_handle.await.unwrap();
+
+    assert_eq!(received_events.len(), 75);
+
+    // Verify events:
+    // Replayed events (26..=50) are delivered before live events (51..=100)
+    // No duplicate at boundary sequence 50/51
+    let mut expected_seq = 26u64;
+    for ev in &received_events {
+        assert_eq!(
+            ev.sequence, expected_seq,
+            "Expected sequence {}, got {}",
+            expected_seq, ev.sequence
+        );
+        expected_seq += 1;
+    }
+    assert_eq!(expected_seq, 101);
+
+    // 3. Emit terminal event 101 and verify subscriber finishes cleanly
+    let term = hub.emit(RuntimeEventKind::Stopped).await.unwrap();
+    assert_eq!(term.sequence, 101);
+
+    let final_ev = tokio::time::timeout(Duration::from_secs(5), sub.next_event())
+        .await
+        .expect("timeout waiting for terminal event")
+        .expect("subscription error")
+        .expect("expected terminal event");
+    assert_eq!(final_ev.sequence, 101);
+    assert!(matches!(final_ev.kind, RuntimeEventKind::Stopped));
+
+    // Following next_event() must be Ok(None) immediately
+    let after_term = sub.next_event().await.unwrap();
+    assert!(after_term.is_none());
+}
+
+#[tokio::test]
+async fn test_55_sr4_02_retention_overflow_and_lag_recovery() {
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    // Retention limit 10, channel capacity 128
+    let hub = SessionEventHub::new(session_id, instance_id, 10);
+
+    // Emit sequence 1
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+
+    // 1. Create a subscriber at sequence 1
+    let mut lagged_sub = hub.subscribe(Some(1)).await.unwrap();
+    assert_eq!(lagged_sub.last_seen_sequence(), 1);
+
+    // 2. Emit 150 events without reading from lagged_sub (exceeds channel capacity 128)
+    for i in 2..=151 {
+        hub.emit(RuntimeEventKind::OutputDelta {
+            text: format!("overflow-{i}"),
+        })
+        .await
+        .unwrap();
+    }
+
+    // 3. lagged_sub attempts next_event(): must fail with typed EventStreamLagged
+    let err_lag = lagged_sub.next_event().await.unwrap_err();
+    assert!(
+        matches!(
+            &err_lag,
+            RuntimeError::EventStreamLagged {
+                session_id: sid,
+                skipped_count,
+                expected_sequence,
+            } if *sid == session_id && *skipped_count > 0 && *expected_sequence == 2
+        ),
+        "Expected EventStreamLagged, got: {:?}",
+        err_lag
+    );
+
+    // 4. Over-evicted recovery: lagged_sub's last_seen is 1.
+    // Earliest retained in hub is 142 (retention limit is 10, sequences 142..=151).
+    // Attempting recovery from offset 1 fails closed with EventRetentionExceeded.
+    let err_recovery = hub
+        .subscribe(Some(lagged_sub.last_seen_sequence()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err_recovery,
+            RuntimeError::EventRetentionExceeded {
+                requested_sequence: 1,
+                earliest_available_sequence: 142,
+                ..
+            }
+        ),
+        "Expected EventRetentionExceeded for evicted offset 1, got: {:?}",
+        err_recovery
+    );
+
+    // 5. Valid recovery: another subscriber that lagged at sequence 141 can recover!
+    // Offset 141 -> expected_first_seq = 142 == earliest_retained_sequence.
+    let mut valid_recovered_sub = hub.subscribe(Some(141)).await.unwrap();
+    let mut replayed_count = 0;
+    while let Some(ev) = valid_recovered_sub.next_event().await.unwrap() {
+        assert_eq!(ev.sequence, 142 + replayed_count);
+        replayed_count += 1;
+        if replayed_count == 10 {
+            break;
+        }
+    }
+    assert_eq!(replayed_count, 10);
+}
+
+#[tokio::test]
+async fn test_56_sr4_02_multiple_subscribers_independent_offsets_and_lag() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 100));
+
+    // Emit initial sequences 1 to 20
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    for i in 2..=20 {
+        hub.emit(RuntimeEventKind::OutputDelta {
+            text: format!("msg-{i}"),
+        })
+        .await
+        .unwrap();
+    }
+
+    // Sub1 at offset Some(0) (replays 1..20)
+    let mut sub1 = hub.subscribe(Some(0)).await.unwrap();
+    // Sub2 at offset Some(10) (replays 11..20)
+    let mut sub2 = hub.subscribe(Some(10)).await.unwrap();
+    // Sub3 at offset Some(20) (ready for live 21..)
+    let mut sub3 = hub.subscribe(Some(20)).await.unwrap();
+
+    // Concurrently emit sequences 21 to 40
+    let hub_producer = Arc::clone(&hub);
+    let producer_task = tokio::spawn(async move {
+        for i in 21..=40 {
+            hub_producer
+                .emit(RuntimeEventKind::OutputDelta {
+                    text: format!("live-{i}"),
+                })
+                .await
+                .unwrap();
+        }
+    });
+
+    // Sub2 reads 5 events (11..15) and drops (closes)
+    for expected_seq in 11..=15 {
+        let ev = sub2.next_event().await.unwrap().unwrap();
+        assert_eq!(ev.sequence, expected_seq);
+    }
+    drop(sub2); // Closing sub2 must not affect sub1, sub3, or hub!
+
+    producer_task.await.unwrap();
+
+    // Verify sub1 reads all 40 events in order (1..=40)
+    for expected_seq in 1..=40 {
+        let ev = tokio::time::timeout(Duration::from_secs(5), sub1.next_event())
+            .await
+            .expect("sub1 timeout")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev.sequence, expected_seq);
+    }
+
+    // Verify sub3 reads live events 21..=40 in order
+    for expected_seq in 21..=40 {
+        let ev = tokio::time::timeout(Duration::from_secs(5), sub3.next_event())
+            .await
+            .expect("sub3 timeout")
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev.sequence, expected_seq);
+    }
+
+    // Emit terminal Completed (seq 41)
+    hub.emit(RuntimeEventKind::Completed { summary: None })
+        .await
+        .unwrap();
+
+    // Both sub1 and sub3 receive terminal event 41 then Ok(None)
+    let ev1_term = sub1.next_event().await.unwrap().unwrap();
+    assert_eq!(ev1_term.sequence, 41);
+    assert!(matches!(ev1_term.kind, RuntimeEventKind::Completed { .. }));
+    assert!(sub1.next_event().await.unwrap().is_none());
+
+    let ev3_term = sub3.next_event().await.unwrap().unwrap();
+    assert_eq!(ev3_term.sequence, 41);
+    assert!(matches!(ev3_term.kind, RuntimeEventKind::Completed { .. }));
+    assert!(sub3.next_event().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_57_sr4_02_competing_terminals_during_replay_and_live_delivery() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    let session_id = RuntimeSessionId::generate();
+    let instance_id = RuntimeInstanceId::generate();
+    let hub = Arc::new(SessionEventHub::new(session_id, instance_id, 100));
+
+    // Emit sequences 1 to 10
+    hub.emit(RuntimeEventKind::SessionStarted {
+        session_id,
+        instance_id,
+    })
+    .await
+    .unwrap();
+    for i in 2..=10 {
+        hub.emit(RuntimeEventKind::OutputDelta {
+            text: format!("msg-{i}"),
+        })
+        .await
+        .unwrap();
+    }
+
+    // Sub1 at offset 0 (replay from 1)
+    let mut sub1 = hub.subscribe(Some(0)).await.unwrap();
+    // Sub2 at offset 10 (live from 11)
+    let mut sub2 = hub.subscribe(Some(10)).await.unwrap();
+
+    // 5 competing terminal transitions across different terminal kinds:
+    // Completed, Failed, Stopped, StatusChanged(Stopped), StatusChanged(Completed)
+    let terminal_kinds = vec![
+        RuntimeEventKind::Completed {
+            summary: Some("done".into()),
+        },
+        RuntimeEventKind::Failed {
+            safe_error_summary: SanitizedRuntimeMessage::new("competing failure"),
+        },
+        RuntimeEventKind::Stopped,
+        RuntimeEventKind::StatusChanged {
+            previous_state: RuntimeLifecycleState::Running,
+            new_state: RuntimeLifecycleState::Stopped,
+        },
+        RuntimeEventKind::StatusChanged {
+            previous_state: RuntimeLifecycleState::Running,
+            new_state: RuntimeLifecycleState::Completed,
+        },
+    ];
+
+    let barrier = Arc::new(Barrier::new(5));
+    let mut handles = Vec::new();
+    for kind in terminal_kinds {
+        let hub_clone = Arc::clone(&hub);
+        let b_clone = Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            b_clone.wait().await;
+            hub_clone.emit(kind).await
+        }));
+    }
+
+    let mut success_count = 0;
+    let mut rejection_count = 0;
+    let mut winning_terminal_kind = None;
+
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(ev) => {
+                success_count += 1;
+                assert_eq!(ev.sequence, 11);
+                winning_terminal_kind = Some(ev.kind);
+            }
+            Err(RuntimeError::EventAfterTerminalState { .. }) => {
+                rejection_count += 1;
+            }
+            Err(other) => panic!("Unexpected terminal error: {:?}", other),
+        }
+    }
+
+    assert_eq!(success_count, 1, "Exactly one terminal transition must win");
+    assert_eq!(
+        rejection_count, 4,
+        "Remaining terminal transitions must be rejected"
+    );
+    let winning_kind = winning_terminal_kind.expect("must have winning terminal event");
+
+    // Sub1 drains 1..=10 followed by sequence 11 winning terminal event
+    for expected_seq in 1..=10 {
+        let ev = sub1.next_event().await.unwrap().unwrap();
+        assert_eq!(ev.sequence, expected_seq);
+    }
+    let sub1_term = sub1.next_event().await.unwrap().unwrap();
+    assert_eq!(sub1_term.sequence, 11);
+    assert_eq!(sub1_term.kind, winning_kind);
+    assert!(sub1.next_event().await.unwrap().is_none());
+
+    // Sub2 receives sequence 11 winning terminal event directly from live
+    let sub2_term = tokio::time::timeout(Duration::from_secs(5), sub2.next_event())
+        .await
+        .expect("sub2 timeout")
+        .unwrap()
+        .unwrap();
+    assert_eq!(sub2_term.sequence, 11);
+    assert_eq!(sub2_term.kind, winning_kind);
+    assert!(sub2.next_event().await.unwrap().is_none());
+
+    // Any subsequent emit or ingest must fail closed with EventAfterTerminalState
+    let post_err = hub
+        .emit(RuntimeEventKind::OutputDelta {
+            text: "late".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        post_err,
+        RuntimeError::EventAfterTerminalState {
+            attempted_sequence: 12,
+            ..
+        }
+    ));
+
+    // Subsequent subscribe at terminal sequence 11 completes immediately
+    let mut late_sub = hub.subscribe(Some(11)).await.unwrap();
+    assert!(late_sub.next_event().await.unwrap().is_none());
+}

@@ -4,17 +4,23 @@
 //! normalized event model, session event hub with replay history, non-secret value validation,
 //! strict start validation, and thread-safe runtime registry.
 //!
-//! All contracts are verified by a comprehensive 56-test contract and regression test suite
+//! All contracts are verified by a comprehensive 63-test contract and regression test suite
 //! covering atomic event serialization, boundary validation, credential sanitization,
-//! lifecycle error precedence, and fail-closed workspace containment.
+//! lifecycle error precedence, concurrent multi-subscriber replay handoff, retention overflow,
+//! lag recovery, and fail-closed workspace containment.
 //!
-//! # Workspace Policy and Process Sandboxing Scope
+//! # Workspace Policy, Process Panic Boundary, and Sandboxing Scope
 //!
 //! Milestone M10 enforces typed policy boundaries at the API and request layer (for example,
 //! strictly rejecting [`ExecutionWorkspace::SharedSource`] workspaces across all access modes
-//! and forbidding plaintext credentials in configuration). M10 does **not** provide kernel-level
-//! or OS-level process sandboxing (cgroups, namespaces, seccomp, AppArmor, or Windows Job Objects).
-//! OS-level runtime sandboxing and process containment are deferred to Milestone M11.
+//! and forbidding plaintext credentials in configuration).
+//!
+//! Furthermore, M10 sanitizes all registry-owned diagnostics, worker failure attribution,
+//! and tracing messages. However, M10 does **not** install or manipulate the process-global
+//! Rust panic hook (`std::panic::set_hook()`), which prints directly to process stderr before
+//! unwind capture. Suppressing process-level stderr and enforcing strict compute/memory
+//! isolation requires OS-level process sandboxing (cgroups, namespaces, seccomp, AppArmor,
+//! or Windows Job Objects/AppContainer), which is explicitly scheduled for Milestone M11.
 //!
 //! # Core Subsystems
 //!

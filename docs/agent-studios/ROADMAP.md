@@ -152,7 +152,11 @@
   - SR3-06: Typed `InvalidReplayOffset` validation and deterministic terminal subscription completion.
   - SR3-07: Clarified workspace isolation scope: M10 enforces typed request/policy boundaries (rejecting `SharedSource`); OS process sandboxing is deferred to M11.
   - SR3-08: Complete milestone quality gates (fmt, clippy, workspace tests, builds) and review artifact generation.
-- 56-test contract verification suite (54 contract regression tests + 2 unit tests) passing with zero failures.
+- Remediated all 3 fourth-round security boundary & verification findings (SR4-01 to SR4-03):
+  - SR4-01: Documented and verified process-level panic output security boundary; proved library cannot safely override `std::panic::set_hook()`; subprocess regression test verified zero canary leakage in registry diagnostics and truthful evaluation of process stderr under default hook.
+  - SR4-02: Multi-producer concurrent emission, replay-to-live handoff under active writes, retention overflow/lag recovery, independent subscriber isolation, and competing terminal closure across diverse terminal kinds.
+  - SR4-03: Full 10 workspace quality gates executed, 20 repeated concurrency test runs, clean milestone diff audit against `af4b96d17f`, and review bundle exported.
+- 63-test contract verification suite (61 contract regression tests + 2 unit tests) passing with zero failures.
 
 ### M11: OpenCode Runtime Adapter & OS Process Sandboxing [PLANNED]
 

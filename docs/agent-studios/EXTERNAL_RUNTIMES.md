@@ -169,18 +169,34 @@ Milestone M10.1 systematically resolved all findings across the external runtime
 - **SR3-07 (P2): Workspace Isolation Policy vs OS Sandboxing Scope Clarification**: Architecture docs, roadmap, and crate doc comments explicitly state that M10 enforces typed API and workspace policy boundaries at the request layer (rejecting `SharedSource`), while kernel/OS-level process sandboxing is deferred to M11.
 - **SR3-08 (P2): Milestone Quality Gates & Review Artifacts**: 56 tests passing (54 contract tests + 2 unit tests), workspace fmt, clippy pedantic green, zero diff under `codex-rs/`, and complete review bundle exported.
 
+### Round 4 Security Boundary & Evidence Closure Matrix (SR4-01 to SR4-03)
+
+- **SR4-01 (P1 SECURITY): Process-Level Panic Output Security Boundary**:
+  - Library crates must **never** install or manipulate the process-global Rust panic hook (`std::panic::set_hook()`), as doing so imposes global side-effects, risks data races in multi-crate hosts, and silences legitimate host crashes.
+  - M10 strictly sanitizes library-owned diagnostics (`tracing::error!`, `RegistryDiscoveryOutcome.failures`), but cannot prevent the default Rust panic hook from writing raw panic payloads directly to process-level stderr prior to unwind capture.
+  - Subprocess-based regression test (`test_52_sr4_01_subprocess_panic_boundary_evaluation`) verifies zero canary leakage in registry diagnostics and evaluates process-level stderr under the default hook, establishing that OS-level process sandboxing (M11) is the required containment boundary.
+- **SR4-02 (P1 CONCURRENCY): Replay/Live Concurrency, Retention Overflow, and Lag Recovery**:
+  - Verified subscribing during active multi-task emission (10 producers, 100 events, barrier synchronization) with gapless monotonic sequence delivery (`test_53`).
+  - Verified replay-to-live handoff under active concurrent writes (pre-existing history 1..50, subscribing at offset 25, 5 concurrent producers emitting 51..100, verifying gapless delivery without boundary duplicates, clean terminal event 101, and immediate closure) (`test_54`).
+  - Verified retention overflow and lag recovery boundaries: receiver lag yields typed `RuntimeError::EventStreamLagged`, over-evicted offset recovery fails closed with `RuntimeError::EventRetentionExceeded`, and retained offset recovery replays successfully (`test_55`).
+  - Verified multiple independent subscribers with different offsets where dropping/lagging one subscriber leaves other subscribers and session unaffected (`test_56`).
+  - Verified competing terminal transitions across diverse terminal kinds (`Completed`, `Failed`, `Stopped`, `StatusChanged`) where exactly one terminal transition wins, remainders fail closed with `EventAfterTerminalState`, and subscribers finish deterministically (`test_57`).
+- **SR4-03 (P2 VERIFICATION): Full Quality Gates & Review Artifacts**:
+  - 63 tests passing (61 contract regression tests + 2 unit tests), zero warnings, workspace fmt green, workspace clippy pedantic green, 20 repeated concurrency test runs, zero diff under `codex-rs/`, and complete review bundle exported.
+
 ---
 
 ## 5. Workspace Isolation Policy & Process Containment Scope
 
-> **Important Boundary Clarification (SR3-07)**:  
+> **Important Boundary Clarification (SR3-07 / SR4-01)**:  
 > Milestone M10 enforces **typed policy boundaries** at the API, configuration, and request level:
 >
 > - Rejecting `ExecutionWorkspace::SharedSource` across all access modes (`ReadOnly` and `Mutating`) to prevent unmanaged host repository access.
 > - Rejecting plaintext credentials and forbidden keywords in metadata and literal environment bindings.
 > - Enforcing pre-spawn validation of instance identity, availability, and supported configurations.
+> - Sanitizing all registry-controlled diagnostics, worker failure attribution, and tracing output with zero secret leakage.
 >
-> Milestone M10 does **NOT** provide kernel-level or OS-level process sandboxing (such as Linux cgroups, namespaces, seccomp, AppArmor, or Windows Job Objects/AppContainer). OS-level process isolation and containment primitives are explicitly scheduled for **Milestone M11** alongside concrete CLI adapters.
+> Milestone M10 does **NOT** provide kernel-level or OS-level process sandboxing (such as Linux cgroups, namespaces, seccomp, AppArmor, or Windows Job Objects/AppContainer), nor does it override the process-global Rust panic hook (`std::panic::set_hook()`). Process-level stderr containment and compute isolation are explicitly scheduled for **Milestone M11** alongside concrete CLI adapters.
 
 1. **Subprocess Sandboxing (Deferred to M11)**:
    - On Windows: Windows Job Objects and AppContainer will be evaluated in M11 for OS-level CPU, memory, network, and handle quotas.
