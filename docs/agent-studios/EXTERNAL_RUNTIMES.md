@@ -205,7 +205,7 @@ Milestone M10.1 systematically resolved all findings across the external runtime
 
 ## 5. Workspace Isolation Policy & Process Containment Scope
 
-> **Important Boundary Clarification (SR3-07 / SR4-01)**:  
+> **Important Boundary Clarification (SR3-07 / SR4-01)**:
 > Milestone M10 enforces **typed policy boundaries** at the API, configuration, and request level:
 >
 > - Rejecting `ExecutionWorkspace::SharedSource` across all access modes (`ReadOnly` and `Mutating`) to prevent unmanaged host repository access.
