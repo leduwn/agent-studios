@@ -1,0 +1,23 @@
+[package]
+name = "agent-studios-external-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Vendor-neutral external agent runtime interface and lifecycle contracts for Agent Studios"
+
+[dependencies]
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-provider = { path = "../provider" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+tokio = { version = "1.40", features = ["sync", "time", "macros", "rt"] }
+async-trait = "0.1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["sync", "time", "macros", "rt-multi-thread"] }

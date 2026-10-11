@@ -24,7 +24,7 @@
 │ M07.6   │ Runtime Session Factory & Thread E2E   │ [COMPLETED]         │
 │ M08/8.1 │ Internal Multi-Agent Runtime Hardening │ [COMPLETED]         │
 │ M09     │ Worktree, Task & Artifact Orchestration│ [COMPLETED]         │
-│ M10     │ External Runtime Interface Specification│ [PLANNED]           │
+│ M10/10.1│ External Runtime Contract Hardening    │ [COMPLETED]         │
 │ M11     │ OpenCode CLI Runtime Adapter           │ [PLANNED]           │
 │ M12     │ Claude Code CLI Runtime Adapter        │ [PLANNED]           │
 │ M13     │ Code-OSS Shell Integration Foundation   │ [PLANNED]           │
@@ -114,13 +114,56 @@
 - **M09.3 (Deterministic Patch Reconciliation & Final Gate)**: Reconciliation engine validating patches via `git apply --check` and applying to integration workspaces. Safe worktree retention (zero destructive `git reset --hard` or `git clean -fdx`). Non-conflated state transitions (`Blocked(ReconciliationConflict)` != `Cancelled`). Full end-to-end WireMock integration passing all quality gates.
 - **M09.7 (Orphan-Thread Safety Fix)**: Enforces safe thread shutdown and removal invariant (`shutdown_and_wait_thread.await?` before `remove_thread_if_matches`), preventing untracked orphan threads on timeout or failure.
 
-### M10: External Runtime Interface [PLANNED]
-- Define standardized `AgentRuntime` lifecycle interface (prepare, start, submit turn, interrupt, terminate).
-- Establish process containment models (evaluating Windows Job Objects / AppContainer candidates for Windows, directory confinement, environment sanitization; Linux/macOS containment as future exploration).
-- Define structured JSON-RPC / SSE communication protocol for non-Codex agents.
+### M10 & M10.1: External Runtime Interface & Contract Hardening [COMPLETED]
+- Establish vendor-neutral `agent-studios-external-runtime` crate with zero provider coupling.
+- Define asynchronous `AgentRuntime` lifecycle trait (`discover`, `capabilities`, `start`, `send`, `interrupt`, `resume`, `stop`, `status`, `events`, `events_after`).
+- Strongly-typed identifier families with wire collision prevention (`RuntimeImplementationId`, `rt-inst-<uuid>`, `rt-sess-<uuid>`).
+- Strict lifecycle state machine with active/resumable `Interrupted` and fail-closed terminal transitions (`Stopped`, `Completed`, `Failed`).
+- Tristate capability profiles across 16 dimensions (`Supported`, `Unsupported`, `Unknown`).
+- Monotonically numbered event streams with typed event kinds and regex-free secret scrubbing.
+- Remediated all 10 initial M10.1 contract review findings (P1-01 to P1-06, P2-01 to P2-04):
+  - P1-01: Reliable event startup, subscription, and replay (`SessionEventHub`, `RuntimeEventSubscription`, replay before broadcast, gap/lag detection, `EventRetentionExceeded`).
+  - P1-02: Elimination of plaintext credential bypass (`NonSecretValue`, forbidden keywords/prefixes, custom serde validation).
+  - P1-03: Strict pre-spawn start validation (`validate_instance_start`, supported configuration checks, workspace isolation).
+  - P1-04: Canonical lifecycle precedence and terminal semantics (validated ordering, idempotent stop, fail-closed terminal states).
+  - P1-05: Authoritative event sequence enforcement (`EventSequencer` monotonic from 1, `EventBoundaryValidator` boundary checking, post-terminal rejection).
+  - P1-06: Per-instance capability authority (instance capabilities override global defaults).
+  - P2-01: `RuntimeConfigRef` deserialization integrity (trimmed non-empty string validation).
+  - P2-02: Diagnostic sanitization coverage (case-insensitive, quoted, query string, basic auth URI scrubbing).
+  - P2-03: `ExecutionWorkspace` isolation policy (`WorkspaceAccessMode::Mutating` prohibits `SharedSource`).
+  - P2-04: Fault-tolerant `RuntimeRegistry` discovery (`JoinSet` concurrency, lock drop before await, `RegistryDiscoveryOutcome` failure isolation).
+- Remediated all 10 second-round source review findings (R01 to R10):
+  - R01: `SessionEventHub::ingest()` routes through `EventBoundaryValidator` preventing state corruption.
+  - R02: `SessionEventHub::emit()` serializes sequence, validation, history, and broadcast under atomic `HubState` lock.
+  - R03: Enforce strict `after_sequence = N` replay offset semantics and retention exceeded boundaries.
+  - R04: Encapsulate `EnvironmentVariableBinding` private fields and enforce serde deserialization invariants.
+  - R05: Finalize event streams on terminal `StatusChanged` events (`Stopped`, `Completed`, `Failed`).
+  - R06: Enforce canonical session ref and terminal state check precedence in `FakeAgentRuntime::send()`.
+  - R07: Attribute `JoinSet` discovery worker panics and cancellations to runtime implementation IDs.
+  - R08: Iterative credential sanitization across multi-URL strings and query parameters without truncation.
+  - R09: Strict fail-closed rejection of `ExecutionWorkspace::SharedSource` under all access modes.
+  - R10: Full documentation, roadmap, and evidence alignment across all contracts.
+- Remediated all 8 third-round targeted closure findings (SR3-01 to SR3-08):
+  - SR3-01: Correct retention capacity 1 bookkeeping in `event.rs` so `earliest_retained_sequence` is never stale.
+  - SR3-02: Strictly single authoritative `SessionStarted` validation in `EventBoundaryValidator` (rejects duplicates without state mutation).
+  - SR3-03: Sanitize registry worker panic diagnostics before logging to `tracing::error!()`.
+  - SR3-04: Multi-producer Tokio barrier concurrency tests (10 producers, 100 events, 5 competing terminals) proving monotonic gapless event streams.
+  - SR3-05: Real registry worker panic attribution with sensitive credential canary and elimination of task mapping races.
+  - SR3-06: Typed `InvalidReplayOffset` validation and deterministic terminal subscription completion.
+  - SR3-07: Clarified workspace isolation scope: M10 enforces typed request/policy boundaries (rejecting `SharedSource`); OS process sandboxing is deferred to M11.
+  - SR3-08: Complete milestone quality gates (fmt, clippy, workspace tests, builds) and review artifact generation.
+- Remediated all 3 fourth-round security boundary & verification findings (SR4-01 to SR4-03):
+  - SR4-01: Documented and verified process-level panic output security boundary; proved library cannot safely override `std::panic::set_hook()`; subprocess regression test verified zero canary leakage in registry diagnostics and truthful evaluation of process stderr under default hook.
+  - SR4-02: Multi-producer concurrent emission, replay-to-live handoff under active writes, retention overflow/lag recovery, independent subscriber isolation, and competing terminal closure across diverse terminal kinds.
+  - SR4-03: Full 10 workspace quality gates executed, 20 repeated concurrency test runs, clean milestone diff audit against `af4b96d17f`, and review bundle exported.
+- Remediated Round 5 diagnostic security closure finding (SR5-01):
+  - SR5-01: Untrusted event payload disclosure remediation in `EventBoundaryValidator::validate()` using stable, static `RuntimeEventKind::diagnostic_kind()` (`"output_delta"`, etc.) instead of formatting raw payload data; verified zero leak in Display, Debug, or reason string across confidential canaries; verified atomic boundary rejection without state mutation or sequence increment; verified authorized unredacted delivery for valid events.
+- 70-test contract verification suite (68 contract regression tests + 2 unit tests) passing with zero failures.
 
-### M11: OpenCode Runtime Adapter [PLANNED]
+### M11: OpenCode Runtime Adapter & OS Process Sandboxing [PLANNED]
+
 - Implement runtime adapter wrapping OpenCode CLI and server sessions.
+- Implement OS-level process sandboxing and containment (Windows Job Objects / AppContainer, Linux cgroups/namespaces).
 - Map OpenCode provider configurations to Agent Studios `ProviderCatalog` instances.
 - Translate OpenCode session steps into Control Plane `Task` and `Run` entities.
 

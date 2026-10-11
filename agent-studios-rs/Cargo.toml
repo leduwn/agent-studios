@@ -11,6 +11,7 @@ members = [
     "crates/internal-agent",
     "crates/orchestration",
     "crates/workspace",
+    "crates/external-runtime",
 ]
 
 [workspace.package]
