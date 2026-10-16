@@ -179,6 +179,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-studios-opencode-runtime"
+version = "0.1.0"
+dependencies = [
+ "agent-studios-control-plane",
+ "agent-studios-external-runtime",
+ "agent-studios-protocol",
+ "agent-studios-provider",
+ "agent-studios-workspace",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "getrandom 0.2.17",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "windows-sys 0.59.0",
+ "wiremock",
+]
+
+[[package]]
 name = "agent-studios-orchestration"
 version = "0.1.0"
 dependencies = [
