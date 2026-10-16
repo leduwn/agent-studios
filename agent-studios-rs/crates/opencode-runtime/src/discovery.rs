@@ -100,13 +100,15 @@ pub async fn discover_opencode_binary(
 
 fn resolve_binary_path(config: &OpenCodeDiscoveryConfig) -> Option<PathBuf> {
     if let Some(path) = config.custom_binary_path.as_ref().filter(|p| p.is_file()) {
-        return Some(path.clone());
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        return Some(canonical);
     }
 
     if let Ok(env_path) = std::env::var("OPENCODE_BIN") {
         let p = PathBuf::from(env_path);
         if p.is_file() {
-            return Some(p);
+            let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            return Some(canonical);
         }
     }
 
@@ -122,7 +124,9 @@ fn resolve_binary_path(config: &OpenCodeDiscoveryConfig) -> Option<PathBuf> {
             for name in &binary_names {
                 let candidate = dir.join(name);
                 if candidate.is_file() {
-                    return Some(candidate);
+                    let canonical =
+                        std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                    return Some(canonical);
                 }
             }
         }
@@ -143,11 +147,22 @@ async fn probe_binary_version(path: &Path) -> Result<String, String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Exit code {}: {}", output.status, stderr.trim()));
+        let trimmed_stderr = if stderr.len() > 512 {
+            &stderr[..512]
+        } else {
+            stderr.trim()
+        };
+        return Err(format!("Exit code {}: {}", output.status, trimmed_stderr));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let version = stdout.trim().to_string();
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let version = if first_line.len() > 128 {
+        first_line[..128].trim().to_string()
+    } else {
+        first_line.to_string()
+    };
+
     if version.is_empty() {
         Ok("unknown".to_string())
     } else {

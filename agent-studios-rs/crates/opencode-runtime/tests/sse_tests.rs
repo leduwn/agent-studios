@@ -173,10 +173,24 @@ fn test_translate_opencode_terminal_events() {
     let session_id = RuntimeSessionId::new();
     let instance_id = RuntimeInstanceId::generate();
 
-    // Completed
-    let comp_json = serde_json::json!({ "type": "turn.completed", "summary": "Done" });
-    let comp_event = translate_opencode_event(
+    // Turn completed is diagnostic, not terminal (M11-R02)
+    let turn_json = serde_json::json!({ "type": "turn.completed", "summary": "Done" });
+    let turn_event = translate_opencode_event(
         "turn.completed",
+        &turn_json.to_string(),
+        &session_id,
+        &instance_id,
+    )
+    .unwrap();
+    assert!(matches!(
+        turn_event,
+        Some(RuntimeEventKind::Diagnostic { level, .. }) if level == "debug"
+    ));
+
+    // Completed
+    let comp_json = serde_json::json!({ "type": "session.status", "status": "completed" });
+    let comp_event = translate_opencode_event(
+        "session.status",
         &comp_json.to_string(),
         &session_id,
         &instance_id,
@@ -184,9 +198,7 @@ fn test_translate_opencode_terminal_events() {
     .unwrap();
     assert_eq!(
         comp_event,
-        Some(RuntimeEventKind::Completed {
-            summary: Some("Done".to_string())
-        })
+        Some(RuntimeEventKind::Completed { summary: None })
     );
 
     // Failed

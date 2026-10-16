@@ -50,6 +50,18 @@ pub enum OpenCodeError {
     #[error("Worktree isolation violation: {0}")]
     WorktreeIsolationViolation(String),
 
+    #[error("OpenCode permission error: {0}")]
+    Permission(String),
+
+    #[error("Session instance mismatch: expected {expected}, actual {actual}")]
+    SessionInstanceMismatch { expected: String, actual: String },
+
+    #[error("Session implementation mismatch: expected {expected}, actual {actual}")]
+    SessionImplementationMismatch { expected: String, actual: String },
+
+    #[error("OpenCode API error (status {status}): {message}")]
+    ApiError { status: u16, message: String },
+
     #[error("Upstream external runtime contract error: {0}")]
     ExternalRuntime(#[from] RuntimeError),
 }
@@ -79,6 +91,13 @@ impl From<OpenCodeError> for RuntimeError {
             OpenCodeError::Http(msg)
             | OpenCodeError::SseProtocol(msg)
             | OpenCodeError::InvalidEventPayload(msg) => RuntimeError::transport_failed(msg),
+            OpenCodeError::ApiError { status, message } => {
+                RuntimeError::transport_failed(format!("API error {status}: {message}"))
+            }
+            OpenCodeError::Permission(msg) => RuntimeError::send_failed(
+                agent_studios_external_runtime::RuntimeSessionId::new(),
+                msg,
+            ),
             OpenCodeError::JobObject(msg) | OpenCodeError::SandboxPolicyViolation(msg) => {
                 RuntimeError::StartupFailed {
                     reason: SanitizedRuntimeMessage::new(msg),
@@ -89,9 +108,19 @@ impl From<OpenCodeError> for RuntimeError {
                     "Unsupported platform containment: {msg}"
                 )),
             },
-            OpenCodeError::SessionNotFound(msg) => RuntimeError::InvalidConfiguration {
-                reason: SanitizedRuntimeMessage::new(msg),
+            OpenCodeError::SessionNotFound(_msg) => RuntimeError::SessionNotFound {
+                session_id: agent_studios_external_runtime::RuntimeSessionId::new(),
             },
+            OpenCodeError::SessionInstanceMismatch { expected, actual } => {
+                RuntimeError::invalid_configuration(format!(
+                    "Session instance mismatch: expected {expected}, got {actual}"
+                ))
+            }
+            OpenCodeError::SessionImplementationMismatch { expected, actual } => {
+                RuntimeError::invalid_configuration(format!(
+                    "Session implementation mismatch: expected {expected}, got {actual}"
+                ))
+            }
             OpenCodeError::InvalidConfiguration(msg) => RuntimeError::invalid_configuration(msg),
             OpenCodeError::WorktreeIsolationViolation(msg) => {
                 RuntimeError::invalid_workspace_access(msg)

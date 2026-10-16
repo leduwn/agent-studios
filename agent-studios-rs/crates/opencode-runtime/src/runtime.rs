@@ -139,6 +139,20 @@ impl AgentRuntime for OpenCodeRuntime {
             )));
         }
 
+        // Validate model ref upfront before spawning process or creating session (M11-R05, M11-R07)
+        let model_binding = if let Some(ref model_ref) = request.model_ref {
+            let catalog = self.catalog.as_ref().ok_or_else(|| {
+                RuntimeError::invalid_configuration(
+                    "ModelRef provided but no ProviderCatalog configured on OpenCodeRuntime",
+                )
+            })?;
+            let binding =
+                map_model_ref_to_opencode(catalog, model_ref).map_err(RuntimeError::from)?;
+            Some(binding)
+        } else {
+            None
+        };
+
         // 2. Extract and validate session context and worktree lease
         let context =
             OpenCodeSessionContext::from_start_request(&request).map_err(RuntimeError::from)?;
@@ -162,8 +176,8 @@ impl AgentRuntime for OpenCodeRuntime {
                 .mock_server_token
                 .clone()
                 .unwrap_or_else(|| "mock_token".to_string());
-            let client =
-                OpenCodeHttpClient::new(mock_url.clone(), token).map_err(RuntimeError::from)?;
+            let client = OpenCodeHttpClient::with_credentials(mock_url.clone(), "opencode", token)
+                .map_err(RuntimeError::from)?;
             (client, None)
         } else {
             // Resolve binary
@@ -193,19 +207,31 @@ impl AgentRuntime for OpenCodeRuntime {
             let handle = spawn_opencode_server(server_cfg)
                 .await
                 .map_err(RuntimeError::from)?;
-            let client = OpenCodeHttpClient::new(handle.base_url().clone(), handle.auth_token())
-                .map_err(RuntimeError::from)?;
+            let client = OpenCodeHttpClient::with_credentials(
+                handle.base_url().clone(),
+                handle.username(),
+                handle.password(),
+            )
+            .map_err(RuntimeError::from)?;
             (client, Some(Arc::new(handle)))
         };
 
-        // 4. Create OpenCode session
-        let opencode_session = client
+        // 4. Create OpenCode session with transactional cleanup on failure (M11-R05)
+        let opencode_session = match client
             .create_session(CreateSessionRequest {
                 title: Some(format!("AgentStudios-{}", session_id)),
                 directory: Some(context.working_directory.display().to_string()),
             })
             .await
-            .map_err(RuntimeError::from)?;
+        {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(ref srv) = server_handle {
+                    let _ = srv.stop().await;
+                }
+                return Err(RuntimeError::from(e));
+            }
+        };
 
         // 5. Open SSE event stream and launch ingestion reader
         if let Ok(sse_resp) = client.open_event_stream().await {
@@ -214,6 +240,7 @@ impl AgentRuntime for OpenCodeRuntime {
                 hub.clone(),
                 session_id,
                 *request.instance_id(),
+                Some(opencode_session.id.clone()),
             ));
         } else {
             // Emit authoritative initial SessionStarted if SSE stream delayed
@@ -224,25 +251,20 @@ impl AgentRuntime for OpenCodeRuntime {
             .await?;
         }
 
-        // 6. Send initial prompt if present
+        // 6. Send initial prompt if present with transactional rollback on failure (M11-R05)
         if let Some(ref prompt) = request.initial_prompt {
-            let mut msg_req = OpenCodeMessageRequest {
-                content: prompt.clone(),
-                model: None,
-                provider: None,
-            };
-
-            if let Some(binding) = request
-                .model_ref
-                .as_ref()
-                .zip(self.catalog.as_ref())
-                .and_then(|(model_ref, cat)| map_model_ref_to_opencode(cat, model_ref).ok())
-            {
-                msg_req.model = Some(binding.model_name);
-                msg_req.provider = Some(binding.provider_name);
+            let mut msg_req = OpenCodeMessageRequest::from_content(prompt);
+            if let Some(ref binding) = model_binding {
+                msg_req =
+                    msg_req.with_model(binding.provider_name.clone(), binding.model_name.clone());
             }
 
-            let _ = client.send_message(&opencode_session.id, msg_req).await;
+            if let Err(e) = client.send_message(&opencode_session.id, msg_req).await {
+                if let Some(ref srv) = server_handle {
+                    let _ = srv.stop().await;
+                }
+                return Err(RuntimeError::from(e));
+            }
         }
 
         let state = Arc::new(RwLock::new(RuntimeLifecycleState::Running));
@@ -290,7 +312,31 @@ impl AgentRuntime for OpenCodeRuntime {
                 session_id: session.session_id,
             })?;
 
-        let current_state = *active.state.read().await;
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+
+        // Synchronize state with hub events (M11-R05)
+        let mut current_state = *active.state.read().await;
+        if !current_state.is_terminal() {
+            let events = active.hub.recorded_events().await;
+            for ev in events.iter().rev() {
+                if let Some(st) = ev
+                    .kind
+                    .to_lifecycle_state()
+                    .filter(|&st| st != current_state)
+                {
+                    *active.state.write().await = st;
+                    current_state = st;
+                    break;
+                }
+            }
+        }
+
         if current_state.is_terminal() {
             return Err(RuntimeError::TerminalStateError {
                 session_id: session.session_id,
@@ -305,11 +351,7 @@ impl AgentRuntime for OpenCodeRuntime {
                     .client
                     .send_message(
                         &active.opencode_session_id,
-                        OpenCodeMessageRequest {
-                            content,
-                            model: None,
-                            provider: None,
-                        },
+                        OpenCodeMessageRequest::from_content(content),
                     )
                     .await
                     .map_err(RuntimeError::from)?;
@@ -319,22 +361,14 @@ impl AgentRuntime for OpenCodeRuntime {
                 approved,
                 reason,
             } => {
-                let text = format!(
-                    "Approval for {} {}: {}",
-                    approval_id,
-                    if approved { "granted" } else { "denied" },
-                    reason.unwrap_or_default()
-                );
+                // Dispatch decision via dedicated permission response endpoint rather than chat message (M11-R08)
+                let req = match reason {
+                    Some(r) => crate::client::PermissionDecisionRequest::with_reason(approved, r),
+                    None => crate::client::PermissionDecisionRequest::new(approved),
+                };
                 active
                     .client
-                    .send_message(
-                        &active.opencode_session_id,
-                        OpenCodeMessageRequest {
-                            content: text,
-                            model: None,
-                            provider: None,
-                        },
-                    )
+                    .respond_permission(&active.opencode_session_id, &approval_id.to_string(), req)
                     .await
                     .map_err(RuntimeError::from)?;
             }
@@ -344,11 +378,7 @@ impl AgentRuntime for OpenCodeRuntime {
                     .client
                     .send_message(
                         &active.opencode_session_id,
-                        OpenCodeMessageRequest {
-                            content: text,
-                            model: None,
-                            provider: None,
-                        },
+                        OpenCodeMessageRequest::from_content(text),
                     )
                     .await
                     .map_err(RuntimeError::from)?;
@@ -368,7 +398,31 @@ impl AgentRuntime for OpenCodeRuntime {
                 session_id: session.session_id,
             })?;
 
-        let current_state = *active.state.read().await;
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+
+        // Synchronize state with hub events (M11-R05)
+        let mut current_state = *active.state.read().await;
+        if !current_state.is_terminal() {
+            let events = active.hub.recorded_events().await;
+            for ev in events.iter().rev() {
+                if let Some(st) = ev
+                    .kind
+                    .to_lifecycle_state()
+                    .filter(|&st| st != current_state)
+                {
+                    *active.state.write().await = st;
+                    current_state = st;
+                    break;
+                }
+            }
+        }
+
         if current_state.is_terminal() {
             return Err(RuntimeError::TerminalStateError {
                 session_id: session.session_id,
@@ -408,6 +462,14 @@ impl AgentRuntime for OpenCodeRuntime {
                 session_id: session.session_id,
             })?;
 
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+
         let current_state = *active.state.read().await;
         if current_state != RuntimeLifecycleState::Interrupted {
             return Err(RuntimeError::InvalidLifecycleTransition {
@@ -421,7 +483,14 @@ impl AgentRuntime for OpenCodeRuntime {
 
         if let Some(inp) = input {
             drop(sessions);
-            self.send(session, inp).await?;
+            if let Err(e) = self.send(session, inp).await {
+                // Atomic state rollback on error (M11-R05)
+                let sessions = self.active_sessions.read().await;
+                if let Some(active) = sessions.get(&session.session_id) {
+                    *active.state.write().await = RuntimeLifecycleState::Interrupted;
+                }
+                return Err(e);
+            }
         }
 
         Ok(())
@@ -430,14 +499,45 @@ impl AgentRuntime for OpenCodeRuntime {
     async fn stop(&self, session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
         self.verify_session_ref(session)?;
 
-        let mut sessions = self.active_sessions.write().await;
+        let sessions = self.active_sessions.read().await;
         let active = sessions
-            .remove(&session.session_id)
+            .get(&session.session_id)
             .ok_or(RuntimeError::SessionNotFound {
                 session_id: session.session_id,
             })?;
 
-        *active.state.write().await = RuntimeLifecycleState::Stopped;
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+
+        // Synchronize state with hub events if not yet terminal
+        {
+            let current = *active.state.read().await;
+            if !current.is_terminal() {
+                let events = active.hub.recorded_events().await;
+                for ev in events.iter().rev() {
+                    if let Some(st) = ev.kind.to_lifecycle_state().filter(|&st| st != current) {
+                        *active.state.write().await = st;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut state_guard = active.state.write().await;
+        if state_guard.is_terminal() {
+            // Idempotent stop on terminal state (M11-R05)
+            if let Some(ref srv) = active.server_handle {
+                let _ = srv.stop().await;
+            }
+            return Ok(());
+        }
+
+        *state_guard = RuntimeLifecycleState::Stopped;
 
         if let Some(ref srv) = active.server_handle {
             let _ = srv.stop().await;
@@ -460,7 +560,25 @@ impl AgentRuntime for OpenCodeRuntime {
                 session_id: session.session_id,
             })?;
 
-        let state = *active.state.read().await;
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
+
+        let mut state = *active.state.read().await;
+        if !state.is_terminal() {
+            let events = active.hub.recorded_events().await;
+            for ev in events.iter().rev() {
+                if let Some(st) = ev.kind.to_lifecycle_state().filter(|&st| st != state) {
+                    *active.state.write().await = st;
+                    state = st;
+                    break;
+                }
+            }
+        }
         Ok(state)
     }
 
@@ -477,6 +595,14 @@ impl AgentRuntime for OpenCodeRuntime {
             .ok_or(RuntimeError::SessionNotFound {
                 session_id: session.session_id,
             })?;
+
+        if session.instance_id != active.session_ref.instance_id {
+            return Err(RuntimeError::SessionInstanceMismatch {
+                expected: active.session_ref.instance_id,
+                actual: session.instance_id,
+                session_id: session.session_id,
+            });
+        }
 
         active.hub.subscribe(after_sequence).await
     }

@@ -56,15 +56,36 @@ fn test_provider_name_resolution() {
 
 #[test]
 fn test_model_ref_mapping() {
-    let catalog = ProviderCatalog::with_builtin_definitions();
-    let model_ref = ModelRef::new(
-        ProviderInstanceId::new(),
-        ModelId::new("claude-3-7-sonnet").unwrap(),
-    );
+    let mut catalog = ProviderCatalog::with_builtin_definitions();
+    let instance_id = ProviderInstanceId::new();
+    let anthropic_instance = agent_studios_provider::ProviderInstance::new(
+        instance_id,
+        ProviderId::new("anthropic").unwrap(),
+        "Anthropic Production",
+        agent_studios_provider::ProtocolFamily::AnthropicMessages,
+        agent_studios_provider::EndpointProfile::new("https://api.anthropic.com").unwrap(),
+        agent_studios_provider::AuthenticationScheme::ApiKeyHeader {
+            header_name: "x-api-key".to_string(),
+            secret: agent_studios_provider::SecretReference::env("ANTHROPIC_API_KEY").unwrap(),
+        },
+    )
+    .unwrap();
+    catalog
+        .register_provider_instance(anthropic_instance)
+        .unwrap();
+
+    let model_ref = ModelRef::new(instance_id, ModelId::new("claude-3-7-sonnet").unwrap());
 
     let binding = map_model_ref_to_opencode(&catalog, &model_ref).unwrap();
     assert_eq!(binding.model_name, "claude-3-7-sonnet");
     assert_eq!(binding.auth_env_var, Some("ANTHROPIC_API_KEY".to_string()));
+
+    // Verify fail-closed behavior for unregistered provider instance (M11-R07)
+    let unregistered_ref = ModelRef::new(
+        ProviderInstanceId::new(),
+        ModelId::new("claude-3-7-sonnet").unwrap(),
+    );
+    assert!(map_model_ref_to_opencode(&catalog, &unregistered_ref).is_err());
 }
 
 #[test]
@@ -88,7 +109,7 @@ fn test_workspace_validation_managed_vs_shared() {
         "Expected managed workspace to validate: {:?}",
         res.err()
     );
-    assert_eq!(res.unwrap(), temp_path);
+    assert_eq!(res.unwrap(), temp_path.canonicalize().unwrap());
 
     // 2. Non-existent managed worktree path fails closed
     let non_existent = ExecutionWorkspace::managed(

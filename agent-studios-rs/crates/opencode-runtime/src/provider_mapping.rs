@@ -16,29 +16,50 @@ pub struct OpenCodeModelBinding {
 
 /// Maps an Agent Studios `ModelRef` and `ProviderCatalog` into OpenCode provider and model bindings
 /// without mutating global or host-level configuration files.
+/// Strictly requires the provider instance in the catalog; fails closed without default fallbacks.
 pub fn map_model_ref_to_opencode(
     catalog: &ProviderCatalog,
     model_ref: &ModelRef,
 ) -> Result<OpenCodeModelBinding, OpenCodeError> {
-    let instance = catalog.get_provider_instance(&model_ref.provider_instance_id);
+    let instance = catalog
+        .get_provider_instance(&model_ref.provider_instance_id)
+        .ok_or_else(|| {
+            OpenCodeError::InvalidConfiguration(format!(
+                "Provider instance '{}' not found in catalog for model '{}'",
+                model_ref.provider_instance_id,
+                model_ref.model_id.as_str()
+            ))
+        })?;
 
-    let provider_name = match instance {
-        Some(inst) => resolve_opencode_provider_name(&inst.provider_id),
-        None => "anthropic".to_string(),
-    };
-
+    let provider_name = resolve_opencode_provider_name(&instance.provider_id);
     let model_name = model_ref.model_id.as_str().to_string();
 
-    let auth_env_var = match provider_name.as_str() {
-        "anthropic" => Some("ANTHROPIC_API_KEY".to_string()),
-        "openai" => Some("OPENAI_API_KEY".to_string()),
-        "google" => Some("GEMINI_API_KEY".to_string()),
-        "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
-        "ollama" => None,
-        _ => None,
+    let auth_env_var = match &instance.authentication {
+        agent_studios_provider::AuthenticationScheme::BearerToken { secret }
+        | agent_studios_provider::AuthenticationScheme::ApiKeyHeader { secret, .. } => {
+            if secret.backend == agent_studios_provider::SecretBackend::EnvironmentVariable {
+                Some(secret.locator.clone())
+            } else {
+                match provider_name.as_str() {
+                    "anthropic" => Some("ANTHROPIC_API_KEY".to_string()),
+                    "openai" => Some("OPENAI_API_KEY".to_string()),
+                    "google" => Some("GEMINI_API_KEY".to_string()),
+                    "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
+                    _ => None,
+                }
+            }
+        }
+        agent_studios_provider::AuthenticationScheme::None => None,
+        _ => match provider_name.as_str() {
+            "anthropic" => Some("ANTHROPIC_API_KEY".to_string()),
+            "openai" => Some("OPENAI_API_KEY".to_string()),
+            "google" => Some("GEMINI_API_KEY".to_string()),
+            "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
+            _ => None,
+        },
     };
 
-    let base_url = instance.map(|inst| inst.endpoint.base_url.clone());
+    let base_url = Some(instance.endpoint.base_url.clone());
 
     Ok(OpenCodeModelBinding {
         provider_name,

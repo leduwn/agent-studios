@@ -86,7 +86,25 @@ async fn test_opencode_runtime_full_lifecycle_with_mock_server() {
         .mount(&mock_server)
         .await;
 
-    let catalog = Arc::new(ProviderCatalog::with_builtin_definitions());
+    let mut catalog = ProviderCatalog::with_builtin_definitions();
+    let provider_inst_id = ProviderInstanceId::new();
+    let anthropic_instance = agent_studios_provider::ProviderInstance::new(
+        provider_inst_id,
+        agent_studios_provider::id::ProviderId::new("anthropic").unwrap(),
+        "Anthropic Production",
+        agent_studios_provider::ProtocolFamily::AnthropicMessages,
+        agent_studios_provider::EndpointProfile::new("https://api.anthropic.com").unwrap(),
+        agent_studios_provider::AuthenticationScheme::ApiKeyHeader {
+            header_name: "x-api-key".to_string(),
+            secret: agent_studios_provider::SecretReference::env("ANTHROPIC_API_KEY").unwrap(),
+        },
+    )
+    .unwrap();
+    catalog
+        .register_provider_instance(anthropic_instance)
+        .unwrap();
+    let catalog = Arc::new(catalog);
+
     let runtime = OpenCodeRuntime::new()
         .unwrap()
         .with_catalog(catalog)
@@ -109,10 +127,7 @@ async fn test_opencode_runtime_full_lifecycle_with_mock_server() {
         "0123456789abcdef0123456789abcdef01234567",
     );
 
-    let model_ref = ModelRef::new(
-        ProviderInstanceId::new(),
-        ModelId::new("claude-3-7-sonnet").unwrap(),
-    );
+    let model_ref = ModelRef::new(provider_inst_id, ModelId::new("claude-3-7-sonnet").unwrap());
 
     let instance_ref =
         RuntimeInstanceRef::new(instance.implementation_id.clone(), instance.instance_id);

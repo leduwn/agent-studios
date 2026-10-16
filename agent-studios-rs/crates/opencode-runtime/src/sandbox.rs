@@ -137,7 +137,15 @@ impl ProcessContainment {
                 })
             }
             #[cfg(windows)]
-            SandboxLevel::Strict | SandboxLevel::Standard => {
+            SandboxLevel::Strict => {
+                // Win32 Job Objects enforce CPU, memory, and process quotas, but do not provide
+                // OS-level filesystem or network namespace isolation. Under Strict policy, fail closed.
+                Err(OpenCodeError::SandboxPolicyViolation(
+                    "SandboxLevel::Strict requires OS-level filesystem isolation which is not supported by Win32 Job Objects alone. Failing closed to prevent unauthorized filesystem access.".into(),
+                ))
+            }
+            #[cfg(windows)]
+            SandboxLevel::Standard => {
                 let job = JobObjectGuard::create(&policy)?;
                 info!(
                     level = ?policy.level,
@@ -169,7 +177,30 @@ impl ProcessContainment {
         &self.policy
     }
 
-    /// Assigns a newly spawned child process to the containment environment.
+    /// Assigns a process to the containment environment using its raw OS handle.
+    pub fn assign_raw_handle(&self, handle: isize) -> Result<(), OpenCodeError> {
+        #[cfg(windows)]
+        {
+            if let Some(ref job) = self.job_object {
+                job.assign_raw_handle(handle as windows_sys::Win32::Foundation::HANDLE)?;
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = handle;
+            if self.policy.level.requires_os_containment() {
+                Err(OpenCodeError::SandboxPolicyViolation(
+                    "Cannot assign process handle: OS containment required but unavailable on platform"
+                        .into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Assigns a newly spawned child process to the containment environment and verifies containment.
     pub fn assign_child(&self, pid: u32) -> Result<(), OpenCodeError> {
         #[cfg(windows)]
         {
@@ -180,6 +211,31 @@ impl ProcessContainment {
         }
         #[cfg(not(windows))]
         {
+            let _ = pid;
+            if self.policy.level.requires_os_containment() {
+                Err(OpenCodeError::SandboxPolicyViolation(
+                    "Cannot assign process: OS containment required but unavailable on platform"
+                        .into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// Assigns a suspended child process (launched with CREATE_SUSPENDED), verifies containment via IsProcessInJob,
+    /// and safely resumes execution. Eliminates the uncontained execution window (M11-R04).
+    pub fn assign_and_resume_child(&self, pid: u32) -> Result<(), OpenCodeError> {
+        #[cfg(windows)]
+        {
+            if let Some(ref job) = self.job_object {
+                job.assign_and_resume_pid(pid)?;
+            }
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = pid;
             if self.policy.level.requires_os_containment() {
                 Err(OpenCodeError::SandboxPolicyViolation(
                     "Cannot assign process: OS containment required but unavailable on platform"
@@ -195,6 +251,23 @@ impl ProcessContainment {
         self.assign_child(pid)
     }
 
+    /// Verifies whether a child process is actively contained within this supervisor's Job Object.
+    pub fn is_child_in_job(&self, pid: u32) -> Result<bool, OpenCodeError> {
+        #[cfg(windows)]
+        {
+            if let Some(ref job) = self.job_object {
+                job.is_process_in_job(pid)
+            } else {
+                Ok(false)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = pid;
+            Ok(false)
+        }
+    }
+
     /// Terminates all processes within the containment tree.
     pub fn terminate(&self) -> Result<(), OpenCodeError> {
         #[cfg(windows)]
@@ -207,6 +280,43 @@ impl ProcessContainment {
         #[cfg(not(windows))]
         {
             Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtResumeProcess(process_handle: windows_sys::Win32::Foundation::HANDLE) -> i32;
+}
+
+#[cfg(windows)]
+struct ProcessHandleGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl ProcessHandleGuard {
+    fn new(h: windows_sys::Win32::Foundation::HANDLE) -> Option<Self> {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            None
+        } else {
+            Some(Self(h))
+        }
+    }
+
+    fn as_raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessHandleGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(self.0);
+            }
         }
     }
 }
@@ -234,7 +344,7 @@ impl JobObjectGuard {
         };
 
         let handle = unsafe { CreateJobObjectW(null(), null()) };
-        if handle.is_null() {
+        if handle.is_null() || handle == -1 as _ {
             let err = unsafe { GetLastError() };
             return Err(OpenCodeError::JobObject(format!(
                 "CreateJobObjectW failed with Win32 error code {err}"
@@ -284,38 +394,162 @@ impl JobObjectGuard {
         self.handle as isize
     }
 
-    pub fn assign_pid(&self, pid: u32) -> Result<(), OpenCodeError> {
-        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn assign_raw_handle(
+        &self,
+        process_handle: windows_sys::Win32::Foundation::HANDLE,
+    ) -> Result<(), OpenCodeError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, IsProcessInJob};
 
-        let desired_access = PROCESS_SET_QUOTA | PROCESS_TERMINATE;
-        let process_handle = unsafe { OpenProcess(desired_access, 0, pid) };
-        if process_handle.is_null() {
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, process_handle) };
+        if assigned == 0 {
             let err = unsafe { GetLastError() };
             return Err(OpenCodeError::JobObject(format!(
-                "OpenProcess for PID {pid} failed with Win32 error code {err}"
+                "AssignProcessToJobObject failed with Win32 error code {err}"
             )));
         }
 
-        let assigned = unsafe { AssignProcessToJobObject(self.handle, process_handle) };
-        let assign_err = if assigned == 0 {
-            unsafe { GetLastError() }
-        } else {
-            0
-        };
-
-        unsafe { CloseHandle(process_handle) };
-
-        if assigned == 0 {
+        let mut in_job: windows_sys::Win32::Foundation::BOOL = 0;
+        let checked = unsafe { IsProcessInJob(process_handle, self.handle, &mut in_job) };
+        if checked == 0 || in_job == 0 {
+            let err = if checked == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
             return Err(OpenCodeError::JobObject(format!(
-                "AssignProcessToJobObject for PID {pid} failed with Win32 error code {assign_err}"
+                "IsProcessInJob verification failed after raw handle assignment (code {err})"
             )));
         }
 
         Ok(())
+    }
+
+    pub fn assign_pid(&self, pid: u32) -> Result<(), OpenCodeError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, IsProcessInJob};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+            TerminateProcess,
+        };
+
+        let desired_access = PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION;
+        let raw_handle = unsafe { OpenProcess(desired_access, 0, pid) };
+        let guard = ProcessHandleGuard::new(raw_handle).ok_or_else(|| {
+            let err = unsafe { GetLastError() };
+            OpenCodeError::JobObject(format!(
+                "OpenProcess for PID {pid} failed with Win32 error code {err}"
+            ))
+        })?;
+
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, guard.as_raw()) };
+        if assigned == 0 {
+            let err = unsafe { GetLastError() };
+            unsafe { TerminateProcess(guard.as_raw(), 1) };
+            return Err(OpenCodeError::JobObject(format!(
+                "AssignProcessToJobObject for PID {pid} failed with Win32 error code {err}"
+            )));
+        }
+
+        let mut in_job: windows_sys::Win32::Foundation::BOOL = 0;
+        let checked = unsafe { IsProcessInJob(guard.as_raw(), self.handle, &mut in_job) };
+        if checked == 0 || in_job == 0 {
+            let err = if checked == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            unsafe { TerminateProcess(guard.as_raw(), 1) };
+            return Err(OpenCodeError::JobObject(format!(
+                "IsProcessInJob verification failed for PID {pid} (code {err}, in_job={in_job})"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Assigns a process created with CREATE_SUSPENDED, verifies containment, and then resumes execution (M11-R04).
+    pub fn assign_and_resume_pid(&self, pid: u32) -> Result<(), OpenCodeError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, IsProcessInJob};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SUSPEND_RESUME,
+            PROCESS_TERMINATE, TerminateProcess,
+        };
+
+        let desired_access = PROCESS_SET_QUOTA
+            | PROCESS_TERMINATE
+            | PROCESS_QUERY_INFORMATION
+            | PROCESS_SUSPEND_RESUME;
+
+        let raw_handle = unsafe { OpenProcess(desired_access, 0, pid) };
+        let guard = ProcessHandleGuard::new(raw_handle).ok_or_else(|| {
+            let err = unsafe { GetLastError() };
+            OpenCodeError::JobObject(format!(
+                "OpenProcess for PID {pid} failed with Win32 error code {err}"
+            ))
+        })?;
+
+        // 1. Assign suspended process to Job Object
+        let assigned = unsafe { AssignProcessToJobObject(self.handle, guard.as_raw()) };
+        if assigned == 0 {
+            let err = unsafe { GetLastError() };
+            unsafe { TerminateProcess(guard.as_raw(), 1) };
+            return Err(OpenCodeError::JobObject(format!(
+                "AssignProcessToJobObject for PID {pid} failed with Win32 error code {err}"
+            )));
+        }
+
+        // 2. Verify containment via IsProcessInJob before resuming
+        let mut in_job: windows_sys::Win32::Foundation::BOOL = 0;
+        let checked = unsafe { IsProcessInJob(guard.as_raw(), self.handle, &mut in_job) };
+        if checked == 0 || in_job == 0 {
+            let err = if checked == 0 {
+                unsafe { GetLastError() }
+            } else {
+                0
+            };
+            unsafe { TerminateProcess(guard.as_raw(), 1) };
+            return Err(OpenCodeError::JobObject(format!(
+                "IsProcessInJob verification failed for PID {pid} (code {err}, in_job={in_job})"
+            )));
+        }
+
+        // 3. Resume process now that containment is verified
+        let status = unsafe { NtResumeProcess(guard.as_raw()) };
+        if status < 0 {
+            unsafe { TerminateProcess(guard.as_raw(), 1) };
+            return Err(OpenCodeError::JobObject(format!(
+                "NtResumeProcess for PID {pid} failed with NTSTATUS {status:#x}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub fn is_process_in_job(&self, pid: u32) -> Result<bool, OpenCodeError> {
+        use windows_sys::Win32::Foundation::GetLastError;
+        use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION};
+
+        let desired_access = PROCESS_QUERY_INFORMATION;
+        let raw_handle = unsafe { OpenProcess(desired_access, 0, pid) };
+        let guard = match ProcessHandleGuard::new(raw_handle) {
+            Some(g) => g,
+            None => return Ok(false),
+        };
+
+        let mut in_job: windows_sys::Win32::Foundation::BOOL = 0;
+        let checked = unsafe { IsProcessInJob(guard.as_raw(), self.handle, &mut in_job) };
+        if checked == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(OpenCodeError::JobObject(format!(
+                "IsProcessInJob failed for PID {pid} with Win32 error code {err}"
+            )));
+        }
+
+        Ok(in_job != 0)
     }
 
     pub fn terminate(&self, exit_code: u32) -> Result<(), OpenCodeError> {
@@ -336,10 +570,12 @@ impl JobObjectGuard {
 #[cfg(windows)]
 impl Drop for JobObjectGuard {
     fn drop(&mut self) {
-        if !self.handle.is_null() {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        if !self.handle.is_null() && self.handle != INVALID_HANDLE_VALUE {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(self.handle);
             }
+            self.handle = std::ptr::null_mut();
         }
     }
 }

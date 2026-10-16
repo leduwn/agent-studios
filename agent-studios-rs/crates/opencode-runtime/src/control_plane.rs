@@ -31,20 +31,47 @@ impl OpenCodeSessionContext {
 }
 
 /// Validates that the workspace satisfies isolation invariants and returns the physical working directory path.
+/// Enforces canonical path resolution and verifies that the working directory does not escape the managed worktree root.
 pub fn validate_session_workspace(
     workspace: &ExecutionWorkspace,
     _access_mode: WorkspaceAccessMode,
 ) -> Result<PathBuf, OpenCodeError> {
     match workspace {
         ExecutionWorkspace::Managed { cwd, root, .. } => {
+            let canonical_root = root.canonicalize().map_err(|e| {
+                OpenCodeError::WorktreeIsolationViolation(format!(
+                    "Managed worktree root path cannot be resolved or does not exist: {}: {e}",
+                    root.display()
+                ))
+            })?;
+
             let p = if cwd.as_os_str().is_empty() {
-                root.clone()
+                canonical_root.clone()
             } else {
-                cwd.clone()
+                let target = if cwd.is_absolute() {
+                    cwd.clone()
+                } else {
+                    root.join(cwd)
+                };
+                target.canonicalize().map_err(|e| {
+                    OpenCodeError::WorktreeIsolationViolation(format!(
+                        "Managed worktree working directory cannot be resolved or does not exist: {}: {e}",
+                        target.display()
+                    ))
+                })?
             };
+
+            if !p.starts_with(&canonical_root) {
+                return Err(OpenCodeError::WorktreeIsolationViolation(format!(
+                    "Managed worktree cwd '{}' escapes managed root '{}'",
+                    p.display(),
+                    canonical_root.display()
+                )));
+            }
+
             if !p.is_dir() {
                 return Err(OpenCodeError::WorktreeIsolationViolation(format!(
-                    "Assigned worktree path does not exist on disk: {}",
+                    "Assigned worktree path is not a directory: {}",
                     p.display()
                 )));
             }
