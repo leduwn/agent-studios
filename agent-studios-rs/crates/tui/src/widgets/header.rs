@@ -1,0 +1,83 @@
+//! Header Widget for Agent Studios CLI
+//!
+//! Displays project repository path, active git branch, dirty indicator,
+//! active LLM model badge, and execution mode.
+
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Widget},
+};
+
+use crate::theme::AgsTheme;
+
+pub struct HeaderWidget<'a> {
+    pub theme: &'a AgsTheme,
+    pub project_name: &'a str,
+    pub branch_name: &'a str,
+    pub is_dirty: bool,
+    pub model_name: &'a str,
+    pub execution_mode: &'a str,
+    pub compact: bool,
+}
+
+impl<'a> Widget for HeaderWidget<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < 10 || area.height < 1 {
+            return;
+        }
+
+        let dirty_span = if self.is_dirty {
+            Span::styled(" *dirty", Style::default().fg(self.theme.accent_amber).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(" clean", Style::default().fg(self.theme.accent_emerald))
+        };
+
+        let title_spans = vec![
+            Span::styled(" AGENT STUDIOS ", Style::default().bg(self.theme.accent_emerald).fg(self.theme.text_inverse).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::styled(self.project_name, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled(" (", Style::default().fg(self.theme.text_muted)),
+            Span::styled(self.branch_name, Style::default().fg(self.theme.accent_sky)),
+            dirty_span,
+            Span::styled(")", Style::default().fg(self.theme.text_muted)),
+        ];
+
+        let badges_spans = vec![
+            Span::styled(format!(" [{}] ", self.model_name), Style::default().fg(self.theme.accent_purple)),
+            Span::styled(format!(" {} ", self.execution_mode), Style::default().bg(self.theme.bg_surface).fg(self.theme.text_secondary)),
+        ];
+
+        if self.compact {
+            // Render 1-2 lines without border
+            let line = Line::from(title_spans);
+            buf.set_line(area.x, area.y, &line, area.width);
+            return;
+        }
+
+        // Render card block with bottom border
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(self.theme.border_subtle_style())
+            .style(self.theme.card_style());
+
+        let inner_area = block.inner(area);
+        block.render(area, buf);
+
+        if inner_area.height > 0 {
+            let left_line = Line::from(title_spans);
+            let right_line = Line::from(badges_spans);
+
+            buf.set_line(inner_area.x, inner_area.y, &left_line, inner_area.width);
+
+            // Right-aligned badges if space allows
+            let right_width = right_line.width() as u16;
+            if inner_area.width > right_width + left_line.width() as u16 + 4 {
+                let right_x = inner_area.x + inner_area.width - right_width;
+                buf.set_line(right_x, inner_area.y, &right_line, right_width);
+            }
+        }
+    }
+}
