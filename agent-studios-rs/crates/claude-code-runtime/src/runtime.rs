@@ -1,28 +1,27 @@
+use async_trait::async_trait;
+use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use async_trait::async_trait;
-use chrono::Utc;
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use agent_studios_external_runtime::{
     AgentRuntime, DEFAULT_EVENT_RETENTION, DiscoveredRuntimeInstance, RuntimeCapabilities,
     RuntimeError, RuntimeEventKind, RuntimeEventSubscription, RuntimeImplementationId,
-    RuntimeInput, RuntimeLifecycleState, RuntimeSessionHandle, RuntimeSessionId,
-    RuntimeSessionRef, RuntimeStartRequest, SanitizedRuntimeMessage, SessionEventHub,
+    RuntimeInput, RuntimeLifecycleState, RuntimeSessionHandle, RuntimeSessionId, RuntimeSessionRef,
+    RuntimeStartRequest, SanitizedRuntimeMessage, SessionEventHub,
 };
 
-use crate::approval::ApprovalAuthority;
+use crate::approval::{ApprovalAuthority, parse_max_budget_usd, validate_max_budget_usd};
 use crate::discovery::{
     CLAUDE_CODE_RUNTIME_ID, ClaudeCodeDiscoveryConfig, default_claude_capabilities,
     discover_claude_binary, resolve_binary_path,
 };
 use crate::mapping::map_claude_message;
 use crate::process::{ClaudeCodeProcess, ClaudeCodeProcessConfig, spawn_claude_process};
-use crate::protocol::{
-    ClaudeInterruptInput, ClaudeStreamMessage, ClaudeUserPromptInput,
-};
+use crate::protocol::{ClaudeInterruptInput, ClaudeStreamMessage, ClaudeUserPromptInput};
 use crate::sandbox::{SandboxPolicy, validate_session_workspace};
 use crate::stream::NdjsonStreamReader;
 use crate::subagent::SubagentCorrelationTracker;
@@ -39,12 +38,16 @@ pub struct ClaudeCodeActiveSession {
     pub task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+/// Default approval timeout duration if unspecified (60 seconds).
+pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Vendor-neutral Claude Code CLI runtime adapter implementing `AgentRuntime`.
 pub struct ClaudeCodeRuntime {
     implementation_id: RuntimeImplementationId,
     discovery_config: ClaudeCodeDiscoveryConfig,
     sandbox_policy: SandboxPolicy,
     permission_mode: Option<String>,
+    approval_timeout: Duration,
     active_sessions: Arc<RwLock<BTreeMap<RuntimeSessionId, ClaudeCodeActiveSession>>>,
 }
 
@@ -55,6 +58,7 @@ impl ClaudeCodeRuntime {
             discovery_config: ClaudeCodeDiscoveryConfig::default(),
             sandbox_policy: SandboxPolicy::default(),
             permission_mode: Some("manual".to_string()),
+            approval_timeout: DEFAULT_APPROVAL_TIMEOUT,
             active_sessions: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
@@ -72,6 +76,122 @@ impl ClaudeCodeRuntime {
     pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Self {
         self.permission_mode = Some(mode.into());
         self
+    }
+
+    pub fn with_approval_timeout(mut self, timeout: Duration) -> Self {
+        self.approval_timeout = timeout;
+        self
+    }
+
+    pub fn approval_timeout(&self) -> Duration {
+        self.approval_timeout
+    }
+
+    /// Validates request and builds the process launch configuration.
+    /// Strictly validates budget constraints fail-closed before any child process is spawned.
+    pub fn build_process_config(
+        &self,
+        request: &RuntimeStartRequest,
+    ) -> Result<ClaudeCodeProcessConfig, RuntimeError> {
+        request.validate()?;
+
+        if request.implementation_id() != &self.implementation_id {
+            return Err(RuntimeError::invalid_configuration(format!(
+                "Implementation mismatch: request specified '{}', but this adapter is '{}'",
+                request.implementation_id(),
+                self.implementation_id
+            )));
+        }
+
+        let mut max_budget_usd = None;
+
+        if let Some(val) = request.metadata.get("max_budget_usd") {
+            let parsed = parse_max_budget_usd(val.as_str()).map_err(|e| {
+                RuntimeError::invalid_configuration(format!("Invalid max_budget_usd: {e}"))
+            })?;
+            max_budget_usd = Some(parsed);
+        }
+
+        if let Some(config_ref) = request.config_ref() {
+            let cfg_str = config_ref.as_str();
+            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(cfg_str) {
+                if let Some(budget_val) = json_val
+                    .get("max_budget_usd")
+                    .or_else(|| json_val.get("budget"))
+                {
+                    if let Some(num) = budget_val.as_f64() {
+                        let parsed = validate_max_budget_usd(num).map_err(|e| {
+                            RuntimeError::invalid_configuration(format!(
+                                "Invalid max_budget_usd in config_ref: {e}"
+                            ))
+                        })?;
+                        if max_budget_usd.is_none() {
+                            max_budget_usd = Some(parsed);
+                        }
+                    } else if let Some(s) = budget_val.as_str() {
+                        let parsed = parse_max_budget_usd(s).map_err(|e| {
+                            RuntimeError::invalid_configuration(format!(
+                                "Invalid max_budget_usd in config_ref: {e}"
+                            ))
+                        })?;
+                        if max_budget_usd.is_none() {
+                            max_budget_usd = Some(parsed);
+                        }
+                    } else {
+                        return Err(RuntimeError::invalid_configuration(
+                            "Invalid max_budget_usd in config_ref: must be number or string",
+                        ));
+                    }
+                }
+            } else if let Some(rest) = cfg_str
+                .strip_prefix("budget=")
+                .or_else(|| cfg_str.strip_prefix("max_budget_usd="))
+                .or_else(|| cfg_str.strip_prefix("budget:"))
+                .or_else(|| cfg_str.strip_prefix("max_budget_usd:"))
+            {
+                let parsed = parse_max_budget_usd(rest).map_err(|e| {
+                    RuntimeError::invalid_configuration(format!(
+                        "Invalid max_budget_usd in config_ref: {e}"
+                    ))
+                })?;
+                if max_budget_usd.is_none() {
+                    max_budget_usd = Some(parsed);
+                }
+            }
+        }
+
+        let working_directory =
+            validate_session_workspace(&request.workspace, request.workspace_access_mode)
+                .map_err(RuntimeError::from)?;
+
+        let binary_path = resolve_binary_path(&self.discovery_config).ok_or_else(|| {
+            RuntimeError::discovery_failed(
+                "Claude Code executable binary was not found in PATH or configured directories",
+            )
+        })?;
+
+        let model = request.model_ref.as_ref().map(|m| m.model_id().to_string());
+
+        let mut env_vars = Vec::new();
+        for binding in &request.environment_bindings {
+            if let agent_studios_external_runtime::EnvironmentBindingSource::Literal { value } =
+                binding.source()
+            {
+                env_vars.push((binding.name().to_string(), value.as_str().to_string()));
+            }
+        }
+
+        Ok(ClaudeCodeProcessConfig {
+            binary_path,
+            working_dir: working_directory,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            sandbox_policy: self.sandbox_policy.clone(),
+            permission_mode: self.permission_mode.clone(),
+            max_budget_usd,
+            model,
+            bare: false,
+            env_vars,
+        })
     }
 
     pub async fn active_session_count(&self) -> usize {
@@ -113,25 +233,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
         &self,
         request: RuntimeStartRequest,
     ) -> Result<RuntimeSessionHandle, RuntimeError> {
-        request.validate()?;
-
-        if request.implementation_id() != &self.implementation_id {
-            return Err(RuntimeError::invalid_configuration(format!(
-                "Implementation mismatch: request specified '{}', but this adapter is '{}'",
-                request.implementation_id(),
-                self.implementation_id
-            )));
-        }
-
-        let working_directory =
-            validate_session_workspace(&request.workspace, request.workspace_access_mode)
-                .map_err(RuntimeError::from)?;
-
-        let binary_path = resolve_binary_path(&self.discovery_config).ok_or_else(|| {
-            RuntimeError::discovery_failed(
-                "Claude Code executable binary was not found in PATH or configured directories",
-            )
-        })?;
+        let mut process_config = self.build_process_config(&request)?;
 
         let session_id = RuntimeSessionId::new();
         let raw_session_uuid = *session_id.as_uuid();
@@ -150,35 +252,26 @@ impl AgentRuntime for ClaudeCodeRuntime {
             }
         }
 
-        let model = request.model_ref.as_ref().map(|m| m.model_id().to_string());
-        let max_budget_usd = request
+        process_config.session_id = raw_session_uuid.to_string();
+        let working_directory = process_config.working_dir.clone();
+
+        let approval_timeout = request
             .metadata
-            .get("max_budget_usd")
-            .and_then(|v| v.as_str().parse::<f64>().ok());
+            .get("approval_timeout_secs")
+            .and_then(|v| v.as_str().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .or_else(|| {
+                request
+                    .metadata
+                    .get("approval_timeout_ms")
+                    .and_then(|v| v.as_str().parse::<u64>().ok())
+                    .map(Duration::from_millis)
+            })
+            .unwrap_or(self.approval_timeout);
 
-        let mut env_vars = Vec::new();
-        for binding in &request.environment_bindings {
-            if let agent_studios_external_runtime::EnvironmentBindingSource::Literal { value } =
-                binding.source()
-            {
-                env_vars.push((binding.name().to_string(), value.as_str().to_string()));
-            }
-        }
-
-        let process_config = ClaudeCodeProcessConfig {
-            binary_path,
-            working_dir: working_directory.clone(),
-            session_id: raw_session_uuid.to_string(),
-            sandbox_policy: self.sandbox_policy.clone(),
-            permission_mode: self.permission_mode.clone(),
-            max_budget_usd,
-            model,
-            bare: false,
-            env_vars,
-        };
-
-        let (process, stdout) =
-            spawn_claude_process(process_config).await.map_err(RuntimeError::from)?;
+        let (process, stdout) = spawn_claude_process(process_config)
+            .await
+            .map_err(RuntimeError::from)?;
 
         let hub = Arc::new(SessionEventHub::new(
             session_id,
@@ -206,76 +299,101 @@ impl AgentRuntime for ClaudeCodeRuntime {
 
         let task = tokio::spawn(async move {
             let mut reader = NdjsonStreamReader::new(stdout);
+            let mut stream_error = None;
 
-            while let Ok(Some(msg)) = reader.read_message().await {
-                // If control request for tool approval, register with approval authority
-                if let ClaudeStreamMessage::ControlRequest(ref req) = msg {
-                    approval_clone.register_request(req);
-                }
+            loop {
+                match reader.read_message().await {
+                    Ok(Some(msg)) => {
+                        // If control request for tool approval, register with approval authority
+                        if let ClaudeStreamMessage::ControlRequest(ref req) = msg
+                            && let Some(approval_id) = approval_clone.register_request(req)
+                        {
+                            let process_wd = Arc::clone(&process_clone);
+                            let hub_wd = Arc::clone(&hub_clone);
+                            let timeout = approval_timeout;
+                            approval_clone.spawn_watchdog(
+                                approval_id,
+                                timeout,
+                                move |deny_resp| async move {
+                                    let request_id = deny_resp.request_id().to_string();
+                                    warn!(
+                                        approval_id = %approval_id,
+                                        request_id = %request_id,
+                                        "Tool approval timed out; failing closed to Deny"
+                                    );
+                                    if let Ok(json) = serde_json::to_string(&deny_resp) {
+                                        let _ = process_wd.write_stdin_line(&json).await;
+                                    }
+                                    let timeout_desc = if timeout.as_secs() > 0 {
+                                        format!("{}s", timeout.as_secs())
+                                    } else {
+                                        format!("{}ms", timeout.as_millis())
+                                    };
+                                    let _ = hub_wd.emit(RuntimeEventKind::Diagnostic {
+                                        level: "warn".to_string(),
+                                        message: SanitizedRuntimeMessage::new(format!(
+                                            "Approval timed out after {timeout_desc} (fail-closed)"
+                                        )),
+                                    }).await;
+                                },
+                            );
+                        }
 
-                // Map message to normalized runtime events
-                let events = {
-                    let mut sub_lock = subagents_clone.write().await;
-                    map_claude_message(&msg, &session_ref_clone, &mut sub_lock)
-                };
+                        // Map message to normalized runtime events
+                        let events = {
+                            let mut sub_lock = subagents_clone.write().await;
+                            map_claude_message(&msg, &session_ref_clone, &mut sub_lock)
+                        };
 
-                // Emit to SessionEventHub and advance lifecycle state
-                for event_kind in events {
-                    if let Some(target_state) = event_kind.to_lifecycle_state() {
-                        let mut st = state_clone.write().await;
-                        if !st.is_terminal() {
-                            *st = target_state;
+                        // Emit to SessionEventHub and advance lifecycle state
+                        for event_kind in events {
+                            if let Some(target_state) = event_kind.to_lifecycle_state() {
+                                let mut st = state_clone.write().await;
+                                if !st.is_terminal() {
+                                    *st = target_state;
+                                }
+                            }
+
+                            if let Err(e) = hub_clone.emit(event_kind).await {
+                                debug!(error = %e, "Event publication to hub failed or ignored");
+                            }
                         }
                     }
-
-                    if let Err(e) = hub_clone.emit(event_kind).await {
-                        debug!(error = %e, "Event publication to hub failed or ignored");
+                    Ok(None) => break,
+                    Err(e) => {
+                        stream_error = Some(e);
+                        break;
                     }
                 }
             }
 
-            // Stream closed. Check process exit status.
-            let status = process_clone.exit_status().await;
+            approval_clone.cancel_all_pending();
+
+            if let Some(err) = stream_error {
+                let _ = process_clone.terminate().await;
+                let _ = process_clone.wait_for_exit().await;
+                let mut st = state_clone.write().await;
+                if !st.is_terminal() {
+                    *st = RuntimeLifecycleState::Failed;
+                    let _ = hub_clone
+                        .emit(RuntimeEventKind::Failed {
+                            safe_error_summary: SanitizedRuntimeMessage::new(format!(
+                                "Stream read error: {err}"
+                            )),
+                        })
+                        .await;
+                }
+                return;
+            }
+
+            // Stream closed at EOF. Reap child and obtain true exit status.
+            let status = process_clone.wait_for_exit().await;
             let mut st = state_clone.write().await;
             if !st.is_terminal() {
-                match status.and_then(|s| s.code()) {
-                    Some(0) => {
-                        *st = RuntimeLifecycleState::Completed;
-                        let _ = hub_clone.emit(RuntimeEventKind::Completed { summary: None }).await;
-                    }
-                    Some(2) => {
-                        *st = RuntimeLifecycleState::Failed;
-                        let _ = hub_clone
-                            .emit(RuntimeEventKind::Failed {
-                                safe_error_summary: SanitizedRuntimeMessage::new(
-                                    "Claude Code terminated: budget limit reached or authentication error",
-                                ),
-                            })
-                            .await;
-                    }
-                    Some(130) | Some(143) => {
-                        *st = RuntimeLifecycleState::Stopped;
-                        let _ = hub_clone.emit(RuntimeEventKind::Stopped).await;
-                    }
-                    Some(code) => {
-                        *st = RuntimeLifecycleState::Failed;
-                        let stderr = process_clone.stderr_snapshot().await;
-                        let summary = if stderr.is_empty() {
-                            format!("Claude Code process exited with status code {code}")
-                        } else {
-                            format!("Claude Code process exited with code {code}: {stderr}")
-                        };
-                        let _ = hub_clone
-                            .emit(RuntimeEventKind::Failed {
-                                safe_error_summary: SanitizedRuntimeMessage::new(summary),
-                            })
-                            .await;
-                    }
-                    None => {
-                        *st = RuntimeLifecycleState::Stopped;
-                        let _ = hub_clone.emit(RuntimeEventKind::Stopped).await;
-                    }
-                }
+                let stderr = process_clone.stderr_snapshot().await;
+                let (target_state, event) = classify_exit_status(status, &stderr);
+                *st = target_state;
+                let _ = hub_clone.emit(event).await;
             }
         });
 
@@ -331,9 +449,11 @@ impl AgentRuntime for ClaudeCodeRuntime {
         self.verify_session_ref(session)?;
 
         let sessions = self.active_sessions.read().await;
-        let active = sessions.get(&session.session_id).ok_or(RuntimeError::SessionNotFound {
-            session_id: session.session_id,
-        })?;
+        let active = sessions
+            .get(&session.session_id)
+            .ok_or(RuntimeError::SessionNotFound {
+                session_id: session.session_id,
+            })?;
 
         if session.instance_id != active.session_ref.instance_id {
             return Err(RuntimeError::SessionInstanceMismatch {
@@ -354,10 +474,8 @@ impl AgentRuntime for ClaudeCodeRuntime {
 
         match input {
             RuntimeInput::Text { content } => {
-                let prompt = ClaudeUserPromptInput::new(
-                    session.session_id.as_uuid().to_string(),
-                    content,
-                );
+                let prompt =
+                    ClaudeUserPromptInput::new(session.session_id.as_uuid().to_string(), content);
                 let json = serde_json::to_string(&prompt).map_err(|e| {
                     RuntimeError::send_failed(
                         session.session_id,
@@ -421,9 +539,11 @@ impl AgentRuntime for ClaudeCodeRuntime {
         self.verify_session_ref(session)?;
 
         let sessions = self.active_sessions.read().await;
-        let active = sessions.get(&session.session_id).ok_or(RuntimeError::SessionNotFound {
-            session_id: session.session_id,
-        })?;
+        let active = sessions
+            .get(&session.session_id)
+            .ok_or(RuntimeError::SessionNotFound {
+                session_id: session.session_id,
+            })?;
 
         if session.instance_id != active.session_ref.instance_id {
             return Err(RuntimeError::SessionInstanceMismatch {
@@ -474,9 +594,11 @@ impl AgentRuntime for ClaudeCodeRuntime {
         self.verify_session_ref(session)?;
 
         let sessions = self.active_sessions.read().await;
-        let active = sessions.get(&session.session_id).ok_or(RuntimeError::SessionNotFound {
-            session_id: session.session_id,
-        })?;
+        let active = sessions
+            .get(&session.session_id)
+            .ok_or(RuntimeError::SessionNotFound {
+                session_id: session.session_id,
+            })?;
 
         if session.instance_id != active.session_ref.instance_id {
             return Err(RuntimeError::SessionInstanceMismatch {
@@ -579,5 +701,61 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 session_id: session.session_id,
             })
         }
+    }
+}
+
+/// Classifies process exit into corresponding terminal runtime lifecycle state and event.
+pub fn classify_exit_status(
+    status: Option<std::process::ExitStatus>,
+    stderr: &str,
+) -> (RuntimeLifecycleState, RuntimeEventKind) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(ref s) = status {
+            if let Some(sig) = s.signal() {
+                if sig == 2 || sig == 15 {
+                    return (RuntimeLifecycleState::Stopped, RuntimeEventKind::Stopped);
+                }
+            }
+        }
+    }
+    classify_exit_code(status.and_then(|s| s.code()), stderr)
+}
+
+/// Classifies process exit code into corresponding terminal runtime lifecycle state and event.
+pub fn classify_exit_code(
+    code: Option<i32>,
+    stderr: &str,
+) -> (RuntimeLifecycleState, RuntimeEventKind) {
+    match code {
+        Some(0) => (
+            RuntimeLifecycleState::Completed,
+            RuntimeEventKind::Completed { summary: None },
+        ),
+        Some(2) => (
+            RuntimeLifecycleState::Failed,
+            RuntimeEventKind::Failed {
+                safe_error_summary: SanitizedRuntimeMessage::new(
+                    "Claude Code terminated: budget limit reached or authentication error",
+                ),
+            },
+        ),
+        Some(130) | Some(143) => (RuntimeLifecycleState::Stopped, RuntimeEventKind::Stopped),
+        Some(code) => {
+            let stderr_trimmed = stderr.trim();
+            let summary = if stderr_trimmed.is_empty() {
+                format!("Claude Code process exited with status code {code}")
+            } else {
+                format!("Claude Code process exited with code {code}: {stderr_trimmed}")
+            };
+            (
+                RuntimeLifecycleState::Failed,
+                RuntimeEventKind::Failed {
+                    safe_error_summary: SanitizedRuntimeMessage::new(summary),
+                },
+            )
+        }
+        None => (RuntimeLifecycleState::Stopped, RuntimeEventKind::Stopped),
     }
 }

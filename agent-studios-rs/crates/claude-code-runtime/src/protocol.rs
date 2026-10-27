@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Top-level wire message emitted by Claude Code over NDJSON stdout or received on stdin.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -259,10 +259,7 @@ pub struct StreamEventWrapper {
 #[serde(tag = "type")]
 pub enum StreamEventPayload {
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        index: usize,
-        delta: StreamDelta,
-    },
+    ContentBlockDelta { index: usize, delta: StreamDelta },
     #[serde(untagged)]
     Other(serde_json::Value),
 }
@@ -398,12 +395,86 @@ pub struct CanUseToolRequest {
     pub suggestions: Option<Vec<serde_json::Value>>,
 }
 
-/// Host control response sent on stdin to answer a `ControlRequest`.
+/// Host control response sent on stdin to answer a `ControlRequest` or received over wire.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ControlResponse {
+    #[serde(default = "default_control_response_type")]
     pub r#type: String,
-    pub request_id: String,
-    pub response: ControlDecision,
+    pub response: ControlResponseBody,
+}
+
+fn default_control_response_type() -> String {
+    "control_response".to_string()
+}
+
+/// Body of a host control response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "subtype", rename_all = "lowercase")]
+pub enum ControlResponseBody {
+    #[serde(rename = "success")]
+    Success {
+        request_id: String,
+        response: ControlDecision,
+    },
+    #[serde(rename = "error")]
+    Error { request_id: String, error: String },
+}
+
+impl ControlResponse {
+    /// Creates an allow decision response.
+    pub fn allow(request_id: impl Into<String>, updated_input: Option<serde_json::Value>) -> Self {
+        Self {
+            r#type: default_control_response_type(),
+            response: ControlResponseBody::Success {
+                request_id: request_id.into(),
+                response: ControlDecision::Allow { updated_input },
+            },
+        }
+    }
+
+    /// Creates a deny decision response.
+    pub fn deny(
+        request_id: impl Into<String>,
+        message: Option<String>,
+        interrupt: Option<bool>,
+    ) -> Self {
+        Self {
+            r#type: default_control_response_type(),
+            response: ControlResponseBody::Success {
+                request_id: request_id.into(),
+                response: ControlDecision::Deny { message, interrupt },
+            },
+        }
+    }
+
+    /// Creates an error response.
+    pub fn error(request_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            r#type: default_control_response_type(),
+            response: ControlResponseBody::Error {
+                request_id: request_id.into(),
+                error: error.into(),
+            },
+        }
+    }
+
+    /// Returns the request ID associated with this control response.
+    pub fn request_id(&self) -> &str {
+        match &self.response {
+            ControlResponseBody::Success { request_id, .. } => request_id,
+            ControlResponseBody::Error { request_id, .. } => request_id,
+        }
+    }
+
+    /// Returns true if this is a success response subtype.
+    pub fn is_success(&self) -> bool {
+        matches!(self.response, ControlResponseBody::Success { .. })
+    }
+
+    /// Returns true if this is an error response subtype.
+    pub fn is_error(&self) -> bool {
+        matches!(self.response, ControlResponseBody::Error { .. })
+    }
 }
 
 /// Operator decision for tool execution authorization.
@@ -411,13 +482,17 @@ pub struct ControlResponse {
 #[serde(tag = "behavior", rename_all = "lowercase")]
 pub enum ControlDecision {
     Allow {
-        #[serde(default, rename = "updatedInput")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "updatedInput"
+        )]
         updated_input: Option<serde_json::Value>,
     },
     Deny {
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interrupt: Option<bool>,
     },
 }

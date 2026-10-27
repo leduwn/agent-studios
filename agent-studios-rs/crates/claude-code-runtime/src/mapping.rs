@@ -13,16 +13,26 @@ use crate::subagent::SubagentCorrelationTracker;
 /// Translates a raw Claude Code NDJSON wire message into normalized `RuntimeEventKind` instances.
 pub fn map_claude_message(
     message: &ClaudeStreamMessage,
-    session_ref: &RuntimeSessionRef,
+    _session_ref: &RuntimeSessionRef,
     subagents: &mut SubagentCorrelationTracker,
 ) -> Vec<RuntimeEventKind> {
     match message {
         ClaudeStreamMessage::System(system) => match system {
             SystemMessage::Init(init) => {
-                let _ = init;
-                vec![RuntimeEventKind::SessionStarted {
-                    session_id: session_ref.session_id,
-                    instance_id: session_ref.instance_id,
+                let version = init.claude_code_version.as_deref().unwrap_or("unknown");
+                let model = init.model.as_deref().unwrap_or("unknown");
+                let tools_count = init.tools.as_ref().map(|t| t.len()).unwrap_or(0);
+                let capabilities = init
+                    .capabilities
+                    .as_ref()
+                    .map(|c| c.join(", "))
+                    .unwrap_or_else(|| "none".to_string());
+
+                vec![RuntimeEventKind::Diagnostic {
+                    level: "info".to_string(),
+                    message: SanitizedRuntimeMessage::new(format!(
+                        "Claude Code initialized: version={version}, model={model}, tools_count={tools_count}, capabilities=[{capabilities}]"
+                    )),
                 }]
             }
             SystemMessage::TaskStarted(task) => {
@@ -40,11 +50,7 @@ pub fn map_claude_message(
             }
             SystemMessage::TaskNotification(task) => {
                 let node = subagents.register_task_notification(task);
-                let duration_ms = task
-                    .usage
-                    .as_ref()
-                    .and_then(|u| u.duration_ms)
-                    .unwrap_or(0);
+                let duration_ms = task.usage.as_ref().and_then(|u| u.duration_ms).unwrap_or(0);
                 let success = task.status == "completed";
 
                 let mut events = Vec::new();
@@ -74,7 +80,10 @@ pub fn map_claude_message(
                         "API retry attempt {}/{}: {}",
                         retry.attempt.unwrap_or(1),
                         retry.max_retries.unwrap_or(3),
-                        retry.error.as_deref().unwrap_or("rate limit / transient error")
+                        retry
+                            .error
+                            .as_deref()
+                            .unwrap_or("rate limit / transient error")
                     )),
                 }]
             }
@@ -99,7 +108,9 @@ pub fn map_claude_message(
                 StreamDelta::TextDelta { text } => {
                     vec![RuntimeEventKind::OutputDelta { text: text.clone() }]
                 }
-                StreamDelta::ThinkingDelta { .. } | StreamDelta::InputJsonDelta { .. } => Vec::new(),
+                StreamDelta::ThinkingDelta { .. } | StreamDelta::InputJsonDelta { .. } => {
+                    Vec::new()
+                }
                 StreamDelta::Other(_) => Vec::new(),
             },
             StreamEventPayload::Other(_) => Vec::new(),
@@ -188,10 +199,9 @@ pub fn map_claude_message(
                     &Uuid::NAMESPACE_DNS,
                     req.request_id.as_bytes(),
                 ));
-                let desc = can_use
-                    .decision_reason
-                    .clone()
-                    .unwrap_or_else(|| format!("Approval requested for tool '{}'", can_use.tool_name));
+                let desc = can_use.decision_reason.clone().unwrap_or_else(|| {
+                    format!("Approval requested for tool '{}'", can_use.tool_name)
+                });
                 let command = can_use
                     .input
                     .get("command")
@@ -247,11 +257,7 @@ pub fn map_claude_message(
             events
         }
 
-        ClaudeStreamMessage::ControlResponse(_) => {
-            vec![RuntimeEventKind::Interrupted {
-                reason: SanitizedRuntimeMessage::new("Execution interrupted by host"),
-            }]
-        }
+        ClaudeStreamMessage::ControlResponse(_) => Vec::new(),
 
         ClaudeStreamMessage::PromptSuggestion(_) | ClaudeStreamMessage::Unknown(_) => Vec::new(),
     }

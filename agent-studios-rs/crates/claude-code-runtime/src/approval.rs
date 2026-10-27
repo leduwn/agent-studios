@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::error::ClaudeCodeError;
-use crate::protocol::{ControlDecision, ControlRequest, ControlRequestPayload, ControlResponse};
+use crate::protocol::{ControlRequest, ControlRequestPayload, ControlResponse};
 
 /// Tool approval decision emitted by the host or default policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,16 +37,13 @@ impl ApprovalDecision {
     /// Formats this decision into Claude Code's control_response JSON value:
     /// `{"type": "control_response", "response": {"subtype": "success", "request_id": "<id>", "response": {"behavior": "allow" | "deny"}}}`
     pub fn to_control_response_value(&self, request_id: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": "control_response",
-            "response": {
-                "subtype": "success",
-                "request_id": request_id,
-                "response": {
-                    "behavior": self.behavior()
-                }
+        match self {
+            Self::Allow => {
+                serde_json::to_value(ControlResponse::allow(request_id, None)).unwrap_or_default()
             }
-        })
+            Self::Deny => serde_json::to_value(ControlResponse::deny(request_id, None, None))
+                .unwrap_or_default(),
+        }
     }
 
     /// Formats this decision into a single-line NDJSON string.
@@ -118,7 +115,10 @@ impl CanUseToolRequest {
     }
 
     /// Creates a `CanUseToolRequest` from a protocol request and ID.
-    pub fn from_protocol(request_id: impl Into<String>, req: &crate::protocol::CanUseToolRequest) -> Self {
+    pub fn from_protocol(
+        request_id: impl Into<String>,
+        req: &crate::protocol::CanUseToolRequest,
+    ) -> Self {
         Self {
             request_id: request_id.into(),
             tool_name: req.tool_name.clone(),
@@ -137,11 +137,13 @@ impl CanUseToolRequest {
         let request_id = val
             .get("request_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ClaudeCodeError::Protocol("control_request missing request_id".into()))?;
+            .ok_or_else(|| {
+                ClaudeCodeError::Protocol("control_request missing request_id".into())
+            })?;
 
-        let request = val
-            .get("request")
-            .ok_or_else(|| ClaudeCodeError::Protocol("control_request missing request field".into()))?;
+        let request = val.get("request").ok_or_else(|| {
+            ClaudeCodeError::Protocol("control_request missing request field".into())
+        })?;
 
         let tool_name = request
             .get("tool_name")
@@ -210,6 +212,7 @@ pub struct PendingApproval {
 pub struct ApprovalAuthority {
     pending_oneshots: Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalDecision>>>,
     pending_by_id: RwLock<BTreeMap<ApprovalId, PendingApproval>>,
+    watchdog_cancellations: Mutex<HashMap<ApprovalId, tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl ApprovalAuthority {
@@ -217,6 +220,7 @@ impl ApprovalAuthority {
         Self {
             pending_oneshots: Mutex::new(HashMap::new()),
             pending_by_id: RwLock::new(BTreeMap::new()),
+            watchdog_cancellations: Mutex::new(HashMap::new()),
         }
     }
 
@@ -268,9 +272,10 @@ impl ApprovalAuthority {
         let request_id = request.request_id.clone();
 
         {
-            let mut pending = self.pending_oneshots.lock().map_err(|e| {
-                ClaudeCodeError::Internal(format!("Approval mutex poisoned: {e}"))
-            })?;
+            let mut pending = self
+                .pending_oneshots
+                .lock()
+                .map_err(|e| ClaudeCodeError::Internal(format!("Approval mutex poisoned: {e}")))?;
             pending.insert(request_id.clone(), tx);
         }
 
@@ -317,9 +322,10 @@ impl ApprovalAuthority {
         decision: ApprovalDecision,
     ) -> Result<(), ClaudeCodeError> {
         let sender = {
-            let mut pending = self.pending_oneshots.lock().map_err(|e| {
-                ClaudeCodeError::Internal(format!("Approval mutex poisoned: {e}"))
-            })?;
+            let mut pending = self
+                .pending_oneshots
+                .lock()
+                .map_err(|e| ClaudeCodeError::Internal(format!("Approval mutex poisoned: {e}")))?;
             pending.remove(request_id)
         };
 
@@ -332,6 +338,91 @@ impl ApprovalAuthority {
                 "No pending approval request found for request_id: '{request_id}'"
             ))),
         }
+    }
+
+    /// Registers a watchdog cancellation sender for an in-flight approval request.
+    pub fn register_watchdog_cancellation(
+        &self,
+        approval_id: ApprovalId,
+        cancel_tx: tokio::sync::oneshot::Sender<()>,
+    ) {
+        if let Ok(mut lock) = self.watchdog_cancellations.lock() {
+            lock.insert(approval_id, cancel_tx);
+        }
+    }
+
+    /// Checks if a watchdog is actively registered for an approval request.
+    pub fn is_watchdog_active(&self, id: &ApprovalId) -> bool {
+        let lock = self.watchdog_cancellations.lock().expect("lock poisoned");
+        lock.contains_key(id)
+    }
+
+    /// Resolves an approval request on timeout, returning a formatted Deny `ControlResponse`.
+    /// Fails closed: removes the request from pending tracking so it cannot be later approved.
+    pub fn resolve_timeout_by_id(
+        &self,
+        approval_id: ApprovalId,
+        timeout_message: Option<String>,
+    ) -> Option<ControlResponse> {
+        if let Ok(mut lock) = self.watchdog_cancellations.lock() {
+            lock.remove(&approval_id);
+        }
+
+        let pending = {
+            let mut lock = self.pending_by_id.write().expect("lock poisoned");
+            lock.remove(&approval_id)?
+        };
+
+        let message = timeout_message
+            .or_else(|| Some("Approval timed out after 60s (fail-closed)".to_string()));
+
+        Some(ControlResponse::deny(
+            pending.request_id,
+            message,
+            Some(false),
+        ))
+    }
+
+    /// Spawns an async timeout watchdog task for a registered approval request.
+    ///
+    /// If timeout elapses before host resolution:
+    /// - Resolves approval fail-closed as Deny
+    /// - Invokes `on_timeout` with the generated deny `ControlResponse`
+    ///
+    /// If host resolves approval before timeout, the watchdog is cancelled.
+    pub fn spawn_watchdog<F, Fut>(
+        self: &std::sync::Arc<Self>,
+        approval_id: ApprovalId,
+        timeout: Duration,
+        on_timeout: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: FnOnce(ControlResponse) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        self.register_watchdog_cancellation(approval_id, cancel_tx);
+
+        let authority = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(timeout) => {
+                    let timeout_secs = timeout.as_secs();
+                    let timeout_desc = if timeout_secs > 0 {
+                        format!("{timeout_secs}s")
+                    } else {
+                        format!("{}ms", timeout.as_millis())
+                    };
+                    let deny_msg = format!("Approval timed out after {timeout_desc} (fail-closed)");
+                    if let Some(deny_resp) = authority.resolve_timeout_by_id(approval_id, Some(deny_msg)) {
+                        on_timeout(deny_resp).await;
+                    }
+                }
+                _ = &mut cancel_rx => {
+                    debug!(approval_id = %approval_id, "Approval watchdog cancelled");
+                }
+            }
+        })
     }
 
     /// Resolves a pending approval by `ApprovalId` with an operator decision (allow / deny).
@@ -350,22 +441,25 @@ impl ApprovalAuthority {
             })?
         };
 
-        let decision = if approved {
-            ControlDecision::Allow {
-                updated_input: Some(pending.tool_input),
-            }
-        } else {
-            ControlDecision::Deny {
-                message: reason.or_else(|| Some("Operator denied tool execution".to_string())),
-                interrupt: Some(false),
-            }
-        };
+        if let Ok(mut lock) = self.watchdog_cancellations.lock()
+            && let Some(cancel_tx) = lock.remove(&approval_id)
+        {
+            let _ = cancel_tx.send(());
+        }
 
-        Ok(ControlResponse {
-            r#type: "control_response".to_string(),
-            request_id: pending.request_id,
-            response: decision,
-        })
+        if approved {
+            Ok(ControlResponse::allow(
+                pending.request_id,
+                Some(pending.tool_input),
+            ))
+        } else {
+            let message = reason.or_else(|| Some("Operator denied tool execution".to_string()));
+            Ok(ControlResponse::deny(
+                pending.request_id,
+                message,
+                Some(false),
+            ))
+        }
     }
 
     /// Cancels all pending approval requests, failing them closed to Deny.
@@ -375,20 +469,24 @@ impl ApprovalAuthority {
                 let _ = tx.send(ApprovalDecision::Deny);
             }
         }
+        if let Ok(mut lock) = self.watchdog_cancellations.lock() {
+            for (_, tx) in lock.drain() {
+                let _ = tx.send(());
+            }
+        }
         let mut lock = self.pending_by_id.write().expect("lock poisoned");
         if !lock.is_empty() {
-            warn!(count = lock.len(), "Cancelling all pending approvals fail-closed");
+            warn!(
+                count = lock.len(),
+                "Cancelling all pending approvals fail-closed"
+            );
             lock.clear();
         }
     }
 
     /// Returns the number of currently pending approval requests.
     pub fn pending_count(&self) -> usize {
-        let oneshot_count = self
-            .pending_oneshots
-            .lock()
-            .map(|p| p.len())
-            .unwrap_or(0);
+        let oneshot_count = self.pending_oneshots.lock().map(|p| p.len()).unwrap_or(0);
         let id_count = self.pending_by_id.read().map(|p| p.len()).unwrap_or(0);
         oneshot_count.max(id_count)
     }
@@ -421,17 +519,17 @@ impl ApprovalAuthority {
 /// Rejects negative amounts, NaN, and infinite values.
 pub fn validate_max_budget_usd(amount: f64) -> Result<f64, ClaudeCodeError> {
     if amount.is_nan() {
-        return Err(ClaudeCodeError::Protocol(
+        return Err(ClaudeCodeError::InvalidBudget(
             "Budget ceiling cannot be NaN".into(),
         ));
     }
     if amount < 0.0 {
-        return Err(ClaudeCodeError::Protocol(format!(
+        return Err(ClaudeCodeError::InvalidBudget(format!(
             "Budget ceiling cannot be negative: {amount}"
         )));
     }
     if amount.is_infinite() {
-        return Err(ClaudeCodeError::Protocol(
+        return Err(ClaudeCodeError::InvalidBudget(
             "Budget ceiling cannot be infinite".into(),
         ));
     }
@@ -443,14 +541,12 @@ pub fn validate_max_budget_usd(amount: f64) -> Result<f64, ClaudeCodeError> {
 pub fn parse_max_budget_usd(val: &str) -> Result<f64, ClaudeCodeError> {
     let trimmed = val.trim();
     if trimmed.is_empty() {
-        return Err(ClaudeCodeError::Protocol(
+        return Err(ClaudeCodeError::InvalidBudget(
             "Budget ceiling string is empty".into(),
         ));
     }
     let parsed: f64 = trimmed.parse().map_err(|e| {
-        ClaudeCodeError::Protocol(format!(
-            "Invalid budget ceiling format '{trimmed}': {e}"
-        ))
+        ClaudeCodeError::InvalidBudget(format!("Invalid budget ceiling format '{trimmed}': {e}"))
     })?;
     validate_max_budget_usd(parsed)
 }

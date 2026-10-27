@@ -91,6 +91,41 @@ impl ClaudeCodeProcess {
         *lock
     }
 
+    /// Waits for the child process to exit, caches the exit status in exit_status, and returns it.
+    pub async fn wait_for_exit(&self) -> Option<std::process::ExitStatus> {
+        {
+            let lock = self.exit_status.lock().await;
+            if let Some(status) = *lock {
+                return Some(status);
+            }
+        }
+
+        let mut child_lock = self.child.lock().await;
+        {
+            let lock = self.exit_status.lock().await;
+            if let Some(status) = *lock {
+                return Some(status);
+            }
+        }
+
+        if let Some(ref mut child) = *child_lock {
+            match child.wait().await {
+                Ok(status) => {
+                    let mut exit_lock = self.exit_status.lock().await;
+                    *exit_lock = Some(status);
+                    Some(status)
+                }
+                Err(_) => {
+                    let exit_lock = self.exit_status.lock().await;
+                    *exit_lock
+                }
+            }
+        } else {
+            let exit_lock = self.exit_status.lock().await;
+            *exit_lock
+        }
+    }
+
     /// Checks if the child process is still actively running.
     pub async fn is_alive(&self) -> bool {
         if self.is_terminated.load(Ordering::SeqCst) {
@@ -252,7 +287,9 @@ pub async fn spawn_claude_process(
         ClaudeCodeError::ProcessSpawn("Failed to capture Claude Code child stderr pipe".to_string())
     })?;
 
-    let stderr_ring_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_BUFFER_LIMIT)));
+    let stderr_ring_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(
+        STDERR_RING_BUFFER_LIMIT,
+    )));
     let is_terminated = Arc::new(AtomicBool::new(false));
     let exit_status = Arc::new(Mutex::new(None));
 

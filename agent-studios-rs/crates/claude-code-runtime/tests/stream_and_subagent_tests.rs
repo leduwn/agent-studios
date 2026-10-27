@@ -1,10 +1,11 @@
-use std::io::Cursor;
+use agent_studios_claude_code_runtime::approval::ApprovalAuthority;
 use agent_studios_claude_code_runtime::mapping::map_claude_message;
 use agent_studios_claude_code_runtime::protocol::{
     AssistantMessage, AssistantMessageInner, CanUseToolRequest, ClaudeStreamMessage,
-    ClaudeTaskUsage, ClaudeTokenUsage, ContentBlock, ControlRequest, ControlRequestPayload,
-    ResultSummary, StreamDelta, StreamEventPayload, SystemMessage, TaskNotificationMessage,
-    TaskStartedMessage, ToolResultBlock, UserMessage, UserMessageInner,
+    ClaudeTaskUsage, ClaudeTokenUsage, ContentBlock, ControlDecision, ControlRequest,
+    ControlRequestPayload, ControlResponse, ControlResponseBody, ResultSummary, StreamDelta,
+    StreamEventPayload, SystemMessage, TaskNotificationMessage, TaskStartedMessage,
+    ToolResultBlock, UserMessage, UserMessageInner,
 };
 use agent_studios_claude_code_runtime::stream::{NdjsonStreamReader, parse_ndjson_line};
 use agent_studios_claude_code_runtime::subagent::SubagentCorrelationTracker;
@@ -12,6 +13,7 @@ use agent_studios_external_runtime::{
     RuntimeEventKind, RuntimeImplementationId, RuntimeInstanceId, RuntimeSessionId,
     RuntimeSessionRef,
 };
+use std::io::Cursor;
 
 fn test_session_ref() -> RuntimeSessionRef {
     RuntimeSessionRef::new(
@@ -77,7 +79,10 @@ async fn test_ndjson_stream_reader_read_message_sequence() {
     let mut reader = NdjsonStreamReader::new(cursor);
 
     let msg1 = reader.read_message().await.unwrap().expect("msg1 expected");
-    assert!(matches!(msg1, ClaudeStreamMessage::System(SystemMessage::Init(_))));
+    assert!(matches!(
+        msg1,
+        ClaudeStreamMessage::System(SystemMessage::Init(_))
+    ));
 
     let msg2 = reader.read_message().await.unwrap().expect("msg2 expected");
     assert!(matches!(msg2, ClaudeStreamMessage::StreamEvent(_)));
@@ -105,7 +110,10 @@ async fn test_ndjson_stream_reader_rejects_overlong_line() {
     let mut reader = NdjsonStreamReader::new(cursor);
 
     let result = reader.read_message().await;
-    assert!(result.is_err(), "Must reject line exceeding MAX_LINE_LENGTH (16 MiB)");
+    assert!(
+        result.is_err(),
+        "Must reject line exceeding MAX_LINE_LENGTH (16 MiB)"
+    );
 }
 
 // ============================================================================
@@ -364,4 +372,328 @@ fn test_mapping_result_summary() {
             total_tokens: Some(620),
         }
     );
+}
+
+// ============================================================================
+// 4. Control Message Protocol Compatibility & M12 Wire Schema Tests
+// ============================================================================
+
+#[test]
+fn test_control_response_allow_wire_schema_and_roundtrip() {
+    let raw_json = r#"{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "req_example",
+    "response": {
+      "behavior": "allow",
+      "updatedInput": {}
+    }
+  }
+}"#;
+
+    // 1. Deserialization from exact wire fixture
+    let parsed: ControlResponse =
+        serde_json::from_str(raw_json).expect("should deserialize allow control_response");
+    assert_eq!(parsed.r#type, "control_response");
+    assert_eq!(parsed.request_id(), "req_example");
+    assert!(parsed.is_success());
+    assert!(!parsed.is_error());
+
+    match &parsed.response {
+        ControlResponseBody::Success {
+            request_id,
+            response,
+        } => {
+            assert_eq!(request_id, "req_example");
+            assert_eq!(
+                response,
+                &ControlDecision::Allow {
+                    updated_input: Some(serde_json::json!({})),
+                }
+            );
+        }
+        ControlResponseBody::Error { .. } => panic!("expected success subtype"),
+    }
+
+    // 2. Constructor helper serialization matching exact schema
+    let constructed = ControlResponse::allow("req_example", Some(serde_json::json!({})));
+    let val_constructed = serde_json::to_value(&constructed).expect("serialize constructed");
+    let val_fixture: serde_json::Value =
+        serde_json::from_str(raw_json).expect("parse fixture value");
+    assert_eq!(val_constructed, val_fixture);
+
+    // 3. Roundtrip serialization test
+    let reserialized = serde_json::to_string(&parsed).expect("reserialize");
+    let reparsed: ControlResponse = serde_json::from_str(&reserialized).expect("reparse");
+    assert_eq!(parsed, reparsed);
+}
+
+#[test]
+fn test_control_response_deny_wire_schema_and_roundtrip() {
+    let raw_json = r#"{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "req_example",
+    "response": {
+      "behavior": "deny",
+      "message": "Operator rejected execution",
+      "interrupt": false
+    }
+  }
+}"#;
+
+    // 1. Deserialization from exact wire fixture
+    let parsed: ControlResponse =
+        serde_json::from_str(raw_json).expect("should deserialize deny control_response");
+    assert_eq!(parsed.r#type, "control_response");
+    assert_eq!(parsed.request_id(), "req_example");
+    assert!(parsed.is_success());
+    assert!(!parsed.is_error());
+
+    match &parsed.response {
+        ControlResponseBody::Success {
+            request_id,
+            response,
+        } => {
+            assert_eq!(request_id, "req_example");
+            assert_eq!(
+                response,
+                &ControlDecision::Deny {
+                    message: Some("Operator rejected execution".to_string()),
+                    interrupt: Some(false),
+                }
+            );
+        }
+        ControlResponseBody::Error { .. } => panic!("expected success subtype"),
+    }
+
+    // 2. Constructor helper serialization matching exact schema
+    let constructed = ControlResponse::deny(
+        "req_example",
+        Some("Operator rejected execution".to_string()),
+        Some(false),
+    );
+    let val_constructed = serde_json::to_value(&constructed).expect("serialize constructed");
+    let val_fixture: serde_json::Value =
+        serde_json::from_str(raw_json).expect("parse fixture value");
+    assert_eq!(val_constructed, val_fixture);
+
+    // 3. Roundtrip
+    let reserialized = serde_json::to_string(&parsed).expect("reserialize");
+    let reparsed: ControlResponse = serde_json::from_str(&reserialized).expect("reparse");
+    assert_eq!(parsed, reparsed);
+}
+
+#[test]
+fn test_control_response_error_wire_schema_and_roundtrip() {
+    let raw_json = r#"{
+  "type": "control_response",
+  "response": {
+    "subtype": "error",
+    "request_id": "req_example",
+    "error": "Failed to resolve approval: channel closed"
+  }
+}"#;
+
+    // 1. Deserialization from exact wire fixture
+    let parsed: ControlResponse =
+        serde_json::from_str(raw_json).expect("should deserialize error control_response");
+    assert_eq!(parsed.r#type, "control_response");
+    assert_eq!(parsed.request_id(), "req_example");
+    assert!(!parsed.is_success());
+    assert!(parsed.is_error());
+
+    match &parsed.response {
+        ControlResponseBody::Error { request_id, error } => {
+            assert_eq!(request_id, "req_example");
+            assert_eq!(error, "Failed to resolve approval: channel closed");
+        }
+        ControlResponseBody::Success { .. } => panic!("expected error subtype"),
+    }
+
+    // 2. Constructor helper serialization matching exact schema
+    let constructed =
+        ControlResponse::error("req_example", "Failed to resolve approval: channel closed");
+    let val_constructed = serde_json::to_value(&constructed).expect("serialize constructed");
+    let val_fixture: serde_json::Value =
+        serde_json::from_str(raw_json).expect("parse fixture value");
+    assert_eq!(val_constructed, val_fixture);
+
+    // 3. Roundtrip
+    let reserialized = serde_json::to_string(&parsed).expect("reserialize");
+    let reparsed: ControlResponse = serde_json::from_str(&reserialized).expect("reparse");
+    assert_eq!(parsed, reparsed);
+}
+
+#[test]
+fn test_control_response_stream_message_never_emits_interrupted() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    // Wire NDJSON lines for allow, deny, error
+    let allow_line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req_allow","response":{"behavior":"allow"}}}"#;
+    let deny_line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req_deny","response":{"behavior":"deny","message":"Denied","interrupt":false}}}"#;
+    let error_line = r#"{"type":"control_response","response":{"subtype":"error","request_id":"req_err","error":"permission denied"}}"#;
+
+    for line in [allow_line, deny_line, error_line] {
+        let stream_msg = parse_ndjson_line(line)
+            .expect("parse_ndjson_line should succeed for valid control_response");
+        assert!(
+            matches!(stream_msg, ClaudeStreamMessage::ControlResponse(_)),
+            "Expected ControlResponse variant for line: {line}"
+        );
+
+        let events = map_claude_message(&stream_msg, &session_ref, &mut tracker);
+        assert!(
+            events.is_empty(),
+            "ControlResponse must produce empty events vector, got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, RuntimeEventKind::Interrupted { .. })),
+            "M12-REV-006: ControlResponse must NEVER emit Interrupted runtime event!"
+        );
+    }
+
+    // Direct variant mapping check
+    let direct_msg = ClaudeStreamMessage::ControlResponse(ControlResponse::deny(
+        "req_int_test",
+        Some("Direct deny".to_string()),
+        Some(false),
+    ));
+    let direct_events = map_claude_message(&direct_msg, &session_ref, &mut tracker);
+    assert!(direct_events.is_empty());
+    assert!(
+        !direct_events
+            .iter()
+            .any(|e| matches!(e, RuntimeEventKind::Interrupted { .. }))
+    );
+}
+
+#[test]
+fn test_malformed_and_unrecognized_control_response_shapes() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    // 1. Missing outer "response" field
+    let malformed_missing_response = r#"{"type":"control_response"}"#;
+    assert!(serde_json::from_str::<ControlResponse>(malformed_missing_response).is_err());
+
+    // 2. Unknown subtype in response
+    let malformed_unknown_subtype = r#"{"type":"control_response","response":{"subtype":"custom_extension","request_id":"req_1"}}"#;
+    assert!(serde_json::from_str::<ControlResponse>(malformed_unknown_subtype).is_err());
+
+    // 3. Unknown behavior in success response
+    let malformed_unknown_behavior = r#"{"type":"control_response","response":{"subtype":"success","request_id":"req_1","response":{"behavior":"undecided"}}}"#;
+    assert!(serde_json::from_str::<ControlResponse>(malformed_unknown_behavior).is_err());
+
+    // 4. Missing request_id
+    let malformed_missing_req_id =
+        r#"{"type":"control_response","response":{"subtype":"error","error":"something"}}"#;
+    assert!(serde_json::from_str::<ControlResponse>(malformed_missing_req_id).is_err());
+
+    // 5. In stream parsing: malformed control_response falls back to ClaudeStreamMessage::Unknown
+    let stream_unknown = parse_ndjson_line(malformed_unknown_subtype)
+        .expect("stream parsing unknown subtype should fall back to Unknown");
+    assert!(
+        matches!(stream_unknown, ClaudeStreamMessage::Unknown(_)),
+        "Expected fallback to ClaudeStreamMessage::Unknown"
+    );
+
+    // 6. Unknown message mapping produces no events and NEVER Interrupted
+    let events = map_claude_message(&stream_unknown, &session_ref, &mut tracker);
+    assert!(events.is_empty());
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEventKind::Interrupted { .. }))
+    );
+}
+
+#[test]
+fn test_resolve_approval_by_id_wire_protocol_integration() {
+    let authority = ApprovalAuthority::new();
+
+    let control_req = ControlRequest {
+        request_id: "req_wire_approval_01".to_string(),
+        request: ControlRequestPayload::CanUseTool(CanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "cargo check"}),
+            tool_use_id: Some("call_bash_01".to_string()),
+            agent_id: None,
+            decision_reason: Some("Running compiler check".to_string()),
+            blocked_path: None,
+            default_to_no: Some(false),
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("register approval");
+
+    // Resolve with allow
+    let response = authority
+        .resolve_approval_by_id(approval_id, true, None)
+        .expect("resolve allow");
+
+    assert_eq!(response.r#type, "control_response");
+    assert_eq!(response.request_id(), "req_wire_approval_01");
+    assert!(response.is_success());
+
+    // Verify exact serialized JSON structure
+    let json_val = serde_json::to_value(&response).expect("serialize approval response");
+    assert_eq!(json_val["type"], "control_response");
+    assert_eq!(json_val["response"]["subtype"], "success");
+    assert_eq!(json_val["response"]["request_id"], "req_wire_approval_01");
+    assert_eq!(json_val["response"]["response"]["behavior"], "allow");
+    assert_eq!(
+        json_val["response"]["response"]["updatedInput"],
+        serde_json::json!({"command": "cargo check"})
+    );
+
+    // Register second request for deny testing
+    let control_req_deny = ControlRequest {
+        request_id: "req_wire_deny_01".to_string(),
+        request: ControlRequestPayload::CanUseTool(CanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "rm -rf /"}),
+            tool_use_id: Some("call_bash_02".to_string()),
+            agent_id: None,
+            decision_reason: Some("Dangerous deletion".to_string()),
+            blocked_path: None,
+            default_to_no: Some(true),
+            suggestions: None,
+        }),
+    };
+
+    let deny_id = authority
+        .register_request(&control_req_deny)
+        .expect("register deny request");
+
+    let deny_resp = authority
+        .resolve_approval_by_id(
+            deny_id,
+            false,
+            Some("Dangerous command blocked".to_string()),
+        )
+        .expect("resolve deny");
+
+    assert_eq!(deny_resp.r#type, "control_response");
+    assert_eq!(deny_resp.request_id(), "req_wire_deny_01");
+    assert!(deny_resp.is_success());
+
+    let deny_val = serde_json::to_value(&deny_resp).expect("serialize deny response");
+    assert_eq!(deny_val["type"], "control_response");
+    assert_eq!(deny_val["response"]["subtype"], "success");
+    assert_eq!(deny_val["response"]["request_id"], "req_wire_deny_01");
+    assert_eq!(deny_val["response"]["response"]["behavior"], "deny");
+    assert_eq!(
+        deny_val["response"]["response"]["message"],
+        "Dangerous command blocked"
+    );
+    assert_eq!(deny_val["response"]["response"]["interrupt"], false);
 }

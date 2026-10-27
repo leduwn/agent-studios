@@ -10,10 +10,9 @@ use agent_studios_claude_code_runtime::protocol::{
 use agent_studios_claude_code_runtime::runtime::ClaudeCodeRuntime;
 
 use agent_studios_external_runtime::{
-    AgentRuntime, DEFAULT_EVENT_RETENTION, RuntimeCapability,
-    RuntimeError, RuntimeEventKind, RuntimeImplementationId, RuntimeInstanceId,
-    RuntimeInstanceRef, RuntimeLifecycleState, RuntimeSessionId, RuntimeStartRequest,
-    SessionEventHub, WorkspaceAccessMode,
+    AgentRuntime, DEFAULT_EVENT_RETENTION, RuntimeCapability, RuntimeError, RuntimeEventKind,
+    RuntimeImplementationId, RuntimeInstanceId, RuntimeInstanceRef, RuntimeLifecycleState,
+    RuntimeSessionId, RuntimeStartRequest, SessionEventHub, WorkspaceAccessMode,
 };
 use agent_studios_protocol::id::WorktreeId;
 use agent_studios_protocol::worktree::ExecutionWorkspace;
@@ -48,7 +47,7 @@ async fn test_runtime_instantiation_and_capabilities() {
     assert!(caps.supports(RuntimeCapability::Approvals));
     assert!(caps.supports(RuntimeCapability::Interrupt));
     assert!(caps.supports(RuntimeCapability::Resume));
-    assert!(caps.supports(RuntimeCapability::PersistentSession));
+    assert!(!caps.supports(RuntimeCapability::PersistentSession));
 }
 
 #[tokio::test]
@@ -69,7 +68,10 @@ async fn test_runtime_discovery_with_explicit_config() {
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].implementation_id.as_str(), "claude-code");
     let expected_canonical = std::fs::canonicalize(&dummy_bin).unwrap_or(dummy_bin);
-    assert_eq!(discovered[0].binary_path.as_ref(), Some(&expected_canonical));
+    assert_eq!(
+        discovered[0].binary_path.as_ref(),
+        Some(&expected_canonical)
+    );
 }
 
 // ============================================================================
@@ -92,7 +94,11 @@ async fn test_runtime_start_validation_rejects_shared_source_workspace() {
     assert!(result.is_err(), "Must reject SharedSource workspace");
     match result.err().unwrap() {
         RuntimeError::InvalidWorkspaceAccess { reason } => {
-            assert!(reason.as_str().contains("SharedSource is strictly forbidden"));
+            assert!(
+                reason
+                    .as_str()
+                    .contains("SharedSource is strictly forbidden")
+            );
         }
         other => panic!("Expected InvalidWorkspaceAccess, got: {other:?}"),
     }
@@ -248,7 +254,10 @@ async fn test_session_event_hub_monotonic_ordering_and_replay() {
     // Future sequence beyond latest committed returns InvalidReplayOffset
     let err = hub.subscribe(Some(99)).await;
     assert!(err.is_err());
-    assert!(matches!(err.err().unwrap(), RuntimeError::InvalidReplayOffset { .. }));
+    assert!(matches!(
+        err.err().unwrap(),
+        RuntimeError::InvalidReplayOffset { .. }
+    ));
 }
 
 #[tokio::test]
@@ -308,7 +317,7 @@ fn test_approval_authority_resolve_by_approval_id() {
         .resolve_approval_by_id(approval_id, true, None)
         .expect("resolve_approval_by_id should succeed");
 
-    assert_eq!(response.request_id, "req_test_auth_01");
+    assert_eq!(response.request_id(), "req_test_auth_01");
     assert_eq!(response.r#type, "control_response");
 
     // Cleaned up
@@ -358,4 +367,226 @@ fn test_approval_authority_cancel_all_pending_fails_closed() {
     assert_eq!(authority.pending_count(), 0);
     assert!(authority.resolve_approval_by_id(id1, true, None).is_err());
     assert!(authority.resolve_approval_by_id(id2, true, None).is_err());
+}
+
+// ============================================================================
+// 6. M12.1 Lifecycle Regression Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_capabilities_declaration_matches_verified_behavior() {
+    let runtime = ClaudeCodeRuntime::new().expect("ClaudeCodeRuntime::new() should succeed");
+    let caps = runtime.capabilities().await;
+
+    // M12-REV-007: CLI is executed with --no-session-persistence in headless automation mode;
+    // disk-persisted session reload across process restarts is Unsupported.
+    assert!(!caps.supports(RuntimeCapability::PersistentSession));
+    assert!(caps.supports(RuntimeCapability::Resume));
+    assert!(caps.supports(RuntimeCapability::StreamingEvents));
+    assert!(caps.supports(RuntimeCapability::Approvals));
+    assert!(caps.supports(RuntimeCapability::Interrupt));
+    assert!(caps.supports(RuntimeCapability::Stop));
+    assert!(caps.supports(RuntimeCapability::Tools));
+    assert!(caps.supports(RuntimeCapability::Mcp));
+    assert!(caps.supports(RuntimeCapability::Subagents));
+}
+
+#[tokio::test]
+async fn test_startup_sequence_has_single_session_started_and_init_emits_diagnostic() {
+    use agent_studios_claude_code_runtime::mapping::map_claude_message;
+    use agent_studios_claude_code_runtime::protocol::{
+        ClaudeStreamMessage, SystemInitMessage, SystemMessage,
+    };
+    use agent_studios_claude_code_runtime::subagent::SubagentCorrelationTracker;
+    use agent_studios_external_runtime::RuntimeSessionRef;
+
+    let session_id = RuntimeSessionId::new();
+    let instance_id = RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4());
+    let session_ref = RuntimeSessionRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        instance_id,
+        session_id,
+    );
+
+    let hub = SessionEventHub::new(session_id, instance_id, DEFAULT_EVENT_RETENTION);
+
+    // Sequence 1: runtime.rs emits SessionStarted on start
+    let ev1 = hub
+        .emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id,
+        })
+        .await
+        .expect("sequence 1 must succeed");
+    assert_eq!(ev1.sequence, 1);
+    assert!(matches!(ev1.kind, RuntimeEventKind::SessionStarted { .. }));
+
+    // Raw init message arrives from Claude Code stdout
+    let init_msg = ClaudeStreamMessage::System(SystemMessage::Init(SystemInitMessage {
+        uuid: Some("init-uuid-001".to_string()),
+        session_id: Some("session-wire-001".to_string()),
+        claude_code_version: Some("2.1.310".to_string()),
+        model: Some("claude-sonnet-5".to_string()),
+        tools: Some(vec![
+            "Bash".to_string(),
+            "Read".to_string(),
+            "Edit".to_string(),
+        ]),
+        capabilities: Some(vec![
+            "stream-json".to_string(),
+            "prompt-suggestion".to_string(),
+        ]),
+        ..Default::default()
+    }));
+
+    let mut subagents = SubagentCorrelationTracker::new();
+    let events = map_claude_message(&init_msg, &session_ref, &mut subagents);
+
+    // Invariant (M12-REV-002): SystemMessage::Init must NOT map to SessionStarted
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        RuntimeEventKind::Diagnostic { level, message } => {
+            assert_eq!(level, "info");
+            let text = message.as_str();
+            assert!(text.contains("2.1.310"), "must contain version");
+            assert!(text.contains("claude-sonnet-5"), "must contain model");
+            assert!(text.contains("tools_count=3"), "must contain tools count");
+            assert!(
+                text.contains("capabilities=[stream-json, prompt-suggestion]"),
+                "must contain caps summary"
+            );
+        }
+        other => panic!("Expected Diagnostic event, got: {other:?}"),
+    }
+
+    // Sequence 2: hub emits Diagnostic
+    let ev2 = hub
+        .emit(events[0].clone())
+        .await
+        .expect("sequence 2 must succeed");
+    assert_eq!(ev2.sequence, 2);
+    assert!(matches!(ev2.kind, RuntimeEventKind::Diagnostic { .. }));
+
+    // Verify replay has exactly one SessionStarted at seq 1 and Diagnostic at seq 2
+    let mut sub = hub.subscribe(None).await.expect("subscribe should succeed");
+    let r1 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(r1.sequence, 1);
+    assert!(matches!(r1.kind, RuntimeEventKind::SessionStarted { .. }));
+
+    let r2 = sub.next_event().await.unwrap().unwrap();
+    assert_eq!(r2.sequence, 2);
+    assert!(matches!(r2.kind, RuntimeEventKind::Diagnostic { .. }));
+    assert_eq!(sub.last_seen_sequence(), 2);
+
+    let recorded = hub.recorded_events().await;
+    assert_eq!(recorded.len(), 2);
+    assert_eq!(recorded[0].sequence, 1);
+    assert!(matches!(
+        recorded[0].kind,
+        RuntimeEventKind::SessionStarted { .. }
+    ));
+    assert_eq!(recorded[1].sequence, 2);
+    assert!(matches!(
+        recorded[1].kind,
+        RuntimeEventKind::Diagnostic { .. }
+    ));
+}
+
+#[test]
+fn test_process_exit_code_classification() {
+    use agent_studios_claude_code_runtime::runtime::classify_exit_code;
+
+    // Code 0 -> Completed
+    let (state_0, event_0) = classify_exit_code(Some(0), "");
+    assert_eq!(state_0, RuntimeLifecycleState::Completed);
+    assert_eq!(event_0, RuntimeEventKind::Completed { summary: None });
+
+    // Code 2 -> Failed with budget limit / auth error message
+    let (state_2, event_2) = classify_exit_code(Some(2), "");
+    assert_eq!(state_2, RuntimeLifecycleState::Failed);
+    match event_2 {
+        RuntimeEventKind::Failed { safe_error_summary } => {
+            assert_eq!(
+                safe_error_summary.as_str(),
+                "Claude Code terminated: budget limit reached or authentication error"
+            );
+        }
+        other => panic!("Expected Failed event, got: {other:?}"),
+    }
+
+    // Code 130 & 143 -> Stopped
+    let (state_130, event_130) = classify_exit_code(Some(130), "");
+    assert_eq!(state_130, RuntimeLifecycleState::Stopped);
+    assert_eq!(event_130, RuntimeEventKind::Stopped);
+
+    let (state_143, event_143) = classify_exit_code(Some(143), "");
+    assert_eq!(state_143, RuntimeLifecycleState::Stopped);
+    assert_eq!(event_143, RuntimeEventKind::Stopped);
+
+    // Other nonzero -> Failed with sanitized stderr
+    let (state_1, event_1) = classify_exit_code(Some(1), "fatal error: could not connect");
+    assert_eq!(state_1, RuntimeLifecycleState::Failed);
+    match event_1 {
+        RuntimeEventKind::Failed { safe_error_summary } => {
+            assert_eq!(
+                safe_error_summary.as_str(),
+                "Claude Code process exited with code 1: fatal error: could not connect"
+            );
+        }
+        other => panic!("Expected Failed event, got: {other:?}"),
+    }
+
+    // Other nonzero with empty stderr
+    let (state_127, event_127) = classify_exit_code(Some(127), "   ");
+    assert_eq!(state_127, RuntimeLifecycleState::Failed);
+    match event_127 {
+        RuntimeEventKind::Failed { safe_error_summary } => {
+            assert_eq!(
+                safe_error_summary.as_str(),
+                "Claude Code process exited with status code 127"
+            );
+        }
+        other => panic!("Expected Failed event, got: {other:?}"),
+    }
+
+    // None (abrupt termination without exit code) -> Stopped
+    let (state_none, event_none) = classify_exit_code(None, "");
+    assert_eq!(state_none, RuntimeLifecycleState::Stopped);
+    assert_eq!(event_none, RuntimeEventKind::Stopped);
+}
+
+#[test]
+fn test_process_exit_status_wrapper() {
+    use agent_studios_claude_code_runtime::runtime::classify_exit_status;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        let status_0 = std::process::ExitStatus::from_raw(0);
+        let (state, event) = classify_exit_status(Some(status_0), "");
+        assert_eq!(state, RuntimeLifecycleState::Completed);
+        assert_eq!(event, RuntimeEventKind::Completed { summary: None });
+
+        let status_2 = std::process::ExitStatus::from_raw(2);
+        let (state, event) = classify_exit_status(Some(status_2), "");
+        assert_eq!(state, RuntimeLifecycleState::Failed);
+        match event {
+            RuntimeEventKind::Failed { safe_error_summary } => {
+                assert!(safe_error_summary.as_str().contains("budget limit reached"));
+            }
+            other => panic!("Expected Failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        let status_0 = std::process::ExitStatus::from_raw(0);
+        let (state, event) = classify_exit_status(Some(status_0), "");
+        assert_eq!(state, RuntimeLifecycleState::Completed);
+
+        let status_sigint = std::process::ExitStatus::from_raw(2); // SIGINT
+        let (state_sig, _) = classify_exit_status(Some(status_sigint), "");
+        assert_eq!(state_sig, RuntimeLifecycleState::Stopped);
+    }
 }

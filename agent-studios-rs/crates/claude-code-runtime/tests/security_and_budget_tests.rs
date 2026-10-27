@@ -6,12 +6,24 @@ use agent_studios_claude_code_runtime::approval::{
     ApprovalAuthority, ApprovalDecision, CanUseToolRequest, parse_max_budget_usd,
     sanitize_diagnostic, validate_max_budget_usd,
 };
+use agent_studios_claude_code_runtime::discovery::{
+    CLAUDE_CODE_RUNTIME_ID, ClaudeCodeDiscoveryConfig,
+};
+use agent_studios_claude_code_runtime::protocol::{
+    CanUseToolRequest as ProtocolCanUseToolRequest, ControlDecision, ControlRequest,
+    ControlRequestPayload, ControlResponseBody,
+};
+use agent_studios_claude_code_runtime::runtime::ClaudeCodeRuntime;
 use agent_studios_claude_code_runtime::sandbox::{
     validate_session_workspace, validate_workspace_path,
 };
-use agent_studios_external_runtime::WorkspaceAccessMode;
+use agent_studios_external_runtime::{
+    AgentRuntime, NonSecretValue, RuntimeConfigRef, RuntimeError, RuntimeImplementationId,
+    RuntimeInstanceId, RuntimeInstanceRef, RuntimeStartRequest, WorkspaceAccessMode,
+};
 use agent_studios_protocol::id::WorktreeId;
 use agent_studios_protocol::worktree::ExecutionWorkspace;
+use tempfile::tempdir;
 
 // ============================================================================
 // 1. Tool Approval Denial Fail-Closed Behavior on Timeout & Cancellation
@@ -217,7 +229,8 @@ fn test_sensitive_canary_scrubbing_in_diagnostics() {
         "Plaintext Bearer token must be redacted"
     );
     assert!(
-        bearer_sanitized.contains("[REDACTED_BEARER_TOKEN]") || bearer_sanitized.contains("[REDACTED_TOKEN]")
+        bearer_sanitized.contains("[REDACTED_BEARER_TOKEN]")
+            || bearer_sanitized.contains("[REDACTED_TOKEN]")
     );
 
     // 3. GitHub personal access tokens (ghp_...)
@@ -229,7 +242,8 @@ fn test_sensitive_canary_scrubbing_in_diagnostics() {
     );
 
     // 4. Basic Auth URI with embedded credentials (https://user:password@domain)
-    let uri_canary = "Proxying via https://agent_studios:SuperSecretPassword123@api.anthropic.com/v1/messages";
+    let uri_canary =
+        "Proxying via https://agent_studios:SuperSecretPassword123@api.anthropic.com/v1/messages";
     let uri_sanitized = sanitize_diagnostic(uri_canary);
     assert!(
         !uri_sanitized.contains("SuperSecretPassword123"),
@@ -322,10 +336,388 @@ fn test_workspace_boundary_validation_rejection_of_escapes() {
         PathBuf::from("/source"),
         "0123456789abcdef0123456789abcdef01234567",
     );
-    let escaping_res =
-        validate_session_workspace(&escaping_managed, WorkspaceAccessMode::Mutating);
+    let escaping_res = validate_session_workspace(&escaping_managed, WorkspaceAccessMode::Mutating);
     assert!(
         escaping_res.is_err(),
         "Managed workspace with cwd outside root must be rejected"
     );
+}
+
+// ============================================================================
+// 5. M12-REV-003: Budget Validation Bypass Regression Tests
+// ============================================================================
+
+fn test_managed_workspace() -> (tempfile::TempDir, ExecutionWorkspace) {
+    let temp = tempdir().unwrap();
+    let temp_path = temp.path().to_path_buf();
+    let ws = ExecutionWorkspace::managed(
+        WorktreeId::new(),
+        temp_path.clone(),
+        temp_path.clone(),
+        PathBuf::from("/source"),
+        PathBuf::from("/source"),
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+    (temp, ws)
+}
+
+#[tokio::test]
+async fn test_start_rejects_malformed_max_budget_usd_without_launching_process() {
+    let runtime = ClaudeCodeRuntime::new().unwrap();
+    let instance_ref = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    );
+    let (_temp_ws, ws) = test_managed_workspace();
+
+    let malformed_budgets = vec![
+        "invalid",
+        "-5.0",
+        "-0.01",
+        "NaN",
+        "nan",
+        "inf",
+        "-infinity",
+        "",
+        "   ",
+        "unlimited",
+        "$10.00",
+    ];
+
+    for bad_budget in malformed_budgets {
+        let mut req = RuntimeStartRequest::new(instance_ref.clone(), ws.clone());
+        req.metadata.insert(
+            "max_budget_usd".to_string(),
+            NonSecretValue::new(bad_budget).unwrap(),
+        );
+
+        let res = runtime.start(req).await;
+        assert!(
+            res.is_err(),
+            "start() must reject malformed budget ceiling '{bad_budget}'"
+        );
+
+        match res.err().unwrap() {
+            RuntimeError::InvalidConfiguration { reason } => {
+                assert!(
+                    reason.as_str().contains("Invalid max_budget_usd"),
+                    "Expected 'Invalid max_budget_usd' error for '{bad_budget}', got: {}",
+                    reason.as_str()
+                );
+            }
+            other => panic!("Expected InvalidConfiguration for '{bad_budget}', got: {other:?}"),
+        }
+    }
+
+    // Invariant: Zero sessions created or active
+    assert_eq!(runtime.active_session_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_start_accepts_valid_budget_and_passes_to_config() {
+    let temp = tempdir().unwrap();
+    let dummy_bin = temp.path().join("fake_claude.exe");
+    std::fs::write(&dummy_bin, b"fake binary").unwrap();
+
+    let config = ClaudeCodeDiscoveryConfig {
+        custom_binary_path: Some(dummy_bin),
+    };
+    let runtime = ClaudeCodeRuntime::new()
+        .unwrap()
+        .with_discovery_config(config);
+
+    let instance_ref = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    );
+    let (_temp_ws, ws) = test_managed_workspace();
+
+    let mut req = RuntimeStartRequest::new(instance_ref, ws);
+    req.metadata.insert(
+        "max_budget_usd".to_string(),
+        NonSecretValue::new("10.50").unwrap(),
+    );
+
+    // Verify build_process_config parses and accepts valid budget ceiling
+    let process_config = runtime
+        .build_process_config(&req)
+        .expect("build_process_config must succeed for valid budget");
+
+    assert_eq!(
+        process_config.max_budget_usd,
+        Some(10.50),
+        "Budget ceiling '10.50' must be passed to process configuration"
+    );
+
+    // Verify start() passes budget validation (it reaches spawn_claude_process rather than failing budget check)
+    let start_res = runtime.start(req).await;
+    // On Windows, dummy binary cannot be executed as Win32 binary, returning ProcessSpawn / StartupFailed,
+    // NEVER InvalidConfiguration.
+    if let Err(RuntimeError::InvalidConfiguration { reason }) = start_res {
+        panic!("start() must not fail with InvalidConfiguration for valid budget: {reason}");
+    }
+}
+
+#[test]
+fn test_config_ref_budget_validation_and_rejection() {
+    let temp = tempdir().unwrap();
+    let dummy_bin = temp.path().join("fake_claude.exe");
+    std::fs::write(&dummy_bin, b"fake binary").unwrap();
+
+    let config = ClaudeCodeDiscoveryConfig {
+        custom_binary_path: Some(dummy_bin),
+    };
+    let runtime = ClaudeCodeRuntime::new()
+        .unwrap()
+        .with_discovery_config(config);
+
+    let (_temp_ws, ws) = test_managed_workspace();
+
+    // 1. Valid budget in JSON config_ref
+    let valid_inst = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    )
+    .with_config_ref(RuntimeConfigRef::new(r#"{"max_budget_usd": 25.50}"#).unwrap());
+
+    let req_valid = RuntimeStartRequest::new(valid_inst, ws.clone());
+    let cfg = runtime
+        .build_process_config(&req_valid)
+        .expect("Valid JSON config_ref budget must succeed");
+    assert_eq!(cfg.max_budget_usd, Some(25.50));
+
+    // 2. Valid budget in prefix config_ref
+    let prefix_inst = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    )
+    .with_config_ref(RuntimeConfigRef::new("max_budget_usd=15.00").unwrap());
+
+    let req_prefix = RuntimeStartRequest::new(prefix_inst, ws.clone());
+    let cfg_prefix = runtime
+        .build_process_config(&req_prefix)
+        .expect("Valid prefix config_ref budget must succeed");
+    assert_eq!(cfg_prefix.max_budget_usd, Some(15.00));
+
+    // 3. Malformed negative budget in config_ref must fail closed
+    let bad_inst = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    )
+    .with_config_ref(RuntimeConfigRef::new(r#"{"max_budget_usd": -10.0}"#).unwrap());
+
+    let req_bad = RuntimeStartRequest::new(bad_inst, ws.clone());
+    let bad_res = runtime.build_process_config(&req_bad);
+    assert!(
+        bad_res.is_err(),
+        "Negative budget in config_ref must fail closed"
+    );
+    match bad_res.err().unwrap() {
+        RuntimeError::InvalidConfiguration { reason } => {
+            assert!(reason.as_str().contains("Invalid max_budget_usd"));
+        }
+        other => panic!("Expected InvalidConfiguration, got: {other:?}"),
+    }
+
+    // 4. Malformed NaN budget in config_ref must fail closed
+    let nan_inst = RuntimeInstanceRef::new(
+        RuntimeImplementationId::new(CLAUDE_CODE_RUNTIME_ID).unwrap(),
+        RuntimeInstanceId::from_uuid(uuid::Uuid::new_v4()),
+    )
+    .with_config_ref(RuntimeConfigRef::new(r#"{"max_budget_usd": "NaN"}"#).unwrap());
+
+    let req_nan = RuntimeStartRequest::new(nan_inst, ws);
+    let nan_res = runtime.build_process_config(&req_nan);
+    assert!(
+        nan_res.is_err(),
+        "NaN budget in config_ref must fail closed"
+    );
+}
+
+// ============================================================================
+// 6. M12-REV-004: Approval Timeout Enforcement & Watchdog Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_approval_timeout_watchdog_fires_and_produces_deny_response() {
+    let authority = Arc::new(ApprovalAuthority::new());
+    let control_req = ControlRequest {
+        request_id: "req_timeout_watchdog_01".to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "rm -rf /"}),
+            tool_use_id: Some("call_timeout_01".to_string()),
+            agent_id: None,
+            decision_reason: Some("Dangerous tool execution".to_string()),
+            blocked_path: None,
+            default_to_no: Some(false),
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("should register approval request");
+
+    assert_eq!(authority.pending_count(), 1);
+    assert!(authority.is_pending("req_timeout_watchdog_01"));
+
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
+    // Spawn watchdog with short 35ms timeout
+    authority.spawn_watchdog(
+        approval_id,
+        Duration::from_millis(35),
+        move |deny_resp| async move {
+            let _ = timeout_tx.send(deny_resp);
+        },
+    );
+
+    assert!(authority.is_watchdog_active(&approval_id));
+
+    // Await watchdog firing
+    let deny_resp = tokio::time::timeout(Duration::from_millis(500), timeout_rx)
+        .await
+        .expect("watchdog must fire within 500ms")
+        .expect("channel should receive deny response");
+
+    // Verify formatted NDJSON structure of deny response
+    assert_eq!(deny_resp.request_id(), "req_timeout_watchdog_01");
+    assert_eq!(deny_resp.r#type, "control_response");
+    match &deny_resp.response {
+        ControlResponseBody::Success {
+            request_id,
+            response,
+        } => {
+            assert_eq!(request_id, "req_timeout_watchdog_01");
+            match response {
+                ControlDecision::Deny { message, interrupt } => {
+                    assert_eq!(*interrupt, Some(false));
+                    let msg = message.as_ref().expect("deny response must have message");
+                    assert!(
+                        msg.contains("Approval timed out"),
+                        "Message must state approval timed out: '{msg}'"
+                    );
+                    assert!(
+                        msg.contains("fail-closed"),
+                        "Message must emphasize fail-closed: '{msg}'"
+                    );
+                }
+                _ => panic!("Expected ControlDecision::Deny, got {response:?}"),
+            }
+        }
+        _ => panic!("Expected Success subtype with Deny decision"),
+    }
+
+    // Verify approval is removed from pending authority
+    assert_eq!(authority.pending_count(), 0);
+    assert!(!authority.is_pending("req_timeout_watchdog_01"));
+    assert!(!authority.is_watchdog_active(&approval_id));
+
+    // Attempting to resolve by host afterwards must fail fail-closed
+    let late_res = authority.resolve_approval_by_id(approval_id, true, None);
+    assert!(
+        late_res.is_err(),
+        "Late resolution after timeout must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn test_approval_resolved_before_timeout_cancels_watchdog() {
+    let authority = Arc::new(ApprovalAuthority::new());
+    let control_req = ControlRequest {
+        request_id: "req_resolve_cancel_01".to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "cargo check"}),
+            tool_use_id: Some("call_resolve_01".to_string()),
+            agent_id: None,
+            decision_reason: Some("Safe command".to_string()),
+            blocked_path: None,
+            default_to_no: Some(false),
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("should register approval request");
+
+    let (timeout_tx, mut timeout_rx) = tokio::sync::oneshot::channel();
+    // Watchdog with 250ms timeout
+    let watchdog_handle = authority.spawn_watchdog(
+        approval_id,
+        Duration::from_millis(250),
+        move |deny_resp| async move {
+            let _ = timeout_tx.send(deny_resp);
+        },
+    );
+
+    assert!(authority.is_watchdog_active(&approval_id));
+
+    // Host resolves approval before timeout (after 20ms)
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let allow_resp = authority
+        .resolve_approval_by_id(approval_id, true, None)
+        .expect("resolve_approval_by_id should succeed");
+
+    assert_eq!(allow_resp.request_id(), "req_resolve_cancel_01");
+
+    // Watchdog must be removed from cancellations immediately
+    assert!(!authority.is_watchdog_active(&approval_id));
+
+    // Wait for watchdog task to finish
+    let _ = watchdog_handle.await;
+
+    // Verify on_timeout callback was NEVER called
+    assert!(
+        timeout_rx.try_recv().is_err(),
+        "Timeout callback must not be invoked after host resolution"
+    );
+
+    // Authority is clean
+    assert_eq!(authority.pending_count(), 0);
+    assert!(!authority.is_pending("req_resolve_cancel_01"));
+}
+
+#[tokio::test]
+async fn test_approval_watchdog_cancelled_on_session_termination() {
+    let authority = Arc::new(ApprovalAuthority::new());
+    let control_req = ControlRequest {
+        request_id: "req_cancel_termination_01".to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "cargo test"}),
+            tool_use_id: None,
+            agent_id: None,
+            decision_reason: None,
+            blocked_path: None,
+            default_to_no: None,
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("should register approval request");
+
+    let (timeout_tx, mut timeout_rx) = tokio::sync::oneshot::channel();
+    let watchdog_handle = authority.spawn_watchdog(
+        approval_id,
+        Duration::from_millis(300),
+        move |deny_resp| async move {
+            let _ = timeout_tx.send(deny_resp);
+        },
+    );
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Session termination cancels all pending approvals
+    authority.cancel_all_pending();
+
+    let _ = watchdog_handle.await;
+    assert!(
+        timeout_rx.try_recv().is_err(),
+        "Timeout callback must not fire after session termination cancel"
+    );
+    assert_eq!(authority.pending_count(), 0);
+    assert!(!authority.is_watchdog_active(&approval_id));
 }

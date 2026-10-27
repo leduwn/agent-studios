@@ -26,7 +26,10 @@ pub fn default_claude_capabilities() -> RuntimeCapabilities {
         interrupt: RuntimeCapabilitySupport::Supported,
         resume: RuntimeCapabilitySupport::Supported,
         stop: RuntimeCapabilitySupport::Supported,
-        persistent_session: RuntimeCapabilitySupport::Supported,
+        // The Claude Code CLI is executed with `--no-session-persistence` in headless
+        // automation mode, and disk-persisted session reload across process restarts is
+        // not supported. In-process turn continuation (`resume`) remains supported.
+        persistent_session: RuntimeCapabilitySupport::Unsupported,
         workspace_binding: RuntimeCapabilitySupport::Supported,
         model_selection: RuntimeCapabilitySupport::Supported,
         provider_selection: RuntimeCapabilitySupport::Unsupported,
@@ -156,7 +159,10 @@ pub fn resolve_binary_path(config: &ClaudeCodeDiscoveryConfig) -> Option<PathBuf
 
     // Standard user locations
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        let candidate = PathBuf::from(&userprofile).join(".local").join("bin").join("claude.exe");
+        let candidate = PathBuf::from(&userprofile)
+            .join(".local")
+            .join("bin")
+            .join("claude.exe");
         if candidate.is_file() {
             let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
             return Some(canonical);
@@ -184,7 +190,11 @@ pub fn resolve_binary_path(config: &ClaudeCodeDiscoveryConfig) -> Option<PathBuf
     }
 
     // Standard Unix PATH prefixes
-    for prefix in &["/usr/local/bin/claude", "/usr/bin/claude", "/opt/homebrew/bin/claude"] {
+    for prefix in &[
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+        "/opt/homebrew/bin/claude",
+    ] {
         let candidate = PathBuf::from(prefix);
         if candidate.is_file() {
             let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);

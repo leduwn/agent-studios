@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 use crate::protocol::{ClaudeTaskUsage, TaskNotificationMessage, TaskStartedMessage};
@@ -48,7 +48,11 @@ impl SubagentCorrelationTracker {
     }
 
     /// Records a tool invocation call ID to its tool name.
-    pub fn register_tool_use(&mut self, tool_use_id: impl Into<String>, tool_name: impl Into<String>) {
+    pub fn register_tool_use(
+        &mut self,
+        tool_use_id: impl Into<String>,
+        tool_name: impl Into<String>,
+    ) {
         let id = tool_use_id.into();
         let name = tool_name.into();
         self.tool_names_by_call_id.insert(id, name);
@@ -56,7 +60,9 @@ impl SubagentCorrelationTracker {
 
     /// Retrieves the tool name associated with a tool call ID.
     pub fn get_tool_name(&self, tool_use_id: &str) -> Option<&str> {
-        self.tool_names_by_call_id.get(tool_use_id).map(|s| s.as_str())
+        self.tool_names_by_call_id
+            .get(tool_use_id)
+            .map(|s| s.as_str())
     }
 
     /// Registers a newly spawned subagent from a `system/task_started` NDJSON event.
@@ -66,7 +72,10 @@ impl SubagentCorrelationTracker {
             tool_use_id: event.tool_use_id.clone(),
             parent_tool_use_id: None, // Resolved or updated if parent link is provided
             description: event.description.clone(),
-            task_type: event.task_type.clone().unwrap_or_else(|| "subagent".to_string()),
+            task_type: event
+                .task_type
+                .clone()
+                .unwrap_or_else(|| "subagent".to_string()),
             spawn_depth: event.spawn_depth.unwrap_or(1),
             is_backgrounded: event.is_backgrounded.unwrap_or(false),
             started_at: Utc::now(),
@@ -87,7 +96,8 @@ impl SubagentCorrelationTracker {
 
         self.tool_calls_by_task_id
             .insert(event.task_id.clone(), event.tool_use_id.clone());
-        self.nodes_by_tool_call.insert(event.tool_use_id.clone(), node);
+        self.nodes_by_tool_call
+            .insert(event.tool_use_id.clone(), node);
 
         self.nodes_by_tool_call
             .get(&event.tool_use_id)
@@ -95,7 +105,11 @@ impl SubagentCorrelationTracker {
     }
 
     /// Associates an existing subagent node with its parent tool call ID.
-    pub fn set_parent_tool_use_id(&mut self, tool_use_id: &str, parent_tool_use_id: impl Into<String>) {
+    pub fn set_parent_tool_use_id(
+        &mut self,
+        tool_use_id: &str,
+        parent_tool_use_id: impl Into<String>,
+    ) {
         if let Some(node) = self.nodes_by_tool_call.get_mut(tool_use_id) {
             node.parent_tool_use_id = Some(parent_tool_use_id.into());
         }

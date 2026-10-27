@@ -14,9 +14,8 @@ pub use approval::{
     sanitize_diagnostic, validate_max_budget_usd,
 };
 pub use discovery::{
-    CLAUDE_CODE_IMPLEMENTATION_ID, CLAUDE_CODE_RUNTIME_ID, DEFAULT_INSTANCE_ID,
-    ClaudeCodeDiscoveryConfig, default_claude_capabilities, discover_claude_binary,
-    resolve_binary_path,
+    CLAUDE_CODE_IMPLEMENTATION_ID, CLAUDE_CODE_RUNTIME_ID, ClaudeCodeDiscoveryConfig,
+    DEFAULT_INSTANCE_ID, default_claude_capabilities, discover_claude_binary, resolve_binary_path,
 };
 pub use error::ClaudeCodeError;
 pub use mapping::map_claude_message;
@@ -24,11 +23,14 @@ pub use process::{ClaudeCodeProcess, ClaudeCodeProcessConfig, spawn_claude_proce
 pub use protocol::{
     AssistantMessage, CanUseToolRequest, ClaudeInterruptInput, ClaudeStreamMessage,
     ClaudeTokenUsage, ClaudeUserPromptInput, ContentBlock, ControlDecision, ControlRequest,
-    ControlRequestPayload, ControlResponse, ResultSummary, StreamDelta, StreamEventPayload,
-    StreamEventWrapper, SystemInitMessage, SystemMessage, TaskNotificationMessage,
-    TaskStartedMessage, ToolProgressMessage, ToolResultBlock, UserMessage,
+    ControlRequestPayload, ControlResponse, ControlResponseBody, ResultSummary, StreamDelta,
+    StreamEventPayload, StreamEventWrapper, SystemInitMessage, SystemMessage,
+    TaskNotificationMessage, TaskStartedMessage, ToolProgressMessage, ToolResultBlock, UserMessage,
 };
-pub use runtime::{ClaudeCodeActiveSession, ClaudeCodeRuntime};
+pub use runtime::{
+    ClaudeCodeActiveSession, ClaudeCodeRuntime, DEFAULT_APPROVAL_TIMEOUT, classify_exit_code,
+    classify_exit_status,
+};
 pub use sandbox::{
     JobObjectGuard, ProcessContainment, SandboxLevel, SandboxPolicy, validate_session_workspace,
     validate_workspace_path,

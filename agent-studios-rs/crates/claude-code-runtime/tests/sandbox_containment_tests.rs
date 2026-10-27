@@ -20,11 +20,15 @@ fn test_sandbox_strict_fails_closed_on_windows() {
     match result.err().unwrap() {
         ClaudeCodeError::SandboxPolicyViolation(reason) => {
             assert!(
-                reason.contains("Strict") && (reason.contains("filesystem") || reason.contains("isolation")),
+                reason.contains("Strict")
+                    && (reason.contains("filesystem") || reason.contains("isolation")),
                 "Error message should explain lack of filesystem/network isolation: {reason}"
             );
         }
-        other => panic!("Expected ClaudeCodeError::SandboxPolicyViolation, got {:?}", other),
+        other => panic!(
+            "Expected ClaudeCodeError::SandboxPolicyViolation, got {:?}",
+            other
+        ),
     }
 }
 
@@ -39,7 +43,8 @@ fn test_sandbox_standard_creates_win32_job_object_with_kill_on_close() {
     assert_eq!(policy.max_memory_bytes, Some(4 * 1024 * 1024 * 1024)); // 4 GiB default
     assert_eq!(policy.max_processes, Some(64)); // 64 processes default
 
-    let containment = ProcessContainment::new(policy).expect("Standard sandbox initialization should succeed on Windows");
+    let containment = ProcessContainment::new(policy)
+        .expect("Standard sandbox initialization should succeed on Windows");
     assert!(containment.job_object().is_some());
 
     let job = containment.job_object().unwrap();
@@ -64,12 +69,20 @@ fn test_sandbox_standard_creates_win32_job_object_with_kill_on_close() {
     );
 
     // Verify containment query
-    let in_job = containment.is_child_in_job(pid).expect("Failed to query IsProcessInJob");
-    assert!(in_job, "Child process must be verified inside the Job Object");
+    let in_job = containment
+        .is_child_in_job(pid)
+        .expect("Failed to query IsProcessInJob");
+    assert!(
+        in_job,
+        "Child process must be verified inside the Job Object"
+    );
 
     // Terminate containment tree
     let term_res = containment.terminate();
-    assert!(term_res.is_ok(), "Terminating containment tree must succeed");
+    assert!(
+        term_res.is_ok(),
+        "Terminating containment tree must succeed"
+    );
 
     let _ = child.wait();
 }
@@ -88,7 +101,10 @@ fn test_sandbox_none_runs_unconstrained() {
     assert_eq!(containment.policy().level, SandboxLevel::None);
 
     #[cfg(windows)]
-    assert!(containment.job_object().is_none(), "Unconstrained containment must not create a Job Object");
+    assert!(
+        containment.job_object().is_none(),
+        "Unconstrained containment must not create a Job Object"
+    );
 
     // assign_raw_handle on unconstrained succeeds as a no-op
     assert!(containment.assign_raw_handle(0).is_ok());
@@ -112,7 +128,8 @@ fn test_sandbox_memory_quota_and_process_count_configuration() {
 
     #[cfg(windows)]
     {
-        let containment = ProcessContainment::new(policy).expect("Should succeed with 512MB and 32 processes");
+        let containment =
+            ProcessContainment::new(policy).expect("Should succeed with 512MB and 32 processes");
         assert!(containment.job_object().is_some());
     }
 
@@ -126,7 +143,8 @@ fn test_sandbox_memory_quota_and_process_count_configuration() {
 
     #[cfg(windows)]
     {
-        let custom_containment = ProcessContainment::new(custom_policy).expect("Should succeed with 1GB and 16 processes");
+        let custom_containment = ProcessContainment::new(custom_policy)
+            .expect("Should succeed with 1GB and 16 processes");
         assert!(custom_containment.job_object().is_some());
     }
 }

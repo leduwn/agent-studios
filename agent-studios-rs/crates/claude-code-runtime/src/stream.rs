@@ -150,6 +150,8 @@ pub fn parse_ndjson_line(line: &str) -> Result<ClaudeStreamMessage, ClaudeCodeEr
         } else {
             line.to_string()
         };
-        ClaudeCodeError::StreamParseError(format!("JSON deserialization failed: {e}; input: '{snippet}'"))
+        ClaudeCodeError::StreamParseError(format!(
+            "JSON deserialization failed: {e}; input: '{snippet}'"
+        ))
     })
 }

@@ -28,6 +28,9 @@ pub enum ClaudeCodeError {
     #[error("API budget limit reached: {0}")]
     BudgetExceeded(String),
 
+    #[error("Invalid budget ceiling: {0}")]
+    InvalidBudget(String),
+
     #[error("Tool approval timed out: {0}")]
     ApprovalTimeout(String),
 
@@ -56,9 +59,9 @@ impl From<ClaudeCodeError> for RuntimeError {
             ClaudeCodeError::SessionNotFound(_id) => RuntimeError::SessionNotFound {
                 session_id: agent_studios_external_runtime::RuntimeSessionId::new(),
             },
-            ClaudeCodeError::SessionAlreadyActive(id) => RuntimeError::invalid_configuration(format!(
-                "Session {id} is already active"
-            )),
+            ClaudeCodeError::SessionAlreadyActive(id) => {
+                RuntimeError::invalid_configuration(format!("Session {id} is already active"))
+            }
             ClaudeCodeError::InvalidSessionState(msg) => RuntimeError::invalid_configuration(msg),
             ClaudeCodeError::SandboxPolicyViolation(msg) => RuntimeError::StartupFailed {
                 reason: SanitizedRuntimeMessage::new(msg),
@@ -79,6 +82,7 @@ impl From<ClaudeCodeError> for RuntimeError {
                 agent_studios_external_runtime::RuntimeSessionId::new(),
                 format!("Budget exceeded: {msg}"),
             ),
+            ClaudeCodeError::InvalidBudget(msg) => RuntimeError::invalid_configuration(msg),
             other => RuntimeError::Internal {
                 reason: SanitizedRuntimeMessage::new(other.to_string()),
             },
