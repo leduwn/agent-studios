@@ -599,3 +599,55 @@ async fn test_watchdog_lifecycle_no_leaked_tasks_on_timeout() {
     assert!(!authority.is_watchdog_active(&approval_id));
     assert_eq!(authority.pending_count(), 0);
 }
+
+#[tokio::test]
+async fn test_watchdog_timeout_async_on_timeout_not_cancelled() {
+    let authority = Arc::new(ApprovalAuthority::new());
+    let req_id = "req_async_timeout_complete";
+
+    let control_req = ControlRequest {
+        request_id: req_id.to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({}),
+            tool_use_id: None,
+            agent_id: None,
+            decision_reason: None,
+            blocked_path: None,
+            default_to_no: None,
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("Registration should succeed");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let watchdog_handle = authority.spawn_watchdog(
+        approval_id,
+        Duration::from_millis(20),
+        move |deny_resp| async move {
+            // Emulate asynchronous I/O (e.g. process stdin write and hub event emit)
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            tokio::task::yield_now().await;
+            let _ = tx.send(deny_resp);
+        },
+    );
+
+    let deny = tokio::time::timeout(Duration::from_millis(300), rx)
+        .await
+        .expect("Watchdog timeout task must not be prematurely aborted during async on_timeout")
+        .expect("Deny response must be received through async channel");
+
+    assert_eq!(deny.request_id(), req_id);
+
+    let join_res = tokio::time::timeout(Duration::from_millis(200), watchdog_handle).await;
+    assert!(
+        join_res.is_ok(),
+        "Watchdog task must finish cleanly after async execution"
+    );
+
+    assert!(!authority.is_watchdog_active(&approval_id));
+    assert_eq!(authority.pending_count(), 0);
+}

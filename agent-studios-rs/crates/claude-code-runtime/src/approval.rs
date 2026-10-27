@@ -632,10 +632,9 @@ impl ApprovalAuthority {
         approval_id: ApprovalId,
         timeout_message: Option<String>,
     ) -> Option<ControlResponse> {
-        if let Ok(mut lock) = self.watchdog_handles.lock()
-            && let Some(handle) = lock.remove(&approval_id)
-        {
-            handle.abort();
+        // Clean up handle from watchdog map without aborting the executing task
+        if let Ok(mut lock) = self.watchdog_handles.lock() {
+            lock.remove(&approval_id);
         }
 
         let mut lock = self.approvals.write().expect("lock poisoned");

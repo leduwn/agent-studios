@@ -872,6 +872,45 @@ fn test_real_claude_cli_assistant_with_thinking_blocks() {
 }
 
 #[test]
+fn test_real_claude_cli_assistant_with_redacted_thinking() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let assistant_line = r#"{"type":"assistant","message":{"id":"msg_redact_01","type":"message","role":"assistant","model":"claude-3-7-sonnet","content":[{"type":"redacted_thinking","data":"redacted_encrypted_hash_data"},{"type":"text","text":"Safe response after internal reflection"}],"stop_reason":"end_turn","usage":{"input_tokens":420,"output_tokens":80}},"parent_tool_use_id":null,"session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38","uuid":"ast-redact-1"}"#;
+    let msg =
+        parse_ndjson_line(assistant_line).expect("should parse assistant with redacted_thinking");
+    match &msg {
+        ClaudeStreamMessage::Assistant(ast) => {
+            assert_eq!(ast.message.content.len(), 2);
+            assert_eq!(
+                ast.message.content[0],
+                ContentBlock::RedactedThinking {
+                    data: Some("redacted_encrypted_hash_data".to_string()),
+                }
+            );
+            assert_eq!(
+                ast.message.content[1],
+                ContentBlock::Text {
+                    text: "Safe response after internal reflection".to_string(),
+                }
+            );
+        }
+        other => panic!("Expected Assistant with RedactedThinking, got: {other:?}"),
+    }
+
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        RuntimeEventKind::UsageUpdated {
+            prompt_tokens: Some(420),
+            completion_tokens: Some(80),
+            total_tokens: Some(500),
+        }
+    );
+}
+
+#[test]
 fn test_real_claude_cli_stream_event_lifecycle() {
     let session_ref = test_session_ref();
     let mut tracker = SubagentCorrelationTracker::new();
