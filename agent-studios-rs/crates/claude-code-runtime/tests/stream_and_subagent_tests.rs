@@ -4,8 +4,8 @@ use agent_studios_claude_code_runtime::protocol::{
     AssistantMessage, AssistantMessageInner, CanUseToolRequest, ClaudeStreamMessage,
     ClaudeTaskUsage, ClaudeTokenUsage, ContentBlock, ControlDecision, ControlRequest,
     ControlRequestPayload, ControlResponse, ControlResponseBody, ResultSummary, StreamDelta,
-    StreamEventPayload, SystemMessage, TaskNotificationMessage, TaskStartedMessage,
-    ToolResultBlock, UserMessage, UserMessageInner,
+    StreamEventPayload, StreamEventWrapper, SystemMessage, TaskNotificationMessage,
+    TaskStartedMessage, ToolResultBlock, UserMessage, UserMessageInner,
 };
 use agent_studios_claude_code_runtime::stream::{NdjsonStreamReader, parse_ndjson_line};
 use agent_studios_claude_code_runtime::subagent::SubagentCorrelationTracker;
@@ -221,6 +221,8 @@ fn test_mapping_assistant_tool_use_and_user_result() {
         parent_tool_use_id: None,
         agent_id: None,
         user_message_uuid: None,
+        timestamp: None,
+        user_message_uuids: None,
         message: AssistantMessageInner {
             id: Some("msg_01".to_string()),
             role: Some("assistant".to_string()),
@@ -274,9 +276,11 @@ fn test_mapping_assistant_tool_use_and_user_result() {
                 tool_use_id: "toolu_bash_01".to_string(),
                 content: serde_json::json!("test result: ok. 10 passed"),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
         }),
         tool_use_result: None,
+        is_replay: None,
     });
 
     let res_events = map_claude_message(&user_msg, &session_ref, &mut tracker);
@@ -353,6 +357,7 @@ fn test_mapping_result_summary() {
         model_usage: None,
         permission_denials: None,
         terminal_reason: None,
+        subagent_stats: None,
     });
 
     let events = map_claude_message(&result_msg, &session_ref, &mut tracker);
@@ -696,4 +701,298 @@ fn test_resolve_approval_by_id_wire_protocol_integration() {
         "Dangerous command blocked"
     );
     assert_eq!(deny_val["response"]["response"]["interrupt"], false);
+}
+
+// ============================================================================
+// 5. Real Claude CLI Wire Protocol Fixtures (M12.2)
+// ============================================================================
+
+#[test]
+fn test_real_claude_cli_system_ui_invalidate_and_thinking_tokens() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    // 1. system/ui_invalidate fixture from real claude.exe
+    let ui_inv_line = r#"{"type":"system","subtype":"ui_invalidate","event":"ui.render","uuid":"6bea2990-6cec-43d1-85fe-86d1b72c5a96","session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38"}"#;
+    let msg = parse_ndjson_line(ui_inv_line).expect("should parse ui_invalidate message");
+    match &msg {
+        ClaudeStreamMessage::System(SystemMessage::UiInvalidate(ui)) => {
+            assert_eq!(ui.event.as_deref(), Some("ui.render"));
+            assert_eq!(
+                ui.uuid.as_deref(),
+                Some("6bea2990-6cec-43d1-85fe-86d1b72c5a96")
+            );
+            assert_eq!(
+                ui.session_id.as_deref(),
+                Some("36e14e67-b467-48ff-b7ed-5a6dc8d71f38")
+            );
+        }
+        other => panic!("Expected System(UiInvalidate), got: {other:?}"),
+    }
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert!(
+        events.is_empty(),
+        "ui_invalidate should map to empty event list"
+    );
+
+    // 2. system/thinking_tokens fixture
+    let thinking_line = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":128,"uuid":"t1","session_id":"s1"}"#;
+    let msg2 = parse_ndjson_line(thinking_line).expect("should parse thinking_tokens message");
+    match &msg2 {
+        ClaudeStreamMessage::System(SystemMessage::ThinkingTokens(tt)) => {
+            assert_eq!(tt.estimated_tokens, Some(128));
+        }
+        other => panic!("Expected System(ThinkingTokens), got: {other:?}"),
+    }
+    let events2 = map_claude_message(&msg2, &session_ref, &mut tracker);
+    assert!(
+        events2.is_empty(),
+        "thinking_tokens should map to empty event list"
+    );
+}
+
+#[test]
+fn test_real_claude_cli_system_init_fixture() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let init_line = r#"{"type":"system","subtype":"init","cwd":"D:\\Projects\\agent-studios\\agent-studios-rs","session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38","tools":["Bash","Edit","PowerShell","Read"],"mcp_servers":[],"model":"ag/gemini-3.8-flash-high","permissionMode":"default","slash_commands":["doctor","loop"],"claude_code_version":"2.1.310"}"#;
+    let msg = parse_ndjson_line(init_line).expect("should parse real system/init fixture");
+    match &msg {
+        ClaudeStreamMessage::System(SystemMessage::Init(init)) => {
+            assert_eq!(init.claude_code_version.as_deref(), Some("2.1.310"));
+            assert_eq!(init.model.as_deref(), Some("ag/gemini-3.8-flash-high"));
+            assert_eq!(init.permission_mode.as_deref(), Some("default"));
+            assert_eq!(
+                init.cwd.as_deref(),
+                Some("D:\\Projects\\agent-studios\\agent-studios-rs")
+            );
+            assert_eq!(init.tools.as_ref().map(|t| t.len()), Some(4));
+        }
+        other => panic!("Expected System(Init), got: {other:?}"),
+    }
+
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        RuntimeEventKind::Diagnostic { level, message } => {
+            assert_eq!(level, "info");
+            assert!(message.as_str().contains("version=2.1.310"));
+            assert!(message.as_str().contains("model=ag/gemini-3.8-flash-high"));
+            assert!(message.as_str().contains("tools_count=4"));
+        }
+        other => panic!("Expected Diagnostic event, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_real_claude_cli_command_lifecycle() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let queued = r#"{"type":"command_lifecycle","command_uuid":"834cf8df-d293-4a0f-ba7e-3cbebb1ce4c0","state":"queued","uuid":"ccd0e669-ff71-4318-a4a8-769d1d9726de","session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38"}"#;
+    let msg = parse_ndjson_line(queued).expect("should parse command_lifecycle queued");
+    assert!(matches!(msg, ClaudeStreamMessage::CommandLifecycle(_)));
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert!(events.is_empty());
+
+    let completed = r#"{"type":"command_lifecycle","command_uuid":"834cf8df-d293-4a0f-ba7e-3cbebb1ce4c0","state":"completed","uuid":"47dee63c-0a98-4e9a-96a5-1bef41e5e56a","session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38"}"#;
+    let msg_c = parse_ndjson_line(completed).expect("should parse command_lifecycle completed");
+    assert!(matches!(msg_c, ClaudeStreamMessage::CommandLifecycle(_)));
+    let events_c = map_claude_message(&msg_c, &session_ref, &mut tracker);
+    assert!(events_c.is_empty());
+}
+
+#[test]
+fn test_real_claude_cli_user_replayed_message() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let replay_line = r#"{"type":"user","message":{"role":"user","content":"say pong"},"session_id":"59c58387-8441-42b2-bb66-ed47de2fe87d","parent_tool_use_id":null,"uuid":"834cf8df-d293-4a0f-ba7e-3cbebb1ce4c0","timestamp":"2026-10-27T17:32:01.053Z","isReplay":true,"origin":{"kind":"human"}}"#;
+    let msg = parse_ndjson_line(replay_line).expect("should parse replayed user message");
+    match &msg {
+        ClaudeStreamMessage::User(user) => {
+            assert_eq!(user.is_replay, Some(true));
+            assert_eq!(
+                user.uuid.as_deref(),
+                Some("834cf8df-d293-4a0f-ba7e-3cbebb1ce4c0")
+            );
+            let inner = user.message.as_ref().expect("inner message expected");
+            assert_eq!(inner.role.as_deref(), Some("user"));
+            assert_eq!(inner.text(), Some("say pong"));
+            assert!(inner.blocks().is_empty());
+        }
+        other => panic!("Expected User message, got: {other:?}"),
+    }
+
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert!(
+        events.is_empty(),
+        "Replayed user message should not emit tool completion"
+    );
+}
+
+#[test]
+fn test_real_claude_cli_assistant_with_thinking_blocks() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let assistant_line = r#"{"type":"assistant","message":{"id":"msg_think_01","type":"message","role":"assistant","model":"claude-3-7-sonnet","content":[{"type":"thinking","thinking":"Analyzing the code structure...","signature":"sig_123"},{"type":"text","text":"Here is the verified solution"}],"stop_reason":"end_turn","usage":{"input_tokens":500,"output_tokens":150}},"parent_tool_use_id":null,"session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38","uuid":"ast-1"}"#;
+    let msg = parse_ndjson_line(assistant_line).expect("should parse assistant with thinking");
+    match &msg {
+        ClaudeStreamMessage::Assistant(ast) => {
+            assert_eq!(ast.message.content.len(), 2);
+            assert_eq!(
+                ast.message.content[0],
+                ContentBlock::Thinking {
+                    thinking: "Analyzing the code structure...".to_string(),
+                    signature: Some("sig_123".to_string()),
+                }
+            );
+            assert_eq!(
+                ast.message.content[1],
+                ContentBlock::Text {
+                    text: "Here is the verified solution".to_string(),
+                }
+            );
+        }
+        other => panic!("Expected Assistant, got: {other:?}"),
+    }
+
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0],
+        RuntimeEventKind::UsageUpdated {
+            prompt_tokens: Some(500),
+            completion_tokens: Some(150),
+            total_tokens: Some(650),
+        }
+    );
+}
+
+#[test]
+fn test_real_claude_cli_stream_event_lifecycle() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    // 1. message_start
+    let msg_start = r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","model":"gemini-3.8-flash-n","content":[],"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0}}},"session_id":"s1","uuid":"u1"}"#;
+    let parsed1 = parse_ndjson_line(msg_start).expect("message_start");
+    assert!(matches!(
+        parsed1,
+        ClaudeStreamMessage::StreamEvent(StreamEventWrapper {
+            event: StreamEventPayload::MessageStart { .. },
+            ..
+        })
+    ));
+    assert!(map_claude_message(&parsed1, &session_ref, &mut tracker).is_empty());
+
+    // 2. content_block_start
+    let block_start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},"session_id":"s1","uuid":"u2"}"#;
+    let parsed2 = parse_ndjson_line(block_start).expect("content_block_start");
+    assert!(matches!(
+        parsed2,
+        ClaudeStreamMessage::StreamEvent(StreamEventWrapper {
+            event: StreamEventPayload::ContentBlockStart { index: 0, .. },
+            ..
+        })
+    ));
+    assert!(map_claude_message(&parsed2, &session_ref, &mut tracker).is_empty());
+
+    // 3. content_block_delta with text_delta
+    let delta_text = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello Streaming"}},"session_id":"s1","uuid":"u3"}"#;
+    let parsed3 = parse_ndjson_line(delta_text).expect("content_block_delta text");
+    let ev3 = map_claude_message(&parsed3, &session_ref, &mut tracker);
+    assert_eq!(ev3.len(), 1);
+    assert_eq!(
+        ev3[0],
+        RuntimeEventKind::OutputDelta {
+            text: "Hello Streaming".to_string()
+        }
+    );
+
+    // 4. content_block_delta with thinking_delta
+    let delta_think = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"thinking deeper"}},"session_id":"s1","uuid":"u4"}"#;
+    let parsed4 = parse_ndjson_line(delta_think).expect("content_block_delta thinking");
+    assert!(map_claude_message(&parsed4, &session_ref, &mut tracker).is_empty());
+
+    // 5. content_block_stop
+    let block_stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0},"session_id":"s1","uuid":"u5"}"#;
+    let parsed5 = parse_ndjson_line(block_stop).expect("content_block_stop");
+    assert!(matches!(
+        parsed5,
+        ClaudeStreamMessage::StreamEvent(StreamEventWrapper {
+            event: StreamEventPayload::ContentBlockStop { index: 0 },
+            ..
+        })
+    ));
+    assert!(map_claude_message(&parsed5, &session_ref, &mut tracker).is_empty());
+
+    // 6. message_delta
+    let msg_delta = r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":50}},"session_id":"s1","uuid":"u6"}"#;
+    let parsed6 = parse_ndjson_line(msg_delta).expect("message_delta");
+    assert!(matches!(
+        parsed6,
+        ClaudeStreamMessage::StreamEvent(StreamEventWrapper {
+            event: StreamEventPayload::MessageDelta { .. },
+            ..
+        })
+    ));
+    assert!(map_claude_message(&parsed6, &session_ref, &mut tracker).is_empty());
+
+    // 7. message_stop
+    let msg_stop =
+        r#"{"type":"stream_event","event":{"type":"message_stop"},"session_id":"s1","uuid":"u7"}"#;
+    let parsed7 = parse_ndjson_line(msg_stop).expect("message_stop");
+    assert!(matches!(
+        parsed7,
+        ClaudeStreamMessage::StreamEvent(StreamEventWrapper {
+            event: StreamEventPayload::MessageStop,
+            ..
+        })
+    ));
+    assert!(map_claude_message(&parsed7, &session_ref, &mut tracker).is_empty());
+}
+
+#[test]
+fn test_real_claude_cli_result_summary_fixture() {
+    let session_ref = test_session_ref();
+    let mut tracker = SubagentCorrelationTracker::new();
+
+    let real_result = r#"{"duration_api_ms":3317,"stop_reason":"end_turn","session_id":"36e14e67-b467-48ff-b7ed-5a6dc8d71f38","total_cost_usd":0.01898,"usage":{"input_tokens":3356,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":88},"modelUsage":{"ag/gemini-3.8-flash-high":{"inputTokens":3356,"outputTokens":88,"costUSD":0.01898}},"permission_denials":[],"terminal_reason":"completed","is_error":false,"num_turns":1,"subtype":"success","result":"pong","type":"result","duration_ms":3375,"uuid":"1cda25c1-88e2-487a-ab43-b867b2de9e3e"}"#;
+    let msg = parse_ndjson_line(real_result).expect("should parse real result fixture");
+    match &msg {
+        ClaudeStreamMessage::Result(res) => {
+            assert_eq!(res.subtype.as_deref(), Some("success"));
+            assert_eq!(res.result.as_deref(), Some("pong"));
+            assert_eq!(res.duration_ms, Some(3375));
+            assert_eq!(res.duration_api_ms, Some(3317));
+            assert_eq!(res.num_turns, Some(1));
+            assert!(!res.is_error);
+            assert_eq!(res.total_cost_usd, Some(0.01898));
+            let usage = res.usage.as_ref().expect("usage expected");
+            assert_eq!(usage.input_tokens, Some(3356));
+            assert_eq!(usage.output_tokens, Some(88));
+        }
+        other => panic!("Expected Result, got: {other:?}"),
+    }
+
+    let events = map_claude_message(&msg, &session_ref, &mut tracker);
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0],
+        RuntimeEventKind::Diagnostic {
+            level: "info".to_string(),
+            message: "Turn completed: pong".into(),
+        }
+    );
+    assert_eq!(
+        events[1],
+        RuntimeEventKind::UsageUpdated {
+            prompt_tokens: Some(3356),
+            completion_tokens: Some(88),
+            total_tokens: Some(3444),
+        }
+    );
 }

@@ -288,7 +288,9 @@ impl AgentRuntime for ClaudeCodeRuntime {
 
         let state = Arc::new(RwLock::new(RuntimeLifecycleState::Running));
         let subagents = Arc::new(RwLock::new(SubagentCorrelationTracker::new()));
-        let approval_authority = Arc::new(ApprovalAuthority::new());
+        let approval_authority = Arc::new(ApprovalAuthority::with_session_id(
+            raw_session_uuid.to_string(),
+        ));
 
         let hub_clone = Arc::clone(&hub);
         let state_clone = Arc::clone(&state);
@@ -307,6 +309,7 @@ impl AgentRuntime for ClaudeCodeRuntime {
                         // If control request for tool approval, register with approval authority
                         if let ClaudeStreamMessage::ControlRequest(ref req) = msg
                             && let Some(approval_id) = approval_clone.register_request(req)
+                            && !approval_clone.is_watchdog_active(&approval_id)
                         {
                             let process_wd = Arc::clone(&process_clone);
                             let hub_wd = Arc::clone(&hub_clone);
@@ -512,22 +515,30 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 approved,
                 reason,
             } => {
-                let control_response = active
+                let (control_response, token) = active
                     .approval_authority
-                    .resolve_approval_by_id(approval_id, approved, reason)
+                    .prepare_resolution(approval_id, approved, reason)
                     .map_err(|e| RuntimeError::send_failed(session.session_id, e.to_string()))?;
 
-                let json = serde_json::to_string(&control_response).map_err(|e| {
-                    RuntimeError::send_failed(
-                        session.session_id,
-                        format!("Serialization of control response failed: {e}"),
-                    )
-                })?;
-                active
-                    .process
-                    .write_stdin_line(&json)
-                    .await
-                    .map_err(|e| RuntimeError::send_failed(session.session_id, e.to_string()))?;
+                let json = match serde_json::to_string(&control_response) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        active.approval_authority.fail_delivery(token);
+                        return Err(RuntimeError::send_failed(
+                            session.session_id,
+                            format!("Serialization of control response failed: {e}"),
+                        ));
+                    }
+                };
+
+                if let Err(e) = active.process.write_stdin_line(&json).await {
+                    active.approval_authority.fail_delivery(token);
+                    return Err(RuntimeError::send_failed(session.session_id, e.to_string()));
+                }
+
+                if let Err(e) = active.approval_authority.confirm_delivery(token) {
+                    return Err(RuntimeError::send_failed(session.session_id, e.to_string()));
+                }
                 *active.state.write().await = RuntimeLifecycleState::Running;
             }
         }
@@ -561,6 +572,10 @@ impl AgentRuntime for ClaudeCodeRuntime {
                 "interrupt",
             ));
         }
+
+        // Cancel all pending approvals fail-closed upon interrupt so watchdogs
+        // are aborted and pending approvals cannot accidentally execute.
+        active.approval_authority.cancel_all_pending();
 
         let int_msg = ClaudeInterruptInput::new(uuid::Uuid::new_v4().to_string());
         let json = serde_json::to_string(&int_msg).map_err(|e| {
@@ -635,6 +650,9 @@ impl AgentRuntime for ClaudeCodeRuntime {
 
         let mut sessions = self.active_sessions.write().await;
         if let Some(active) = sessions.remove(&session.session_id) {
+            // Cancel all pending approvals and abort watchdog tasks immediately
+            active.approval_authority.cancel_all_pending();
+
             let mut st = active.state.write().await;
             if st.is_terminal() {
                 return Ok(());
@@ -642,7 +660,6 @@ impl AgentRuntime for ClaudeCodeRuntime {
             *st = RuntimeLifecycleState::Stopped;
             drop(st);
 
-            active.approval_authority.cancel_all_pending();
             let _ = active.process.terminate().await;
             let _ = active.hub.emit(RuntimeEventKind::Stopped).await;
 

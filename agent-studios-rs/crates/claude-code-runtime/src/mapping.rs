@@ -100,6 +100,7 @@ pub fn map_claude_message(
                     )),
                 }]
             }
+            SystemMessage::UiInvalidate(_) | SystemMessage::ThinkingTokens(_) => Vec::new(),
             SystemMessage::Other(_) => Vec::new(),
         },
 
@@ -108,12 +109,17 @@ pub fn map_claude_message(
                 StreamDelta::TextDelta { text } => {
                     vec![RuntimeEventKind::OutputDelta { text: text.clone() }]
                 }
-                StreamDelta::ThinkingDelta { .. } | StreamDelta::InputJsonDelta { .. } => {
-                    Vec::new()
-                }
+                StreamDelta::ThinkingDelta { .. }
+                | StreamDelta::SignatureDelta { .. }
+                | StreamDelta::InputJsonDelta { .. } => Vec::new(),
                 StreamDelta::Other(_) => Vec::new(),
             },
-            StreamEventPayload::Other(_) => Vec::new(),
+            StreamEventPayload::MessageStart { .. }
+            | StreamEventPayload::ContentBlockStart { .. }
+            | StreamEventPayload::ContentBlockStop { .. }
+            | StreamEventPayload::MessageDelta { .. }
+            | StreamEventPayload::MessageStop
+            | StreamEventPayload::Other(_) => Vec::new(),
         },
 
         ClaudeStreamMessage::Assistant(assistant) => {
@@ -129,6 +135,7 @@ pub fn map_claude_message(
                     }
                     ContentBlock::Text { .. }
                     | ContentBlock::Thinking { .. }
+                    | ContentBlock::RedactedThinking { .. }
                     | ContentBlock::Unknown(_) => {}
                 }
             }
@@ -153,7 +160,7 @@ pub fn map_claude_message(
         ClaudeStreamMessage::User(user) => {
             let mut events = Vec::new();
             if let Some(ref inner) = user.message {
-                for block in &inner.content {
+                for block in inner.blocks() {
                     match block {
                         ToolResultBlock::ToolResult {
                             tool_use_id,
@@ -172,7 +179,7 @@ pub fn map_claude_message(
                                 success,
                             });
                         }
-                        ToolResultBlock::Unknown(_) => {}
+                        ToolResultBlock::Text { .. } | ToolResultBlock::Unknown(_) => {}
                     }
                 }
             }
@@ -259,6 +266,8 @@ pub fn map_claude_message(
 
         ClaudeStreamMessage::ControlResponse(_) => Vec::new(),
 
-        ClaudeStreamMessage::PromptSuggestion(_) | ClaudeStreamMessage::Unknown(_) => Vec::new(),
+        ClaudeStreamMessage::PromptSuggestion(_)
+        | ClaudeStreamMessage::CommandLifecycle(_)
+        | ClaudeStreamMessage::Unknown(_) => Vec::new(),
     }
 }

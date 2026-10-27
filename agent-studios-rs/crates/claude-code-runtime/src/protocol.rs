@@ -23,6 +23,8 @@ pub enum ClaudeStreamMessage {
     ControlResponse(ControlResponse),
     #[serde(rename = "prompt_suggestion")]
     PromptSuggestion(serde_json::Value),
+    #[serde(rename = "command_lifecycle")]
+    CommandLifecycle(serde_json::Value),
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
@@ -41,8 +43,34 @@ pub enum SystemMessage {
     ApiRetry(ApiRetryMessage),
     #[serde(rename = "status")]
     Status(SystemStatusMessage),
+    #[serde(rename = "ui_invalidate")]
+    UiInvalidate(UiInvalidateMessage),
+    #[serde(rename = "thinking_tokens")]
+    ThinkingTokens(ThinkingTokensMessage),
     #[serde(untagged)]
     Other(serde_json::Value),
+}
+
+/// Emitted by Claude Code when UI needs re-rendering.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct UiInvalidateMessage {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub event: Option<String>,
+}
+
+/// Emitted during reasoning with estimated thinking token count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ThinkingTokensMessage {
+    #[serde(default)]
+    pub uuid: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default, alias = "estimatedTokens")]
+    pub estimated_tokens: Option<u64>,
 }
 
 /// Process startup event emitted once when Claude Code initializes.
@@ -68,6 +96,18 @@ pub struct SystemInitMessage {
     pub output_style: Option<String>,
     #[serde(default)]
     pub fast_mode_state: Option<String>,
+    #[serde(default, alias = "permissionMode", alias = "permission_mode")]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub slash_commands: Option<Vec<String>>,
+    #[serde(default)]
+    pub agents: Option<Vec<String>>,
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub user_message_uuids: Option<Vec<String>>,
 }
 
 /// Emitted when a background task or subagent is spawned.
@@ -161,6 +201,10 @@ pub struct AssistantMessage {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub user_message_uuid: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub user_message_uuids: Option<Vec<String>>,
     pub message: AssistantMessageInner,
 }
 
@@ -192,6 +236,11 @@ pub enum ContentBlock {
         #[serde(default)]
         signature: Option<String>,
     },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        #[serde(default)]
+        data: Option<String>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -215,6 +264,40 @@ pub struct UserMessage {
     pub message: Option<UserMessageInner>,
     #[serde(default)]
     pub tool_use_result: Option<serde_json::Value>,
+    #[serde(default, alias = "isReplay")]
+    pub is_replay: Option<bool>,
+}
+
+/// Content payload for a user message, either raw text (replayed user input) or blocks (tool results).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UserMessageContent {
+    Text(String),
+    Blocks(Vec<ToolResultBlock>),
+}
+
+impl Default for UserMessageContent {
+    fn default() -> Self {
+        UserMessageContent::Blocks(Vec::new())
+    }
+}
+
+impl From<Vec<ToolResultBlock>> for UserMessageContent {
+    fn from(blocks: Vec<ToolResultBlock>) -> Self {
+        UserMessageContent::Blocks(blocks)
+    }
+}
+
+impl From<String> for UserMessageContent {
+    fn from(text: String) -> Self {
+        UserMessageContent::Text(text)
+    }
+}
+
+impl From<&str> for UserMessageContent {
+    fn from(text: &str) -> Self {
+        UserMessageContent::Text(text.to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -222,7 +305,37 @@ pub struct UserMessageInner {
     #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
-    pub content: Vec<ToolResultBlock>,
+    pub content: UserMessageContent,
+}
+
+impl UserMessageInner {
+    pub fn new_text(role: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: Some(role.into()),
+            content: UserMessageContent::Text(text.into()),
+        }
+    }
+
+    pub fn new_blocks(role: impl Into<String>, blocks: Vec<ToolResultBlock>) -> Self {
+        Self {
+            role: Some(role.into()),
+            content: UserMessageContent::Blocks(blocks),
+        }
+    }
+
+    pub fn blocks(&self) -> &[ToolResultBlock] {
+        match &self.content {
+            UserMessageContent::Blocks(blocks) => blocks.as_slice(),
+            UserMessageContent::Text(_) => &[],
+        }
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        match &self.content {
+            UserMessageContent::Text(text) => Some(text.as_str()),
+            UserMessageContent::Blocks(_) => None,
+        }
+    }
 }
 
 /// Tool execution result block inside a user message.
@@ -237,6 +350,8 @@ pub enum ToolResultBlock {
         #[serde(default)]
         is_error: Option<bool>,
     },
+    #[serde(rename = "text")]
+    Text { text: String },
     #[serde(untagged)]
     Unknown(serde_json::Value),
 }
@@ -258,8 +373,30 @@ pub struct StreamEventWrapper {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEventPayload {
+    #[serde(rename = "message_start")]
+    MessageStart {
+        #[serde(default)]
+        message: Option<serde_json::Value>,
+    },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        #[serde(default)]
+        content_block: Option<serde_json::Value>,
+    },
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: StreamDelta },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop { index: usize },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        #[serde(default)]
+        delta: Option<serde_json::Value>,
+        #[serde(default)]
+        usage: Option<ClaudeTokenUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
     #[serde(untagged)]
     Other(serde_json::Value),
 }
@@ -272,6 +409,8 @@ pub enum StreamDelta {
     TextDelta { text: String },
     #[serde(rename = "thinking_delta")]
     ThinkingDelta { thinking: String },
+    #[serde(rename = "signature_delta")]
+    SignatureDelta { signature: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta { partial_json: String },
     #[serde(untagged)]
@@ -290,10 +429,26 @@ pub struct ToolProgressMessage {
     pub tool_name: Option<String>,
     #[serde(default)]
     pub parent_tool_use_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_f64")]
     pub elapsed_time_seconds: Option<f64>,
     #[serde(default)]
     pub task_id: Option<String>,
+}
+
+/// Helper deserializer for optional floats resilient to `serde_json/arbitrary_precision`.
+pub(crate) fn deserialize_opt_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match val {
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64()),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<f64>().map(Some).map_err(serde::de::Error::custom)
+        }
+        Some(serde_json::Value::Null) | None => Ok(None),
+        _ => Ok(None),
+    }
 }
 
 /// Final summary emitted at the end of each execution turn.
@@ -319,7 +474,7 @@ pub struct ResultSummary {
     pub num_turns: Option<u32>,
     #[serde(default)]
     pub stop_reason: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_f64")]
     pub total_cost_usd: Option<f64>,
     #[serde(default)]
     pub usage: Option<ClaudeTokenUsage>,
@@ -329,6 +484,8 @@ pub struct ResultSummary {
     pub permission_denials: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub terminal_reason: Option<String>,
+    #[serde(default)]
+    pub subagent_stats: Option<serde_json::Value>,
 }
 
 /// Token usage accounting across turns or runs.
@@ -351,7 +508,7 @@ pub struct ClaudeModelCost {
     pub input_tokens: Option<u64>,
     #[serde(default, alias = "outputTokens")]
     pub output_tokens: Option<u64>,
-    #[serde(default, alias = "costUSD")]
+    #[serde(default, alias = "costUSD", deserialize_with = "deserialize_opt_f64")]
     pub cost_usd: Option<f64>,
 }
 

@@ -207,6 +207,7 @@ pub async fn spawn_claude_process(
         .arg("-p")
         .arg("--output-format=stream-json")
         .arg("--input-format=stream-json")
+        .arg("--verbose")
         .arg("--include-partial-messages")
         .arg("--forward-subagent-text")
         .arg("--include-hook-events")
