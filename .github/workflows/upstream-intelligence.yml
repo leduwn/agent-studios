@@ -1,0 +1,64 @@
+name: Upstream Intelligence & Compatibility Monitor
+
+on:
+  schedule:
+    # Run every Monday at 02:00 UTC
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    name: Check Upstream Releases & Security Drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Upstream Releases
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "### Upstream Intelligence Scan Results" > report.md
+          echo "Date: $(date -u)" >> report.md
+          echo "" >> report.md
+          echo "| Repository | Current Target | Latest Detected | Status |" >> report.md
+          echo "|---|---|---|---|" >> report.md
+
+          check_repo() {
+            local repo=$1
+            local target=$2
+            local latest=$(gh api repos/$repo/releases/latest --jq .tag_name 2>/dev/null || gh api repos/$repo/tags --jq '.[0].name' 2>/dev/null || echo "UNKNOWN")
+            local status="UP TO DATE"
+            if [ "$latest" != "$target" ] && [ "$latest" != "UNKNOWN" ]; then
+              status="**NEW RELEASE DETECTED**"
+            fi
+            echo "| \`$repo\` | \`$target\` | \`$latest\` | $status |" >> report.md
+          }
+
+          check_repo "openai/codex" "rust-v0.164.0"
+          check_repo "anomalyco/opencode" "v1.19.4"
+          check_repo "anthropics/claude-code" "v2.1.311"
+          check_repo "microsoft/vscode" "1.143.1"
+
+          cat report.md
+
+      - name: Create or Update Upstream Notice Issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('report.md', 'utf8');
+            if (report.includes('NEW RELEASE DETECTED')) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Upstream Intelligence Alert: New upstream versions detected',
+                body: report + '\n\n> Note: Automated notification only. Zero automatic merge or rebase is executed.',
+                labels: ['upstream-intelligence', 'automated-notice']
+              });
+            }

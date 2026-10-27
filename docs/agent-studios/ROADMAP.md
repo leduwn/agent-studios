@@ -25,8 +25,8 @@
 │ M08/8.1 │ Internal Multi-Agent Runtime Hardening │ [COMPLETED]         │
 │ M09     │ Worktree, Task & Artifact Orchestration│ [COMPLETED]         │
 │ M10/10.1│ External Runtime Contract Hardening    │ [COMPLETED]         │
-│ M11     │ OpenCode CLI Runtime Adapter           │ [PLANNED]           │
-│ M12     │ Claude Code CLI Runtime Adapter        │ [PLANNED]           │
+│ M11     │ OpenCode CLI Runtime Adapter           │ [COMPLETED]         │
+│ M12     │ Claude Code CLI Runtime Adapter        │ [COMPLETED]         │
 │ M13     │ Code-OSS Shell Integration Foundation   │ [PLANNED]           │
 │ M14     │ Agent Studios Built-in AI Extension    │ [PLANNED]           │
 │ M15     │ Unified Agent Mode / IDE Mode Workbench│ [PLANNED]           │
@@ -160,17 +160,22 @@
   - SR5-01: Untrusted event payload disclosure remediation in `EventBoundaryValidator::validate()` using stable, static `RuntimeEventKind::diagnostic_kind()` (`"output_delta"`, etc.) instead of formatting raw payload data; verified zero leak in Display, Debug, or reason string across confidential canaries; verified atomic boundary rejection without state mutation or sequence increment; verified authorized unredacted delivery for valid events.
 - 70-test contract verification suite (68 contract regression tests + 2 unit tests) passing with zero failures.
 
-### M11: OpenCode Runtime Adapter & OS Process Sandboxing [PLANNED]
+### M11: OpenCode Runtime Adapter & OS Process Sandboxing [COMPLETED]
 
-- Implement runtime adapter wrapping OpenCode CLI and server sessions.
-- Implement OS-level process sandboxing and containment (Windows Job Objects / AppContainer, Linux cgroups/namespaces).
-- Map OpenCode provider configurations to Agent Studios `ProviderCatalog` instances.
-- Translate OpenCode session steps into Control Plane `Task` and `Run` entities.
+- Implemented `agent-studios-opencode-runtime` crate wrapping OpenCode CLI and HTTP/SSE server sessions.
+- Implemented OS-level process sandboxing and containment (Windows Job Objects with strict fail-closed policy, `CREATE_SUSPENDED` -> `AssignProcessToJobObject` -> `IsProcessInJob` -> `NtResumeProcess`).
+- Strict provider model mapping (`map_model_ref_to_opencode`) enforcing catalog registration.
+- Bounded SSE stream parser (1 MiB cap, 64 KiB line limit) and strict session correlation.
+- Dedicated permission authority (`POST /session/:id/permission/:permission_id`).
+- 58 unit and integration tests passing with 0 failures; verified against real OpenCode CLI 1.19.0.
 
-### M12: Claude Code Runtime Adapter [PLANNED]
-- Implement runtime adapter wrapping Claude Code CLI.
-- Map Claude Code sub-agent loops and tool interactions into Control Plane events.
-- Enforce Agent Studios pre-execution tool budgets and approvals over Claude Code tool calls.
+### M12: Claude Code Runtime Adapter [COMPLETED]
+- Implemented runtime adapter crate `agent-studios-claude-code-runtime` wrapping Claude Code CLI.
+- Native headless execution via `--print --output-format=stream-json --input-format=stream-json`.
+- Mapped Claude Code native subagent loops (`--forward-subagent-text`, `parent_tool_use_id`) into Control Plane runtime events without synthetic ID hallucination.
+- Enforced Agent Studios pre-execution tool budgets (`--max-budget-usd`) and permission approval policies (`--permission-mode`, `--permission-prompts`).
+- Windows zero-window process containment via Win32 Job Objects.
+- Comprehensive test suites (29 tests passing), upstream intelligence assessment, and audit reports.
 
 ### M13: Code-OSS Integration Foundation [PLANNED]
 - Code-OSS source snapshot targeting Windows 11 x64 first.
