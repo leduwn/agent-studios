@@ -3,8 +3,11 @@
 //! Verifies prompt submission -> runtime dispatch -> streaming assistant/tool events
 //! -> task state transitions -> truthful execution mode reporting.
 
+use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
@@ -21,14 +24,103 @@ use agent_studios_external_runtime::{
 use agent_studios_protocol::event::ControlPlaneEvent;
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
+use agent_studios_workspace::WorkspaceOrchestrator;
 use async_trait::async_trait;
 use chrono::Utc;
 
+fn init_git_repo(path: &std::path::Path) -> String {
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to run git {:?}: {e}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run(&["init"]);
+    run(&["config", "user.name", "Agent Studios Test"]);
+    run(&["config", "user.email", "test@agent-studios.internal"]);
+    run(&["config", "commit.gpgsign", "false"]);
+
+    fs::write(path.join("file_in_main.txt"), "Initial main content\n").unwrap();
+    let nested = path.join("agent-studios-rs");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("README.md"), "Nested workspace\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "Initial commit"]);
+
+    run(&["rev-parse", "HEAD"])
+}
+
+struct SliceFixture {
+    _source_dir: tempfile::TempDir,
+    _orchestrator_dir: tempfile::TempDir,
+    client: EmbeddedClient,
+}
+
+impl SliceFixture {
+    async fn bootstrap(workspace_name: &str) -> Self {
+        let source_dir = tempdir().expect("source tempdir");
+        init_git_repo(source_dir.path());
+
+        let orchestrator_dir = tempdir().expect("orchestrator tempdir");
+        let wt_root = orchestrator_dir.path().join("worktrees");
+        let art_root = orchestrator_dir.path().join("artifacts");
+
+        let orchestrator = Arc::new(
+            WorkspaceOrchestrator::new(wt_root, art_root).expect("orchestrator initialization"),
+        );
+
+        let client = EmbeddedClient::bootstrap(workspace_name)
+            .await
+            .expect("bootstrap failed")
+            .with_orchestrator(orchestrator)
+            .with_working_dir(source_dir.path().join("agent-studios-rs"));
+
+        Self {
+            _source_dir: source_dir,
+            _orchestrator_dir: orchestrator_dir,
+            client,
+        }
+    }
+
+    async fn bootstrap_with_runtime(workspace_name: &str, runtime: Arc<dyn AgentRuntime>) -> Self {
+        let source_dir = tempdir().expect("source tempdir");
+        init_git_repo(source_dir.path());
+
+        let orchestrator_dir = tempdir().expect("orchestrator tempdir");
+        let wt_root = orchestrator_dir.path().join("worktrees");
+        let art_root = orchestrator_dir.path().join("artifacts");
+
+        let orchestrator = Arc::new(
+            WorkspaceOrchestrator::new(wt_root, art_root).expect("orchestrator initialization"),
+        );
+
+        let client = EmbeddedClient::bootstrap_with_runtime(workspace_name, runtime)
+            .await
+            .expect("bootstrap failed")
+            .with_orchestrator(orchestrator)
+            .with_working_dir(source_dir.path().join("agent-studios-rs"));
+
+        Self {
+            _source_dir: source_dir,
+            _orchestrator_dir: orchestrator_dir,
+            client,
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
-    let client = EmbeddedClient::bootstrap("runtime-slice-test")
-        .await
-        .expect("bootstrap embedded client failed");
+    let fixture = SliceFixture::bootstrap("runtime-slice-test").await;
+    let client = &fixture.client;
 
     let mut sub = client
         .subscribe_events(0)
@@ -98,9 +190,8 @@ async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
 
 #[tokio::test]
 async fn test_ui_event_translation_for_runtime_streaming() {
-    let client = EmbeddedClient::bootstrap("ui-translation-test")
-        .await
-        .expect("bootstrap failed");
+    let fixture = SliceFixture::bootstrap("ui-translation-test").await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
@@ -307,9 +398,8 @@ impl AgentRuntime for FailingMockRuntime {
 #[tokio::test]
 async fn test_runtime_failure_propagation_to_control_plane() {
     let mock_runtime = Arc::new(FailingMockRuntime::new());
-    let client = EmbeddedClient::bootstrap_with_runtime("failing-runtime-test", mock_runtime)
-        .await
-        .expect("bootstrap failed");
+    let fixture = SliceFixture::bootstrap_with_runtime("failing-runtime-test", mock_runtime).await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
@@ -370,9 +460,8 @@ async fn test_runtime_failure_propagation_to_control_plane() {
 
 #[tokio::test]
 async fn test_cancellation_stops_active_runtime_sessions() {
-    let client = EmbeddedClient::bootstrap("cancellation-test")
-        .await
-        .expect("bootstrap failed");
+    let fixture = SliceFixture::bootstrap("cancellation-test").await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
@@ -626,10 +715,10 @@ async fn test_concurrent_sessions_isolated_approval_routing() {
     let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
 
-    let client =
-        EmbeddedClient::bootstrap_with_runtime("concurrent-approval-routing-test", mock_runtime)
-            .await
-            .expect("bootstrap failed");
+    let fixture =
+        SliceFixture::bootstrap_with_runtime("concurrent-approval-routing-test", mock_runtime)
+            .await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
@@ -779,10 +868,10 @@ async fn test_approval_routing_session_terminated_fails_closed() {
     let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
 
-    let client =
-        EmbeddedClient::bootstrap_with_runtime("session-terminated-approval-test", mock_runtime)
-            .await
-            .expect("bootstrap failed");
+    let fixture =
+        SliceFixture::bootstrap_with_runtime("session-terminated-approval-test", mock_runtime)
+            .await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
@@ -837,9 +926,9 @@ async fn test_approval_routing_duplicate_response_fails_closed() {
     let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
 
-    let client = EmbeddedClient::bootstrap_with_runtime("duplicate-approval-test", mock_runtime)
-        .await
-        .expect("bootstrap failed");
+    let fixture =
+        SliceFixture::bootstrap_with_runtime("duplicate-approval-test", mock_runtime).await;
+    let client = &fixture.client;
 
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
 
