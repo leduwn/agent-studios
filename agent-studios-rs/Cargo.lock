@@ -119,6 +119,8 @@ name = "agent-studios-cli-client"
 version = "0.1.0"
 dependencies = [
  "agent-studios-control-plane",
+ "agent-studios-external-runtime",
+ "agent-studios-opencode-runtime",
  "agent-studios-orchestration",
  "agent-studios-protocol",
  "agent-studios-workspace",
@@ -364,7 +366,10 @@ name = "agent-studios-tui"
 version = "0.1.0"
 dependencies = [
  "agent-studios-cli-client",
+ "agent-studios-orchestration",
  "agent-studios-protocol",
+ "agent-studios-workspace",
+ "async-trait",
  "chrono",
  "crossterm",
  "ratatui",

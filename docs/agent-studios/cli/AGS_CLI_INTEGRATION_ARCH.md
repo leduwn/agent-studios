@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Backend & Runtime Integration Architecture
 
 > **Document**: `AGS_CLI_INTEGRATION_ARCH.md`  
-> **Status**: Canonical Backend & Runtime Integration Architecture Specification  
+> **Status**: Canonical Backend & Runtime Integration Architecture Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `agent-studios-cli-client` / IPC Transport / Event Subscription Pipeline / Dual Execution Modes  
-> **Precedence**: Aligned with `AGS_CLI_PRODUCT_VISION.md`, `MASTER_VISION.md`, and `PRODUCT_PRINCIPLES.md`.
+> **Precedence**: Aligned with `AGS_CLI_PRODUCT_VISION.md`, `MASTER_VISION.md`, and `PRODUCT_PRINCIPLES.md`.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -270,11 +276,11 @@ pub struct ClientSubscription {
 
 ## 4. Dual Execution Modes
 
-`ags` supports two distinct operational modes designed for maximum flexibility:
+`ags` specifies two distinct operational modes designed for maximum flexibility:
 
-### 4.1 Embedded Mode (In-Process Execution)
+### 4.1 Embedded Mode (In-Process Execution) `[IMPLEMENTED / VERIFIED]`
 
-When launched standalone (`ags [PROMPT]` without an existing daemon), `ags` boots an in-process Control Plane directly within the CLI process memory space.
+When launched standalone (`ags [PROMPT]` without an existing daemon), `ags` boots an in-process Control Plane directly within the CLI process memory space. Verified in `crates/control-plane/tests/integration_tests.rs` and `crates/cli/src/doctor.rs`.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -312,7 +318,9 @@ When launched standalone (`ags [PROMPT]` without an existing daemon), `ags` boot
 5. **Supervisor Bootstrap**: Instantiates the multi-agent team (Coordinator, Coder, Tester, Reviewer) and runtime session factory.
 6. **Zero External Dependencies**: Embedded mode operates without requiring any background daemons, system services, or open network ports.
 
-### 4.2 Connected Mode (Daemon / Code-OSS IDE Inter-Process Bridge)
+### 4.2 Connected Mode (Daemon / Code-OSS IDE Inter-Process Bridge) `[PLANNED] (M13+)`
+
+*Status Reality Check*: `ConnectedClient` and the IPC wire protocol are designed below as the architectural target for Milestone M13+. In the current M12 release, `ConnectedClient` is not yet implemented in `crates/cli-client/src/`, and `ags` operates exclusively via `EmbeddedClient`.
 
 When an existing Agent Studios daemon or Code-OSS IDE session is active for the repository, `ags` connects to it over local IPC.
 
@@ -579,7 +587,9 @@ let captured = agent_studios_workspace::capture_changes(
 
 The resulting patch bytes are registered into the `ArtifactStore` as a content-addressed artifact and emitted via `ControlPlaneEvent::WorktreeChangeCaptured`.
 
-### 6.3 Patch Reconciliation Flow
+### 6.3 Patch Reconciliation Flow `[IMPLEMENTED / VERIFIED] (Workspace Crate) / [PLANNED] (CLI TUI M13+)`
+
+*Status Reality Check*: Underlying git patch creation and application are verified in `crates/workspace/tests/`. However, inside `crates/cli-client/src/embedded.rs`, `reconcile_patch` returns a stub `ReconciliationOutcome::Applied`. Full end-to-end interactive reconciliation within the TUI event loop is scheduled for Milestone M13+.
 
 ```
 1. Coordinator / User triggers patch review: `/diff` or `/patch apply`
@@ -593,9 +603,9 @@ The resulting patch bytes are registered into the `ArtifactStore` as a content-a
 
 ---
 
-## 7. Zero-Interruption Session Mobility (`Ctrl+O`)
+## 7. Zero-Interruption Session Mobility (`Ctrl+O`) `[PLANNED] (M13+)`
 
-Per Product Principle #18, a developer can seamlessly transfer an active session from `ags` to the desktop IDE.
+Per Product Principle #18, a developer can seamlessly transfer an active session from `ags` to the desktop IDE. Scheduled for Milestone M13+ alongside `ConnectedClient` IPC.
 
 ### 7.1 Handoff Mechanics
 
@@ -625,3 +635,19 @@ Developer presses [Ctrl+O] in ags TUI
 | **Worktree** | Containment inside `.agent-studios/wt` | `WorkspaceOrchestrator::validate_worktree_path` rejects any path traversal escaping root. |
 | **Approval** | Fail-closed security gate | Watchdog timeout (60s) or disconnect automatically evaluates to `ApprovalDecision::Deny`. |
 | **Terminal TUI** | Pristine terminal restoration | Panic hook and `Drop` implementation guarantee alternate screen exit and cursor show. |
+
+---
+
+## 9. Integration Architecture Feature-to-Test Evidence Matrix
+
+| Integration Subsystem | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **`AgentStudiosClient` Trait** | `[IMPLEMENTED / VERIFIED]` | `crates/cli-client/src/client.rs` | `crates/cli-client/tests/` |
+| **`EmbeddedClient` (In-Process)**| `[IMPLEMENTED / VERIFIED]` | `crates/cli-client/src/embedded.rs` | `crates/control-plane/tests/integration_tests.rs` |
+| **`ConnectedClient` (IPC Wire)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Length-Delimited Framing (`AGS1`)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Event Pipeline & Projection** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs` |
+| **Worktree Change Capture** | `[IMPLEMENTED / VERIFIED]` | `crates/workspace/src/capture.rs` | `crates/workspace/tests/` |
+| **Patch Reconciliation (Engine)**| `[IMPLEMENTED / VERIFIED]` | `crates/workspace/src/reconciliation.rs`| `crates/workspace/tests/` |
+| **Patch Reconciliation (TUI)** | `[PLANNED]` (M13+) | `crates/cli-client/src/embedded.rs` | Scheduled M13+ |
+| **IDE Session Mobility (`Ctrl+O`)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |

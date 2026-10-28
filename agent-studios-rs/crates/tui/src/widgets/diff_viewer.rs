@@ -23,7 +23,10 @@ impl<'a> Widget for DiffViewerWidget<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.border_subtle_style())
-            .title(Span::styled(format!(" Diff: {} ", self.title), Style::default().fg(self.theme.accent_sky)))
+            .title(Span::styled(
+                format!(" Diff: {} ", self.title),
+                Style::default().fg(self.theme.accent_sky),
+            ))
             .style(self.theme.card_style());
 
         let inner = block.inner(area);
@@ -42,24 +45,22 @@ impl<'a> Widget for DiffViewerWidget<'a> {
             );
 
             let content_span = if raw_line.starts_with('+') && !raw_line.starts_with("+++") {
-                Span::styled(
-                    raw_line,
-                    Style::default().fg(self.theme.accent_emerald),
-                )
+                Span::styled(raw_line, Style::default().fg(self.theme.accent_emerald))
             } else if raw_line.starts_with('-') && !raw_line.starts_with("---") {
-                Span::styled(
-                    raw_line,
-                    Style::default().fg(self.theme.accent_crimson),
-                )
+                Span::styled(raw_line, Style::default().fg(self.theme.accent_crimson))
             } else if raw_line.starts_with("@@") {
                 Span::styled(
                     raw_line,
-                    Style::default().fg(self.theme.accent_sky).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(self.theme.accent_sky)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else if raw_line.starts_with("diff ") || raw_line.starts_with("index ") {
                 Span::styled(
                     raw_line,
-                    Style::default().fg(self.theme.text_muted).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(self.theme.text_muted)
+                        .add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::styled(raw_line, Style::default().fg(self.theme.text_secondary))

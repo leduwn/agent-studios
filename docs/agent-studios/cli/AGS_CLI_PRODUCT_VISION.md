@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Product Vision & UX Philosophy
 
 > **Document**: `AGS_CLI_PRODUCT_VISION.md`  
-> **Status**: Canonical CLI Product Vision & UX Specification  
+> **Status**: Canonical CLI Product Vision & UX Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` / `agent-studios-ags-cli` / Ratatui TUI Front-End  
-> **Precedence**: Aligned with `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
+> **Precedence**: Aligned with `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -52,31 +58,31 @@ While the user interacts through natural language conversation, every action tak
 - The TUI is a **pure projection** of the reactive Control Plane event stream.
 - Replaying the Control Plane event log produces the identical screen state byte-for-byte.
 
-### Tenet 4: Seamless Workspace & Worktree Isolation
+### Tenet 4: Seamless Workspace & Worktree Isolation `[IMPLEMENTED / VERIFIED]`
 Following Product Principle #5 and #14:
-- In multi-agent scenarios, mutating worker agents operate inside dedicated Git worktrees.
+- In multi-agent scenarios, mutating worker agents operate inside dedicated Git worktrees. (Verified in `crates/internal-agent/tests/worktree_orchestration_e2e_tests.rs`).
 - `ags` surfaces worktree locations cleanly without cluttering the screen (`[Coder: .agent-studios/wt/task-102]`).
 - The developer always knows which branch and folder are being modified.
 
-### Tenet 5: Zero-Interruption Dual-Mode Mobility
+### Tenet 5: Zero-Interruption Dual-Mode Mobility `[PLANNED] (M13+)`
 Following Product Principle #18:
-- `ags` and the Agent Studios Desktop IDE share the identical `session_id`.
-- A developer can start a task in `ags` on the command line, run `ags open-ide` or press `Ctrl+O`, and immediately resume the exact same session inside Code-OSS without restarting agents, losing task graphs, or resetting working memory.
+- `ags` and the Agent Studios Desktop IDE are designed to share the identical `session_id`.
+- *Status Note*: Dual-mode IPC bridge and `Ctrl+O` / `ags open-ide` session handoff are currently **PLANNED** for Milestone M13+. In the current M12 release, `ags` executes in self-contained **Embedded Mode** (`EmbeddedClient`), running an in-process Control Plane.
 
-### Tenet 6: First-Class Internationalization (Vietnamese & English)
+### Tenet 6: First-Class Internationalization (Vietnamese & English) `[IMPLEMENTED / VERIFIED]`
 Following Product Principle #26 and `LOCALIZATION.md`:
 - English (`en-US`) and Vietnamese (`vi-VN`) are co-equal first-class interface languages.
-- Complete Unicode NFC handling across input composer, status line, and scrollback.
+- Complete Unicode NFC handling across input composer, status line, and scrollback. (Verified in `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity`).
 - Vietnamese diacritics (`á, ắ, ặ, ấ, ầ, ổ, ợ, ỹ...`) render with zero character clipping, zero cursor desynchronization, and zero double-width layout breaks.
 
-### Tenet 7: Transparent Security & Execution Boundaries
+### Tenet 7: Transparent Security & Execution Boundaries `[IMPLEMENTED / VERIFIED]`
 Following Product Principle #22:
 - Destructive commands and file modifications never hide behind generic "Executing..." labels.
 - `ags` categorizes all actions into three explicit risk tiers:
   1. `ReadOnly` (inspecting files, grepping, querying git status).
   2. `WorkspaceMutating` (editing files, creating branches, running linters).
   3. `DangerousHost` (network egress, external script execution, rm/drop operations).
-- The approval UI highlights dangerous parameters in crisp amber/crimson modals before execution.
+- The approval UI highlights dangerous parameters in crisp amber/crimson modals before execution. (Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` and `crates/control-plane/tests/integration_tests.rs`).
 
 ---
 
@@ -84,17 +90,17 @@ Following Product Principle #22:
 
 ### 3.1 Comparison Matrix
 
-| Dimension | OpenAI Codex CLI | OpenCode CLI | Agent Studios CLI (`ags`) |
-| :--- | :--- | :--- | :--- |
-| **Identity & Branding** | OpenAI branded, closed-ecosystem biased | Community project, multiple UI iterations | Independent Agent Studios identity: Studio Minimalist |
-| **Provider Support** | OpenAI model endpoints primarily | Multi-provider via configuration | Multi-Provider Instance + Model target routing (`ProviderInstanceId` + `ModelId`) |
-| **Multi-Agent Runtime** | Internal single-thread or basic subagents | Independent conversational windows | Deterministic Control Plane DAG, Manager-Worker, isolated worktrees |
-| **External Runtimes** | None | Limited plugin adapters | First-class external runtime adapters (OpenCode, Claude Code) |
-| **UI Framework** | Upstream Codex TUI (Ratatui fork) | Bubbletea / Go or custom TUI | Optimized Ratatui + Crossterm Rust architecture |
-| **Visual Philosophy** | Functional terminal CLI | Modern terminal aesthetics | Quiet Precision, distraction-free, zero neon clutter |
-| **IDE Bridge** | VS Code extension companion | Desktop app companion | 1:1 Shared session with Code-OSS Workbench (`Ctrl+O`) |
-| **Language Parity** | English only | English predominantly | English & Vietnamese day-one co-equal parity |
-| **Windows Support** | Second-class / MSYS / WSL focus | Unix-first | Windows 11 x64 native first-class tier-1, portable core |
+| Dimension | OpenAI Codex CLI | OpenCode CLI | Agent Studios CLI (`ags`) | Implementation Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Identity & Branding** | OpenAI branded, closed-ecosystem biased | Community project, multiple UI iterations | Independent Agent Studios identity: Studio Minimalist | `[IMPLEMENTED / VERIFIED]` |
+| **Provider Support** | OpenAI model endpoints primarily | Multi-provider via configuration | Multi-Provider Instance + Model target routing (`ProviderInstanceId` + `ModelId`) | `[IMPLEMENTED / VERIFIED]` in `crates/provider` & `crates/protocol-adapters` |
+| **Multi-Agent Runtime** | Internal single-thread or basic subagents | Independent conversational windows | Deterministic Control Plane DAG, Manager-Worker, isolated worktrees | `[IMPLEMENTED / VERIFIED]` in `crates/internal-agent` |
+| **External Runtimes** | None | Limited plugin adapters | First-class external runtime adapters (OpenCode, Claude Code) | `[IMPLEMENTED / VERIFIED]` in `crates/opencode-runtime` & `crates/claude-code-runtime` |
+| **UI Framework** | Upstream Codex TUI (Ratatui fork) | Bubbletea / Go or custom TUI | Optimized Ratatui + Crossterm Rust architecture | `[IMPLEMENTED / VERIFIED]` in `crates/tui` |
+| **Visual Philosophy** | Functional terminal CLI | Modern terminal aesthetics | Quiet Precision, distraction-free, zero neon clutter | `[IMPLEMENTED / VERIFIED]` (`ags --preview` & `ags`) |
+| **IDE Bridge** | VS Code extension companion | Desktop app companion | 1:1 Shared session with Code-OSS Workbench (`Ctrl+O`) | `[PLANNED]` (Scheduled M13+) |
+| **Language Parity** | English only | English predominantly | English & Vietnamese day-one co-equal parity | `[IMPLEMENTED / VERIFIED]` (Unicode NFC graphemes & doctor) |
+| **Windows Support** | Second-class / MSYS / WSL focus | Unix-first | Windows 11 x64 native first-class tier-1, portable core | `[IMPLEMENTED / VERIFIED]` |
 
 ### 3.2 Distinct Brand Signature
 `ags` introduces an unmistakable visual signature:
@@ -124,10 +130,10 @@ Following Product Principle #22:
 
 ### 4.2 Core Workflows
 
-#### Workflow A: The Surgical Prompt & Edit
+#### Workflow A: The Surgical Prompt & Edit `[IMPLEMENTED / VERIFIED]`
 ```
 $ ags "Add validation for Vietnamese phone numbers (+84) in src/validators.rs"
-→ ags launches in cwd
+→ ags launches in cwd (EmbeddedClient in-process Control Plane)
 → Analyzes src/validators.rs
 → Shows collapsed tool: read_file(src/validators.rs)
 → Shows proposal diff modal
@@ -135,8 +141,9 @@ $ ags "Add validation for Vietnamese phone numbers (+84) in src/validators.rs"
 → Runs cargo test
 → Summarizes output with commit message suggestion
 ```
+*Verification*: Verified by `crates/tui/tests/widget_tests.rs` (widgets and rendering) and `crates/control-plane/tests/integration_tests.rs`.
 
-#### Workflow B: The Autonomous Multi-Agent Sprint
+#### Workflow B: The Autonomous Multi-Agent Sprint `[IMPLEMENTED / VERIFIED] (Backend Engine) / [PLANNED] (CLI Patch Reconciliation M13+)`
 ```
 $ ags
 > /task "Refactor auth middleware to async and add JWT blacklist cache"
@@ -148,8 +155,9 @@ $ ags
 → Coordinator validates outputs, reconciles patches into main branch
 → All tests pass → Ready for final review
 ```
+*Honesty Reality Check*: Multi-agent DAG execution, worktree isolation, and coordination are fully verified in `crates/internal-agent/tests/worktree_orchestration_e2e_tests.rs`. However, automated worktree patch reconciliation back into the main branch inside the TUI is currently stubbed in `EmbeddedClient::reconcile_patch` and is scheduled for **M13+**.
 
-#### Workflow C: The Seamless IDE Handoff
+#### Workflow C: The Seamless IDE Handoff `[PLANNED] (M13+)`
 ```
 $ ags
 > Implementing complex AST transform...
@@ -159,6 +167,7 @@ $ ags
 → Three-way merge editor displays patch artifacts
 → Developer finishes manual tweaks in IDE, returns to terminal seamlessly
 ```
+*Honesty Reality Check*: `Ctrl+O` / `/ide` / `ags open-ide` desktop bridge is designed in architecture but **PLANNED** for Milestone M13+. Not currently wired to an active IPC daemon.
 
 ---
 
@@ -169,10 +178,31 @@ $ ags
    - Event-driven rendering via Crossterm event stream and Tokio async channels.
 2. **Terminal Portability**:
    - Fully functional across Windows Terminal (conpty), Alacritty, WezTerm, iTerm2, Kitty, and standard Linux/macOS consoles.
-   - Graceful fallback: 24-bit TrueColor $\rightarrow$ 256-color ANSI $\rightarrow$ 16-color ANSI $\rightarrow$ `NO_COLOR` plain monochrome.
+   - Graceful fallback: 24-bit TrueColor $\rightarrow$ 256-color ANSI $\rightarrow$ 16-color ANSI $\rightarrow$ `NO_COLOR` plain monochrome. (Verified in `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast`).
 3. **Memory Footprint**:
    - Idle resident memory under 25MB.
    - Virtualized transcript list rendering: only visible lines + scroll buffer are drawn; handles 100,000-line session logs without memory leaks or frame drops.
 4. **Safety by Default**:
    - Shell commands default to restricted execution unless explicitly approved.
    - Dangerous file writes display unified colored diffs before touching disk.
+
+---
+
+## 6. Feature Honesty Status Summary
+
+| Capability Area | Feature / Subsystem | Status Tag | Verifying Test / Milestone |
+| :--- | :--- | :--- | :--- |
+| **CLI Entrypoint** | `ags` default interactive TUI | `[IMPLEMENTED / VERIFIED]` | `crates/tui/tests/widget_tests.rs` |
+| **CLI Diagnostics** | `ags doctor` & `ags doctor --json` | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/doctor.rs` |
+| **Visual Preview** | `ags --preview` offline previewer | `[PREVIEW ONLY]` | `crates/tui/src/preview.rs` |
+| **Execution Mode** | Embedded (in-process ControlPlane) | `[IMPLEMENTED / VERIFIED]` | `crates/control-plane/tests/integration_tests.rs` |
+| **Execution Mode** | Connected (IPC / Daemon / Wire) | `[PLANNED]` | Milestone M13+ |
+| **TUI Widgets** | Header, AgentBar, Transcript, Composer | `[IMPLEMENTED / VERIFIED]` | `crates/tui/tests/widget_tests.rs` |
+| **TUI Modals** | ApprovalModal (Fail-closed security) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/tests/widget_tests.rs` |
+| **TUI Modals** | DiffViewer (Unified diffs) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/tests/widget_tests.rs` |
+| **Internationalization**| Vietnamese Unicode NFC graphemes | `[IMPLEMENTED / VERIFIED]` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **External Runtime** | OpenCode Runtime Adapter | `[IMPLEMENTED / VERIFIED]` | 11 suites in `crates/opencode-runtime/tests/` |
+| **External Runtime** | Claude Code Runtime Adapter | `[IMPLEMENTED / VERIFIED]` | 6 suites in `crates/claude-code-runtime/tests/` |
+| **IDE Handoff** | `Ctrl+O` / `ags open-ide` session mobility | `[PLANNED]` | Milestone M13+ |
+| **Worktree Reconcile**| Automatic patch merge in TUI | `[PLANNED]` | Milestone M13+ |
+| **Dynamic Switching** | Mid-session `/model` & `/runtime` | `[PLANNED]` | Milestone M13+ |

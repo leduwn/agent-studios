@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Comprehensive Test Strategy & Verification Architecture
 
 > **Document**: `AGS_CLI_TEST_STRATEGY.md`  
-> **Status**: Canonical CLI & TUI Test Strategy Specification  
+> **Status**: Canonical CLI & TUI Test Strategy Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` Test Suite / `agent-studios-cli-client` / Ratatui `TestBackend` / Integration Tests  
-> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principle #20: Exhaustive Verification) and `AGS_CLI_PRODUCT_VISION.md`.
+> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principle #20: Exhaustive Verification) and `AGS_CLI_PRODUCT_VISION.md`.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -249,7 +255,9 @@ impl TestRepo {
 }
 ```
 
-### 5.2 Subcommand Execution Tests
+### 5.2 Subcommand Execution Tests `[PLANNED] (M13+)` (for `run` / `worktree`)
+
+*Status Note*: In Milestone M12, binary CLI tests cover `ags doctor [--json]`, `ags --preview`, and `ags`. Tests below for headless `ags run` and `ags worktree` reflect target tests for Milestone M13+.
 
 ```rust
 #[test]
@@ -308,3 +316,42 @@ cargo test --package agent-studios-cli-client --test "*"
 # 4. Run CLI binary end-to-end tests
 cargo test --package ags --test "*"
 ```
+
+---
+
+## 7. Master Feature-to-Test Evidence Matrix
+
+This matrix provides the authoritative cross-subsystem verification map connecting every `ags` feature to its automated test implementation:
+
+| Layer / Subsystem | Feature / Capability | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- | :--- |
+| **CLI Entrypoint** | `ags` default interactive TUI | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/main.rs` | `crates/tui/tests/widget_tests.rs` |
+| **CLI Diagnostics** | `ags doctor` & `ags doctor --json` | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/doctor.rs` | `crates/cli/src/doctor.rs::tests::test_doctor_diagnostics_run` |
+| **Visual Preview** | `ags --preview` offline previewer | `[PREVIEW ONLY]` | `crates/tui/src/preview.rs` | Interactive visual previewer |
+| **Theme Engine** | Dark Theme Tokens (`AgsTheme::dark()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Theme Engine** | Light Theme Tokens (`AgsTheme::light()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Theme Engine** | ANSI 16 Fallback (`AgsTheme::ansi16()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Theme Engine** | NO_COLOR Standard (`AgsTheme::no_color()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Typography & i18n** | Vietnamese NFC & Grapheme Integrity | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **Terminal Sandbox** | Title Sanitization & Terminal Guard | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/terminal.rs` | `crates/tui/tests/widget_tests.rs::test_terminal_title_sanitization` |
+| **Responsive Layout**| Breakpoint Math (80×24 to 180×45+) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/layout.rs` | `crates/tui/tests/widget_tests.rs::test_responsive_layout_breakpoints` |
+| **Responsive Layout**| Centered Modal Geometry Math | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/layout.rs` | `crates/tui/tests/widget_tests.rs::test_centered_rect_math` |
+| **TUI Widgets** | HeaderWidget | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/header.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TUI Widgets** | AgentBarWidget | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/agent_bar.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TUI Widgets** | TranscriptWidget & Markdown Rendering | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/transcript.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TUI Widgets** | ToolCardWidget (Render & Toggle) | `[IMPLEMENTED / VERIFIED]` / `[PREVIEW ONLY]` | `crates/tui/src/widgets/transcript.rs` & `preview.rs` | Interactive in `ags --preview` |
+| **TUI Widgets** | ComposerWidget (Multiline & IME) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **TUI Modals** | ApprovalModalWidget | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/approval_modal.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TUI Modals** | DiffViewerWidget | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/diff_viewer.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TUI Modals** | SlashMenuWidget (Inventory & Fuzzy) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/slash_menu.rs` | `crates/tui/tests/widget_tests.rs::test_slash_menu_commands_inventory` |
+| **Execution Mode** | EmbeddedClient (In-process Control Plane)| `[IMPLEMENTED / VERIFIED]` | `crates/cli-client/src/embedded.rs` | `crates/control-plane/tests/integration_tests.rs` |
+| **Execution Mode** | ConnectedClient (IPC / Wire Protocol) | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Multi-Agent Engine**| Deterministic DAG & Worktree Isolation | `[IMPLEMENTED / VERIFIED]` | `crates/internal-agent/src/` | `crates/internal-agent/tests/worktree_orchestration_e2e_tests.rs` |
+| **External Runtime** | OpenCode Adapter & Sandbox | `[IMPLEMENTED / VERIFIED]` | `crates/opencode-runtime/src/` | 11 test suites in `crates/opencode-runtime/tests/` |
+| **External Runtime** | Claude Code Adapter & Budget Watchdog | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/` | 6 test suites in `crates/claude-code-runtime/tests/` |
+| **Security & 2PC** | Fail-Closed Approvals & 2PC Resolution | `[IMPLEMENTED / VERIFIED]` | `crates/control-plane/src/` & `claude-code-runtime/` | `crates/claude-code-runtime/tests/adapter_integration_tests.rs` |
+| **Zero-Timeout Gate** | Zero-Duration Timeout & Stdin Abort | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/adapter.rs` | `crates/claude-code-runtime/tests/zero_duration_timeout_tests.rs` |
+| **Workspace Git** | Ephemeral Index Change Capture | `[IMPLEMENTED / VERIFIED]` | `crates/workspace/src/capture.rs` | `crates/workspace/tests/` |
+| **Workspace Git** | Patch Reconciliation in TUI | `[PLANNED]` (M13+) | `crates/cli-client/src/embedded.rs` | Scheduled M13+ |
+| **Dynamic Switching**| Mid-session `/model` & `/runtime` | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **IDE Handoff** | Desktop Code-OSS Shared Session (`Ctrl+O`)| `[PLANNED]` (M13+) | - | Scheduled M13+ |

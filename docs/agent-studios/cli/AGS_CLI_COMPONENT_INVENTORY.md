@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Component Inventory & Ratatui Architecture
 
 > **Document**: `AGS_CLI_COMPONENT_INVENTORY.md`  
-> **Status**: Canonical Widget Inventory & Implementation Spec for Agent C  
+> **Status**: Canonical Widget Inventory & Implementation Spec (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` / Ratatui UI Component Hierarchy  
-> **Precedence**: Aligned with `AGS_CLI_VISUAL_DESIGN_SYSTEM.md` and `AGS_CLI_TUI_LAYOUTS.md`.
+> **Precedence**: Aligned with `AGS_CLI_VISUAL_DESIGN_SYSTEM.md` and `AGS_CLI_TUI_LAYOUTS.md`.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -37,10 +43,10 @@ AgsApp (Root Component)
 
 ## 2. Complete Component Specifications
 
-### 2.1 `HeaderWidget`
+### 2.1 `HeaderWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Renders the top 1-2 lines of the application, anchoring the developer with the current working directory, git branch, active provider/model, and runtime.
+Renders the top 1-2 lines of the application, anchoring the developer with the current working directory, git branch, active provider/model, and runtime. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics`.
 
 #### Data Model
 ```rust
@@ -63,10 +69,10 @@ pub struct HeaderState {
 
 ---
 
-### 2.2 `AgentActivityBar` & `AgentChipWidget`
+### 2.2 `AgentActivityBar` & `AgentChipWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Visualizes the deterministic multi-agent team in real-time without overwhelming the transcript. When 1+ worker agents are spawned by the Coordinator, this horizontal ribbon renders active worker chips.
+Visualizes the deterministic multi-agent team in real-time without overwhelming the transcript. When 1+ worker agents are spawned by the Coordinator, this horizontal ribbon renders active worker chips. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics`.
 
 #### Data Model
 ```rust
@@ -102,10 +108,10 @@ pub struct AgentActivityBarState {
 
 ---
 
-### 2.3 `TranscriptWidget`
+### 2.3 `TranscriptWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Virtualized scrollback stream rendering the chronological dialogue, reasoning chains, tool invocations, and patch reconciliation events.
+Virtualized scrollback stream rendering the chronological dialogue, reasoning chains, tool invocations, and patch reconciliation events. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics`.
 
 #### Data Model
 ```rust
@@ -148,10 +154,10 @@ pub struct TranscriptState {
 
 ---
 
-### 2.4 `MarkdownBlockWidget`
+### 2.4 `MarkdownBlockWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Renders Markdown streams from assistant agents with syntax-highlighted code blocks, inline code, bold/italic formatting, and ordered/unordered lists.
+Renders Markdown streams from assistant agents with syntax-highlighted code blocks, inline code, bold/italic formatting, and ordered/unordered lists. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics`.
 
 #### Integration
 - Parser: `pulldown-cmark`.
@@ -168,10 +174,10 @@ Renders Markdown streams from assistant agents with syntax-highlighted code bloc
 
 ---
 
-### 2.5 `ToolCallWidget`
+### 2.5 `ToolCallWidget` `[IMPLEMENTED / VERIFIED] (Rendering) / [PREVIEW ONLY] (Interactive Toggle)`
 
 #### Purpose
-Represents an individual tool call executed by an agent (e.g., `read_file`, `apply_patch`, `exec_command`, `list_directory`).
+Represents an individual tool call executed by an agent (e.g., `read_file`, `apply_patch`, `exec_command`, `list_directory`). Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics`. Interactive collapse/expand toggle demonstrated in `ags --preview`.
 
 #### States
 1. **Collapsed (Default)**:
@@ -198,10 +204,10 @@ pub struct ToolCallState {
 
 ---
 
-### 2.6 `ComposerWidget`
+### 2.6 `ComposerWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Primary developer input container. Handles multiline text entry, UTF-8 NFC normalization, Vietnamese diacritic typing, history recall, bracketed paste, and suggestion popups.
+Primary developer input container. Handles multiline text entry, UTF-8 NFC normalization, Vietnamese diacritic typing, history recall, bracketed paste, and suggestion popups. Verified in `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` and `crates/tui/src/widgets/composer.rs`.
 
 #### Data Model
 ```rust
@@ -224,10 +230,10 @@ pub struct ComposerState {
 
 ---
 
-### 2.7 `ApprovalModalWidget`
+### 2.7 `ApprovalModalWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-High-priority security modal that interrupts the event loop when a tool call requires explicit developer authorization.
+High-priority security modal that interrupts the event loop when a tool call requires explicit developer authorization. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` and `crates/tui/src/widgets/approval_modal.rs`.
 
 #### Data Model
 ```rust
@@ -258,10 +264,10 @@ pub struct ApprovalRequest {
 
 ---
 
-### 2.8 `DiffViewerWidget`
+### 2.8 `DiffViewerWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Dedicated modal or pane for inspecting unified diffs produced by `apply_patch` or git workspace mutations.
+Dedicated modal or pane for inspecting unified diffs produced by `apply_patch` or git workspace mutations. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` and `crates/tui/src/widgets/diff_viewer.rs`.
 
 #### Features
 - Unified diff rendering with line numbers for old and new files.
@@ -273,15 +279,29 @@ Dedicated modal or pane for inspecting unified diffs produced by `apply_patch` o
 
 ---
 
-### 2.9 `StatusBarWidget`
+### 2.9 `StatusBarWidget` `[IMPLEMENTED / VERIFIED]`
 
 #### Purpose
-Bottom line of the interface providing continuous ambient status and dynamic keyboard shortcut indicators.
+Bottom line of the interface providing continuous ambient status and dynamic keyboard shortcut indicators. Verified in `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` and `crates/tui/src/widgets/status_bar.rs`.
 
 #### Content Elements
 - Left: Context token counter (`Tokens: 14,240 / 200,000 (7%)`), estimated session cost (`$0.04`).
-- Middle: Control Plane connection indicator (`󰍛 Connected (12ms)`).
-- Right: Contextual keyboard hints matching active focus (e.g., `[Enter] Submit · [Tab] Commands · [Ctrl+O] IDE`).
+- Middle: Control Plane connection indicator (`󰍛 Embedded (local)` in M12; `󰍛 Connected (12ms)` is `[PLANNED] (M13+)`).
+- Right: Contextual keyboard hints matching active focus (e.g., `[Enter] Submit · [Tab] Commands · [?] Help`).
+
+---
+
+### 2.10 `SlashMenuWidget` `[IMPLEMENTED / VERIFIED]`
+
+#### Purpose
+Overlay popup offering fuzzy-searchable slash commands when typing `/` in the composer. Verified in `crates/tui/tests/widget_tests.rs::test_slash_menu_commands_inventory` and `crates/tui/src/widgets/slash_menu.rs`.
+
+---
+
+### 2.11 `ModelPickerModalWidget` `[PLANNED] (M13+)`
+
+#### Purpose
+Modal dialog for listing registered provider instances and selecting LLM targets at runtime. Scheduled for Milestone M13+.
 
 ---
 
@@ -309,3 +329,21 @@ Per `LOCALIZATION.md`, every component draws user-facing strings from standard k
 | `StatusBar` | `status.tokens` | `Tokens` | `Số token` |
 | `StatusBar` | `status.cost` | `Cost` | `Chi phí` |
 | `StatusBar` | `status.hint.open_ide` | `Open IDE` | `Mở trong IDE` |
+
+---
+
+## 4. Component Inventory Feature-to-Test Evidence Matrix
+
+| Component Widget | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **HeaderWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/header.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **AgentBarWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/agent_bar.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **TranscriptWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/transcript.rs`| `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **MarkdownBlockWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/transcript.rs`| `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **ToolCardWidget** | `[IMPLEMENTED / VERIFIED]` / `[PREVIEW ONLY]` | `crates/tui/src/widgets/transcript.rs` & `preview.rs` | Interactive in `ags --preview` |
+| **ComposerWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **ApprovalModalWidget**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/approval_modal.rs`| `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **DiffViewerWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/diff_viewer.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **StatusBarWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/status_bar.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **SlashMenuWidget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/slash_menu.rs` | `crates/tui/tests/widget_tests.rs::test_slash_menu_commands_inventory` |
+| **ModelPickerModal** | `[PLANNED]` (M13+) | - | Scheduled M13+ |

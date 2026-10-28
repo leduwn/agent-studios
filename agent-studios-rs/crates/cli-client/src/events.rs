@@ -3,7 +3,9 @@
 use agent_studios_protocol::agent::AgentState;
 use agent_studios_protocol::approval::ApprovalState;
 use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
-use agent_studios_protocol::id::{AgentId, ApprovalId, ReconciliationId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::id::{
+    AgentId, ApprovalId, ReconciliationId, StudioId, TaskId, WorktreeId,
+};
 use agent_studios_protocol::reconciliation::ReconciliationState;
 use agent_studios_protocol::task::TaskState;
 use agent_studios_protocol::worktree::WorktreeState;
@@ -74,7 +76,10 @@ pub fn translate_control_plane_event(env: &EventEnvelope) -> Option<UiEvent> {
         }),
         ControlPlaneEvent::AgentRegistered { agent } => Some(UiEvent::AgentUpdated {
             agent_id: agent.id,
-            role: agent.role.clone().unwrap_or_else(|| format!("{:?}", agent.kind)),
+            role: agent
+                .role
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", agent.kind)),
             state: AgentState::Registered,
         }),
         ControlPlaneEvent::AgentStateChanged {
@@ -92,9 +97,7 @@ pub fn translate_control_plane_event(env: &EventEnvelope) -> Option<UiEvent> {
             state: task.state,
         }),
         ControlPlaneEvent::TaskStateChanged {
-            task_id,
-            new_state,
-            ..
+            task_id, new_state, ..
         } => Some(UiEvent::TaskUpdated {
             task_id: *task_id,
             title: String::new(),
@@ -131,6 +134,28 @@ pub fn translate_control_plane_event(env: &EventEnvelope) -> Option<UiEvent> {
         } => Some(UiEvent::ReconciliationUpdated {
             reconciliation_id: *reconciliation_id,
             state: *new_state,
+        }),
+        ControlPlaneEvent::AssistantMessageChunk {
+            content,
+            is_thought,
+            ..
+        } => Some(UiEvent::AssistantChunk {
+            content: content.clone(),
+            is_thought: *is_thought,
+        }),
+        ControlPlaneEvent::ToolStarted { tool_name, .. } => Some(UiEvent::ToolProgress {
+            tool_name: tool_name.clone(),
+            status: "running".to_string(),
+        }),
+        ControlPlaneEvent::ToolCompleted { tool_name, .. } => Some(UiEvent::ToolProgress {
+            tool_name: tool_name.clone(),
+            status: "completed".to_string(),
+        }),
+        ControlPlaneEvent::ToolFailed {
+            tool_name, error, ..
+        } => Some(UiEvent::ToolProgress {
+            tool_name: tool_name.clone(),
+            status: format!("failed: {error}"),
         }),
         ControlPlaneEvent::CancellationRequested { reason, .. } => Some(UiEvent::Notification {
             level: NotificationLevel::Warning,

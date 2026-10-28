@@ -29,25 +29,73 @@ impl<'a> Widget for HeaderWidget<'a> {
             return;
         }
 
-        let dirty_span = if self.is_dirty {
-            Span::styled(" *dirty", Style::default().fg(self.theme.accent_amber).add_modifier(Modifier::BOLD))
+        let project_display = if self.project_name.trim().is_empty() {
+            "Unknown project"
         } else {
-            Span::styled(" clean", Style::default().fg(self.theme.accent_emerald))
+            self.project_name
+        };
+
+        let branch_display = if self.branch_name.trim().is_empty() {
+            "Unknown branch"
+        } else {
+            self.branch_name
+        };
+
+        let model_display = if self.model_name.trim().is_empty() {
+            "No model configured"
+        } else {
+            self.model_name
+        };
+
+        let mode_display = if self.execution_mode.trim().is_empty() {
+            "Embedded"
+        } else {
+            self.execution_mode
+        };
+
+        let dirty_span = if self.is_dirty {
+            Span::styled(
+                " *dirty",
+                Style::default()
+                    .fg(self.theme.accent_amber)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(" Clean", Style::default().fg(self.theme.accent_emerald))
         };
 
         let title_spans = vec![
-            Span::styled(" AGENT STUDIOS ", Style::default().bg(self.theme.accent_emerald).fg(self.theme.text_inverse).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " AGENT STUDIOS ",
+                Style::default()
+                    .bg(self.theme.accent_emerald)
+                    .fg(self.theme.text_inverse)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
-            Span::styled(self.project_name, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                project_display,
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" (", Style::default().fg(self.theme.text_muted)),
-            Span::styled(self.branch_name, Style::default().fg(self.theme.accent_sky)),
+            Span::styled(branch_display, Style::default().fg(self.theme.accent_sky)),
             dirty_span,
             Span::styled(")", Style::default().fg(self.theme.text_muted)),
         ];
 
         let badges_spans = vec![
-            Span::styled(format!(" [{}] ", self.model_name), Style::default().fg(self.theme.accent_purple)),
-            Span::styled(format!(" {} ", self.execution_mode), Style::default().bg(self.theme.bg_surface).fg(self.theme.text_secondary)),
+            Span::styled(
+                format!(" [{}] ", model_display),
+                Style::default().fg(self.theme.accent_purple),
+            ),
+            Span::styled(
+                format!(" {} ", mode_display),
+                Style::default()
+                    .bg(self.theme.bg_surface)
+                    .fg(self.theme.text_secondary),
+            ),
         ];
 
         if self.compact {

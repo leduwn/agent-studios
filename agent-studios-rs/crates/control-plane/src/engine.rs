@@ -741,7 +741,13 @@ impl ControlPlaneState {
                 }
             }
 
-            ControlPlaneEvent::ToolStarted {
+            ControlPlaneEvent::AssistantMessageChunk {
+                agent_id,
+                task_id,
+                run_id,
+                ..
+            }
+            | ControlPlaneEvent::ToolStarted {
                 agent_id,
                 task_id,
                 run_id,
@@ -3391,6 +3397,26 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             thread_id: thread_id.into(),
             parent_agent_id,
             parent_thread_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_assistant_chunk(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        content: impl Into<String>,
+        is_thought: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::AssistantMessageChunk {
+            agent_id,
+            task_id,
+            run_id,
+            content: content.into(),
+            is_thought,
         };
         self.commit_transaction(studio_id, vec![event])?;
         Ok(())

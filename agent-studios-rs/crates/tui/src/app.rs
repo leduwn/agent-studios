@@ -3,17 +3,17 @@
 //! Drives the live TUI dispatching between terminal keyboard inputs,
 //! asynchronous client UI events, and rendering frames.
 
-use std::sync::Arc;
-use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
+use std::sync::Arc;
+use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 use agent_studios_cli_client::client::{
     AgentStudiosClient, ClientApprovalDecision, GoalSubmissionOptions,
 };
-use agent_studios_cli_client::events::{translate_control_plane_event, UiEvent};
+use agent_studios_cli_client::events::{UiEvent, translate_control_plane_event};
 
 use crate::layout::MainLayout;
 use crate::terminal::TerminalGuard;
@@ -24,7 +24,7 @@ use crate::widgets::{
     composer::ComposerWidget,
     diff_viewer::DiffViewerWidget,
     header::HeaderWidget,
-    slash_menu::{SlashMenuWidget, AVAILABLE_COMMANDS},
+    slash_menu::{AVAILABLE_COMMANDS, SlashMenuWidget},
     status_bar::StatusBarWidget,
     transcript::{TranscriptItem, TranscriptWidget},
 };
@@ -42,6 +42,78 @@ pub struct AgsApp {
     slash_menu_index: usize,
     scroll_offset: usize,
     should_quit: bool,
+    pub project_name: String,
+    pub branch_name: String,
+    pub is_dirty: bool,
+    pub model_name: String,
+    pub execution_mode: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+fn detect_workspace_info() -> (String, String, bool) {
+    let project_name = detect_project_name();
+    let (branch_name, is_dirty) = detect_git_status();
+    (project_name, branch_name, is_dirty)
+}
+
+fn detect_project_name() -> String {
+    // Try git rev-parse --show-toplevel
+    let git_top = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                std::path::Path::new(&s)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+            }
+        });
+
+    if let Some(name) = git_top {
+        return name;
+    }
+
+    // Fallback to current working directory
+    if let Some(name) = std::env::current_dir()
+        .ok()
+        .and_then(|c| c.file_name().map(|n| n.to_string_lossy().to_string()))
+    {
+        return name;
+    }
+
+    "Unknown project".to_string()
+}
+
+fn detect_git_status() -> (String, bool) {
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() { Some(s) } else { None }
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "Unknown branch".to_string());
+
+    let is_dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|out| out.status.success() && !out.stdout.is_empty())
+        .unwrap_or(false);
+
+    (branch, is_dirty)
 }
 
 impl AgsApp {
@@ -77,6 +149,9 @@ impl AgsApp {
             },
         ];
 
+        let (project_name, branch_name, is_dirty) = detect_workspace_info();
+        let execution_mode = client.execution_mode().to_string();
+
         Self {
             client,
             theme: AgsTheme::dark(),
@@ -90,6 +165,53 @@ impl AgsApp {
             slash_menu_index: 0,
             scroll_offset: 0,
             should_quit: false,
+            project_name,
+            branch_name,
+            is_dirty,
+            model_name: "Not configured".to_string(),
+            execution_mode,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+        }
+    }
+
+    pub fn transcript(&self) -> &[TranscriptItem] {
+        &self.transcript
+    }
+
+    pub fn pending_approval(&self) -> Option<&PendingApproval> {
+        self.pending_approval.as_ref()
+    }
+
+    pub fn set_pending_approval(&mut self, approval: Option<PendingApproval>) {
+        self.pending_approval = approval;
+    }
+
+    pub fn set_workspace_info(&mut self, project: String, branch: String, is_dirty: bool) {
+        self.project_name = project;
+        self.branch_name = branch;
+        self.is_dirty = is_dirty;
+    }
+
+    pub fn set_model_name(&mut self, model: String) {
+        self.model_name = model;
+    }
+
+    pub fn update_usage(&mut self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
+        self.input_tokens = input_tokens;
+        self.output_tokens = output_tokens;
+        self.cost_usd = cost_usd;
+    }
+
+    /// Refresh workspace metadata from client
+    pub async fn refresh_workspace_info(&mut self) {
+        if let Ok(info) = self.client.get_workspace_info().await {
+            self.project_name = info.project_name;
+            self.branch_name = info
+                .branch_name
+                .unwrap_or_else(|| "Unknown branch".to_string());
+            self.is_dirty = info.is_dirty;
         }
     }
 
@@ -97,6 +219,9 @@ impl AgsApp {
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (mut terminal, _guard) = TerminalGuard::enter()?;
         let _ = crate::terminal::set_terminal_title("AGS — Agent Studios");
+
+        // Query authoritative workspace information from client
+        self.refresh_workspace_info().await;
 
         // Subscribe to client event stream
         let mut sub = self.client.subscribe_events(0).await?;
@@ -122,10 +247,11 @@ impl AgsApp {
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {
                     // Poll terminal input
                     if event::poll(Duration::from_millis(0))? {
-                        if let Event::Key(key) = event::read()? {
-                            if key.kind == KeyEventKind::Press {
+                        match event::read()? {
+                            Event::Key(key) if key.kind == KeyEventKind::Press => {
                                 self.handle_key(key).await?;
                             }
+                            _ => {}
                         }
                     }
                 }
@@ -135,7 +261,24 @@ impl AgsApp {
         Ok(())
     }
 
-    fn handle_ui_event(&mut self, event: UiEvent) {
+    pub fn set_input_text(&mut self, text: String) {
+        self.cursor_grapheme_index = text.chars().count();
+        self.input_text = text;
+    }
+
+    pub fn input_text(&self) -> &str {
+        &self.input_text
+    }
+
+    pub fn agents(&self) -> &[AgentItem] {
+        &self.agents
+    }
+
+    pub fn agents_mut(&mut self) -> &mut [AgentItem] {
+        &mut self.agents
+    }
+
+    pub fn handle_ui_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::StudioInitialized { studio_id } => {
                 self.transcript.push(TranscriptItem::SystemNotice {
@@ -146,7 +289,8 @@ impl AgsApp {
             UiEvent::AgentUpdated { role, state, .. } => {
                 if let Some(agent) = self.agents.iter_mut().find(|a| a.role == role) {
                     agent.state_label = format!("{state:?}");
-                    agent.is_active = format!("{state:?}").contains("Running") || format!("{state:?}").contains("Busy");
+                    agent.is_active = format!("{state:?}").contains("Running")
+                        || format!("{state:?}").contains("Busy");
                 }
             }
             UiEvent::TaskUpdated { title, state, .. } => {
@@ -177,15 +321,21 @@ impl AgsApp {
                     message: format!("Security approval resolved: {state:?}"),
                 });
             }
-            UiEvent::AssistantChunk { content, is_thought } => {
+            UiEvent::AssistantChunk {
+                content,
+                is_thought,
+            } => {
                 if is_thought {
-                    self.transcript.push(TranscriptItem::AssistantThought(content));
+                    self.transcript
+                        .push(TranscriptItem::AssistantThought(content));
                 } else {
-                    self.transcript.push(TranscriptItem::AssistantMessage(content));
+                    self.transcript
+                        .push(TranscriptItem::AssistantMessage(content));
                 }
             }
             UiEvent::ToolProgress { tool_name, status } => {
-                self.transcript.push(TranscriptItem::ToolInvocation { tool_name, status });
+                self.transcript
+                    .push(TranscriptItem::ToolInvocation { tool_name, status });
             }
             UiEvent::Notification { level, message } => {
                 self.transcript.push(TranscriptItem::SystemNotice {
@@ -197,32 +347,36 @@ impl AgsApp {
         }
     }
 
-    async fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn handle_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Pending approval modal interception
         if let Some(appr) = &self.pending_approval {
-            match key.code {
-                KeyCode::Char('a') => {
-                    let _ = self.client.resolve_approval(
-                        appr.approval_id,
-                        ClientApprovalDecision::Allow,
-                    ).await;
-                    self.pending_approval = None;
+            let decision = match key.code {
+                KeyCode::Char('a') => Some(ClientApprovalDecision::Allow),
+                KeyCode::Char('s') => Some(ClientApprovalDecision::AllowForSession),
+                KeyCode::Char('d') | KeyCode::Esc => Some(ClientApprovalDecision::Deny),
+                _ => None,
+            };
+
+            if let Some(decision) = decision {
+                match self
+                    .client
+                    .resolve_approval(appr.approval_id, decision)
+                    .await
+                {
+                    Ok(()) => {
+                        self.pending_approval = None;
+                    }
+                    Err(e) => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Error".to_string(),
+                            message: format!("Action failed: {e}"),
+                        });
+                        // Modal stays open so developer knows authorization was not delivered
+                    }
                 }
-                KeyCode::Char('s') => {
-                    let _ = self.client.resolve_approval(
-                        appr.approval_id,
-                        ClientApprovalDecision::AllowForSession,
-                    ).await;
-                    self.pending_approval = None;
-                }
-                KeyCode::Char('d') | KeyCode::Esc => {
-                    let _ = self.client.resolve_approval(
-                        appr.approval_id,
-                        ClientApprovalDecision::Deny,
-                    ).await;
-                    self.pending_approval = None;
-                }
-                _ => {}
             }
             return Ok(());
         }
@@ -233,7 +387,16 @@ impl AgsApp {
                 self.input_text.clear();
                 self.cursor_grapheme_index = 0;
             } else {
-                let _ = self.client.cancel_active_run(Some("User requested cancel".to_string())).await;
+                if let Err(e) = self
+                    .client
+                    .cancel_active_run(Some("User requested cancel".to_string()))
+                    .await
+                {
+                    self.transcript.push(TranscriptItem::SystemNotice {
+                        level: "Error".to_string(),
+                        message: format!("Action failed: {e}"),
+                    });
+                }
             }
             return Ok(());
         }
@@ -280,8 +443,18 @@ impl AgsApp {
                     if prompt.starts_with('/') {
                         self.execute_slash_command(&prompt).await?;
                     } else {
-                        self.transcript.push(TranscriptItem::UserPrompt(prompt.clone()));
-                        let _ = self.client.submit_goal(&prompt, GoalSubmissionOptions::default()).await;
+                        self.transcript
+                            .push(TranscriptItem::UserPrompt(prompt.clone()));
+                        if let Err(e) = self
+                            .client
+                            .submit_goal(&prompt, GoalSubmissionOptions::default())
+                            .await
+                        {
+                            self.transcript.push(TranscriptItem::SystemNotice {
+                                level: "Error".to_string(),
+                                message: format!("Action failed: {e}"),
+                            });
+                        }
                     }
                     self.input_text.clear();
                     self.cursor_grapheme_index = 0;
@@ -294,7 +467,8 @@ impl AgsApp {
                 }
 
                 // Grapheme cluster insertion
-                let mut graphemes: Vec<String> = self.input_text.graphemes(true).map(String::from).collect();
+                let mut graphemes: Vec<String> =
+                    self.input_text.graphemes(true).map(String::from).collect();
                 if self.cursor_grapheme_index <= graphemes.len() {
                     graphemes.insert(self.cursor_grapheme_index, c.to_string());
                     self.cursor_grapheme_index += 1;
@@ -302,7 +476,8 @@ impl AgsApp {
                 }
             }
             KeyCode::Backspace => {
-                let mut graphemes: Vec<String> = self.input_text.graphemes(true).map(String::from).collect();
+                let mut graphemes: Vec<String> =
+                    self.input_text.graphemes(true).map(String::from).collect();
                 if self.cursor_grapheme_index > 0 && !graphemes.is_empty() {
                     self.cursor_grapheme_index -= 1;
                     graphemes.remove(self.cursor_grapheme_index);
@@ -335,39 +510,172 @@ impl AgsApp {
         Ok(())
     }
 
-    async fn execute_slash_command(&mut self, cmd: &str) -> Result<(), Box<dyn std::error::Error>> {
-        match cmd {
+    pub async fn execute_slash_command(
+        &mut self,
+        cmd: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
+        match root_cmd {
             "/clear" => {
                 self.transcript.clear();
             }
             "/cancel" => {
-                let _ = self.client.cancel_active_run(Some("User requested cancel".to_string())).await;
+                match self
+                    .client
+                    .cancel_active_run(Some("User requested cancel".to_string()))
+                    .await
+                {
+                    Ok(()) => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Info".to_string(),
+                            message: "Active agent execution cancelled.".to_string(),
+                        });
+                    }
+                    Err(e) => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Error".to_string(),
+                            message: format!("Action failed: {e}"),
+                        });
+                    }
+                }
             }
             "/quit" => {
                 self.should_quit = true;
             }
-            "/diff" => {
-                self.transcript.push(TranscriptItem::SystemNotice {
-                    level: "Info".to_string(),
-                    message: "Querying active worktree diff...".to_string(),
-                });
-            }
-            "/doctor" => {
-                self.transcript.push(TranscriptItem::SystemNotice {
-                    level: "Info".to_string(),
-                    message: "System doctor check: Rust OK, Git OK, Terminal OK".to_string(),
-                });
-            }
             "/help" => {
                 self.transcript.push(TranscriptItem::SystemNotice {
                     level: "Info".to_string(),
-                    message: "Available: /clear, /doctor, /diff, /worktree, /model, /cancel, /quit".to_string(),
+                    message: "--- Agent Studios CLI Help ---".to_string(),
+                });
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: "Keybindings: [Enter] Submit prompt/command | [/] Slash menu | [Ctrl+C] Clear/Cancel | [Esc] Exit | [PageUp/Down] Scroll".to_string(),
+                });
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: "Security Gate: [a] Allow once | [s] Allow for session | [d/Esc] Deny action".to_string(),
+                });
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: "Commands: /help, /clear, /doctor, /status, /cancel, /quit [Ready] | /diff, /model, /worktree, /reconcile [Planned]".to_string(),
+                });
+            }
+            "/status" => {
+                self.refresh_workspace_info().await;
+                let active_agents = self.agents.iter().filter(|a| a.is_active).count();
+                let gate_status = if self.pending_approval.is_some() {
+                    "1 pending authorization"
+                } else {
+                    "None"
+                };
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: format!(
+                        "Studio Session: ID={}, Mode={}, Project='{}', Branch='{}' ({}), Active Agents={}/{}, Gate={}",
+                        self.client.studio_id(),
+                        self.execution_mode,
+                        self.project_name,
+                        self.branch_name,
+                        if self.is_dirty { "dirty" } else { "clean" },
+                        active_agents,
+                        self.agents.len(),
+                        gate_status
+                    ),
+                });
+            }
+            "/doctor" => {
+                self.refresh_workspace_info().await;
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: "--- Running Agent Studios Diagnostics ---".to_string(),
+                });
+                match std::env::current_dir() {
+                    Ok(path) => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Info".to_string(),
+                            message: format!(
+                                "[OK] Workspace directory accessible: {}",
+                                path.display()
+                            ),
+                        });
+                    }
+                    Err(e) => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Error".to_string(),
+                            message: format!("[FAIL] Workspace directory error: {e}"),
+                        });
+                    }
+                }
+                match std::process::Command::new("git").arg("--version").output() {
+                    Ok(out) if out.status.success() => {
+                        let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Info".to_string(),
+                            message: format!(
+                                "[OK] Git installed: {ver} (branch: {}, {})",
+                                self.branch_name,
+                                if self.is_dirty { "dirty" } else { "clean" }
+                            ),
+                        });
+                    }
+                    _ => {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Warning".to_string(),
+                            message: "[WARN] Git binary not available or repository inaccessible"
+                                .to_string(),
+                        });
+                    }
+                }
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Info".to_string(),
+                    message: format!(
+                        "[OK] Client runtime: mode={}, studio_id={}",
+                        self.execution_mode,
+                        self.client.studio_id()
+                    ),
+                });
+                if self.model_name == "Not configured" || self.model_name.is_empty() {
+                    self.transcript.push(TranscriptItem::SystemNotice {
+                        level: "Warning".to_string(),
+                        message: "[WARN] LLM Model: Not configured (run with configured provider or pass model option)".to_string(),
+                    });
+                } else {
+                    self.transcript.push(TranscriptItem::SystemNotice {
+                        level: "Info".to_string(),
+                        message: format!("[OK] LLM Model: {}", self.model_name),
+                    });
+                }
+            }
+            "/diff" => {
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Warning".to_string(),
+                    message: "Command '/diff' is planned: Reviewing uncommitted changes in worktree requires external workspace reconciler integration (planned for future milestone).".to_string(),
+                });
+            }
+            "/model" => {
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Warning".to_string(),
+                    message: "Command '/model' is planned: Inspecting or switching active model requires runtime model manager integration (planned for future milestone).".to_string(),
+                });
+            }
+            "/worktree" => {
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Warning".to_string(),
+                    message: "Command '/worktree' is planned: Managing isolated Git worktrees requires external workspace reconciler integration (planned for future milestone).".to_string(),
+                });
+            }
+            "/reconcile" => {
+                self.transcript.push(TranscriptItem::SystemNotice {
+                    level: "Warning".to_string(),
+                    message: "Command '/reconcile' is planned: Reconciling or merging agent patches requires external workspace reconciler integration (planned for future milestone).".to_string(),
                 });
             }
             _ => {
                 self.transcript.push(TranscriptItem::SystemNotice {
                     level: "Warning".to_string(),
-                    message: format!("Unknown slash command: {cmd}"),
+                    message: format!(
+                        "Unknown slash command: {cmd}. Type /help for available commands."
+                    ),
                 });
             }
         }
@@ -380,11 +688,11 @@ impl AgsApp {
         // Header
         HeaderWidget {
             theme: &self.theme,
-            project_name: "agent-studios",
-            branch_name: "feat/ags-cli-tui-foundation",
-            is_dirty: false,
-            model_name: "Claude 3.7 Sonnet",
-            execution_mode: "Embedded",
+            project_name: &self.project_name,
+            branch_name: &self.branch_name,
+            is_dirty: self.is_dirty,
+            model_name: &self.model_name,
+            execution_mode: &self.execution_mode,
             compact: layout.breakpoint == crate::layout::TerminalBreakpoint::Compact,
         }
         .render(layout.header_area, buf);
@@ -405,15 +713,13 @@ impl AgsApp {
         .render(layout.content_area, buf);
 
         // Dual-pane side pane if UltraWide
-        if let Some(side_area) = layout.side_pane_area {
-            if let Some(diff) = &self.active_diff {
-                DiffViewerWidget {
-                    theme: &self.theme,
-                    diff_content: diff,
-                    title: "Active Worktree Patch",
-                }
-                .render(side_area, buf);
+        if let (Some(side_area), Some(diff)) = (layout.side_pane_area, &self.active_diff) {
+            DiffViewerWidget {
+                theme: &self.theme,
+                diff_content: diff,
+                title: "Active Worktree Patch",
             }
+            .render(side_area, buf);
         }
 
         // Composer
@@ -429,9 +735,9 @@ impl AgsApp {
         if self.show_slash_menu {
             let menu_area = Rect {
                 x: layout.composer_area.x + 2,
-                y: layout.composer_area.y.saturating_sub(10),
-                width: 60.min(layout.composer_area.width.saturating_sub(4)),
-                height: 10,
+                y: layout.composer_area.y.saturating_sub(12),
+                width: 72.min(layout.composer_area.width.saturating_sub(4)),
+                height: 12,
             };
             SlashMenuWidget {
                 theme: &self.theme,
@@ -451,12 +757,20 @@ impl AgsApp {
         }
 
         // Status bar
+        let status_text = if self.pending_approval.is_some() {
+            "AWAITING APPROVAL"
+        } else if self.agents.iter().any(|a| a.is_active) {
+            "RUNNING"
+        } else {
+            "IDLE"
+        };
+
         StatusBarWidget {
             theme: &self.theme,
-            input_tokens: 0,
-            output_tokens: 0,
-            cost_usd: 0.0,
-            status_text: "Ready",
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cost_usd: self.cost_usd,
+            status_text,
         }
         .render(layout.status_bar_area, buf);
     }

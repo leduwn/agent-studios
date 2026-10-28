@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Security, Approvals & Sandboxing Architecture
 
 > **Document**: `AGS_CLI_SECURITY_AND_APPROVALS.md`  
-> **Status**: Canonical Security & Approval Specification  
+> **Status**: Canonical Security & Approval Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` Security Gate / Tool Approval Modal / Fail-Closed Protocol  
-> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principle #22), `AGS_CLI_COMPONENT_INVENTORY.md`, and `M11`/`M12` security specs.
+> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principle #22), `AGS_CLI_COMPONENT_INVENTORY.md`, and `M11`/`M12` security specs.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -323,3 +329,18 @@ impl CliSecurityManager {
     }
 }
 ```
+
+---
+
+## 8. Security & Approvals Feature-to-Test Evidence Matrix
+
+| Security / Approval Feature | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **Fail-Closed Security Gate** | `[IMPLEMENTED / VERIFIED]` | `crates/control-plane/src/` | `crates/control-plane/tests/integration_tests.rs` |
+| **ApprovalModal Widget** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/approval_modal.rs`| `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **Two-Phase Commit Token** | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/adapter.rs`| `crates/claude-code-runtime/tests/adapter_integration_tests.rs` |
+| **Watchdog Timeout Handling** | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/adapter.rs`| `crates/claude-code-runtime/tests/budget_lifecycle_tests.rs` |
+| **Delivery Failure / Abort** | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/adapter.rs`| `crates/claude-code-runtime/tests/zero_duration_timeout_tests.rs` |
+| **OpenCode Permissions Bridge**| `[IMPLEMENTED / VERIFIED]` | `crates/opencode-runtime/src/adapter.rs`| 11 suites in `crates/opencode-runtime/tests/` |
+| **Job Object Sandbox (Windows)**| `[IMPLEMENTED / VERIFIED]`| `crates/opencode-runtime/src/sandbox.rs`| `crates/opencode-runtime/tests/sandbox_lifecycle_tests.rs` |
+| **Session Whitelist Storage** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/approval_modal.rs`| `crates/tui/tests/widget_tests.rs` |

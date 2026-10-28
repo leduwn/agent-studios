@@ -58,21 +58,21 @@ impl AgsTheme {
     pub fn dark() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            bg_base: Color::Rgb(13, 17, 23),       // #0d1117 carbon
-            bg_card: Color::Rgb(22, 27, 34),       // #161b22 surface card
-            bg_surface: Color::Rgb(33, 38, 45),    // #21262d elevated
-            bg_highlight: Color::Rgb(48, 54, 61),  // #30363d selection
-            border_subtle: Color::Rgb(48, 54, 61), // #30363d
+            bg_base: Color::Rgb(13, 17, 23),         // #0d1117 carbon
+            bg_card: Color::Rgb(22, 27, 34),         // #161b22 surface card
+            bg_surface: Color::Rgb(33, 38, 45),      // #21262d elevated
+            bg_highlight: Color::Rgb(48, 54, 61),    // #30363d selection
+            border_subtle: Color::Rgb(48, 54, 61),   // #30363d
             border_focused: Color::Rgb(63, 185, 80), // #3fb950 emerald focus
             border_dim: Color::Rgb(33, 38, 45),
-            text_primary: Color::Rgb(230, 237, 243),   // #e6edf3
+            text_primary: Color::Rgb(230, 237, 243), // #e6edf3
             text_secondary: Color::Rgb(139, 148, 158), // #8b949e
-            text_muted: Color::Rgb(72, 79, 88),        // #484f58
+            text_muted: Color::Rgb(72, 79, 88),      // #484f58
             text_inverse: Color::Rgb(13, 17, 23),
-            accent_emerald: Color::Rgb(63, 185, 80),  // #3fb950
-            accent_amber: Color::Rgb(210, 153, 34),   // #d29922
-            accent_crimson: Color::Rgb(248, 81, 73),  // #f85149
-            accent_sky: Color::Rgb(88, 166, 255),     // #58a6ff
+            accent_emerald: Color::Rgb(63, 185, 80), // #3fb950
+            accent_amber: Color::Rgb(210, 153, 34),  // #d29922
+            accent_crimson: Color::Rgb(248, 81, 73), // #f85149
+            accent_sky: Color::Rgb(88, 166, 255),    // #58a6ff
             accent_purple: Color::Rgb(188, 140, 255), // #bc8cff
             risk_readonly: Color::Rgb(63, 185, 80),
             risk_mutating: Color::Rgb(210, 153, 34),
@@ -172,7 +172,9 @@ impl AgsTheme {
     }
 
     pub fn border_focused_style(&self) -> Style {
-        Style::default().fg(self.border_focused).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(self.border_focused)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn text_primary_style(&self) -> Style {

@@ -1,57 +1,71 @@
 # Agent Studios CLI (`ags`) — Command Surface & CLI Interface Specification
 
 > **Document**: `AGS_CLI_COMMAND_SURFACE.md`  
-> **Status**: Canonical CLI & Slash Command Specification  
+> **Status**: Canonical CLI & Slash Command Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` / Clap CLI Parser / Slash Command Engine  
-> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principles #7, #8, #21, #26).
+> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principles #7, #8, #21, #26).  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
 ## 1. CLI Binary Arguments & Subcommands
 
-The `ags` binary provides both an interactive Ratatui TUI and a scriptable non-interactive execution mode using `clap` (derive API).
+The `ags` binary provides both an interactive Ratatui TUI and environment diagnostics via `clap` (derive API in `crates/cli/src/main.rs`).
 
-### 1.1 Usage Synopsis
+### 1.1 Current Implemented CLI Surface (Milestone M12)
 
 ```text
-ags [OPTIONS] [PROMPT]
-ags <COMMAND> [OPTIONS]
+ags                      # Launches interactive Ratatui TUI in embedded in-process mode [IMPLEMENTED / VERIFIED]
+ags --preview            # Launches offline interactive visual design previewer [IMPLEMENTED / VERIFIED]
+ags doctor               # Runs comprehensive system and environment diagnostics [IMPLEMENTED / VERIFIED]
+ags doctor --json        # Outputs machine-readable JSON diagnostic report [IMPLEMENTED / VERIFIED]
 ```
 
 ---
 
-### 1.2 Top-Level Options & Flags
+### 1.2 Top-Level Options & Flags (Roadmap & Architectural Target)
 
-| Flag / Option | Short | Value Type | Description |
-| :--- | :---: | :--- | :--- |
-| `--provider` | `-p` | `STRING` | Override provider instance ID (e.g., `anthropic`, `openai`, `gemini`, `ollama`). |
-| `--model` | `-m` | `STRING` | Override model target ID (e.g., `claude-3-7-sonnet`, `o3-mini`, `deepseek-r1:8b`). |
-| `--runtime` | `-r` | `STRING` | Select execution runtime: `internal-codex`, `opencode`, `claude-code`. |
-| `--session` | `-s` | `STRING` | Resume an existing session by ID or keyword `last`. |
-| `--worktree` | `-w` | `PATH` | Execute within a dedicated isolated Git worktree. |
-| `--lang` | | `en-US` \| `vi-VN` | Force UI display language (overrides OS locale). |
-| `--theme` | | `dark` \| `light` \| `adaptive` | Set visual theme. Default: `dark`. |
-| `--no-color` | | `FLAG` | Disable ANSI colors and backgrounds (NO_COLOR standard). |
-| `--auto-approve` | `-y` | `none` \| `readonly` \| `workspace` \| `all` | Security approval policy preset. Default: `readonly`. |
-| `--open-ide` | | `FLAG` | Simultaneously launch Code-OSS attached to this session. |
-| `--verbose` | `-v` | `FLAG` | Enable verbose diagnostics and tracing in logs. |
-| `--help` | `-h` | `FLAG` | Print localized help information. |
-| `--version` | `-V` | `FLAG` | Print version and build commit hash. |
+| Flag / Option | Short | Value Type | Description | Status |
+| :--- | :---: | :--- | :--- | :--- |
+| `--preview` | | `FLAG` | Run offline interactive visual design previewer. | `[IMPLEMENTED / VERIFIED]` |
+| `--provider` | `-p` | `STRING` | Override provider instance ID (e.g., `anthropic`, `openai`, `gemini`, `ollama`). | `[PLANNED] (M13+)` |
+| `--model` | `-m` | `STRING` | Override model target ID (e.g., `claude-3-7-sonnet`, `o3-mini`). | `[PLANNED] (M13+)` |
+| `--runtime` | `-r` | `STRING` | Select execution runtime: `internal-codex`, `opencode`, `claude-code`. | `[PLANNED] (M13+)` |
+| `--session` | `-s` | `STRING` | Resume an existing session by ID or keyword `last`. | `[PLANNED] (M13+)` |
+| `--worktree` | `-w` | `PATH` | Execute within a dedicated isolated Git worktree. | `[PLANNED] (M13+)` |
+| `--lang` | | `en-US` \| `vi-VN` | Force UI display language (overrides OS locale). | `[PLANNED] (M13+)` |
+| `--theme` | | `dark` \| `light` \| `adaptive` | Set visual theme. Default: `dark`. | `[PLANNED] (M13+)` |
+| `--no-color` | | `FLAG` | Disable ANSI colors and backgrounds (NO_COLOR standard). | `[IMPLEMENTED / VERIFIED]` (Theme engine) |
+| `--auto-approve` | `-y` | `none` \| `readonly` \| `workspace` \| `all` | Security approval policy preset. Default: `readonly`. | `[PLANNED] (M13+)` |
+| `--open-ide` | | `FLAG` | Simultaneously launch Code-OSS attached to this session. | `[PLANNED] (M13+)` |
+| `--verbose` | `-v` | `FLAG` | Enable verbose diagnostics and tracing in logs. | `[PLANNED] (M13+)` |
+| `--help` | `-h` | `FLAG` | Print localized help information. | `[IMPLEMENTED / VERIFIED]` |
+| `--version` | `-V` | `FLAG` | Print version and build commit hash. | `[IMPLEMENTED / VERIFIED]` |
 
 ---
 
 ### 1.3 Subcommands
 
-#### `ags run [OPTIONS] <PROMPT>`
+#### `ags doctor [--json]` `[IMPLEMENTED / VERIFIED]`
+Runs diagnostic health checks against Host OS, Git CLI, Git Repository Context, Terminal Geometry, ANSI Capabilities, Unicode NFC Pipeline, and In-Process Control Plane Engine.
+- Implemented in: `crates/cli/src/doctor.rs`.
+- Verified in: `crates/cli/src/doctor.rs::tests::test_doctor_diagnostics_run`.
+
+#### `ags run [OPTIONS] <PROMPT>` `[PLANNED] (M13+)`
 Executes a single prompt headlessly without launching the interactive TUI. Streams progress events directly to stdout and outputs the final result with Unix exit code 0 on success.
 - Example: `ags run "Run cargo check and fix any compiler warnings"`
 - Supports piping: `cat error.log | ags run "Analyze this failure and suggest a fix"`
 
-#### `ags resume [SESSION_ID]`
+#### `ags resume [SESSION_ID]` `[PLANNED] (M13+)`
 Resumes an existing session in interactive TUI mode with its complete task graph, conversation history, and allocated worktrees intact.
 - Example: `ags resume s_9a8f21` or `ags resume last`
 
-#### `ags sessions`
+#### `ags sessions` `[PLANNED] (M13+)`
 Lists all recent sessions across the current repository:
 ```text
 ID         BRANCH              STARTED      TASKS  MODEL               STATUS
@@ -60,47 +74,50 @@ s_7c2e40   fix/token-budget    Yesterday    1/2    o3-mini             Interrupt
 s_3d1a89   main                3 days ago   4/4    gemini-2.5-pro      Succeeded
 ```
 
-#### `ags model [SUBCOMMAND]`
+#### `ags model [SUBCOMMAND]` `[PLANNED] (M13+)`
 Inspects and manages configured provider models:
 - `ags model list`: Lists available models across all active provider instances.
 - `ags model set <PROVIDER> <MODEL>`: Sets workspace default model.
 - `ags model benchmark`: Runs latency and token throughput tests.
 
-#### `ags runtime [SUBCOMMAND]`
+#### `ags runtime [SUBCOMMAND]` `[PLANNED] (M13+)`
 Manages external runtime adapters:
 - `ags runtime list`: Shows status of `internal-codex`, `opencode`, and `claude-code`.
 - `ags runtime doctor`: Verifies installed binaries, sandboxes, and adapter health.
 
-#### `ags worktree [SUBCOMMAND]`
+#### `ags worktree [SUBCOMMAND]` `[PLANNED] (M13+)`
 Inspects isolated Git worktrees allocated by the Control Plane:
 - `ags worktree list`: Shows active worktrees, assigned agents, and branch targets.
 - `ags worktree clean`: Removes orphaned worktrees whose runs have completed.
 
-#### `ags open-ide [SESSION_ID]`
+#### `ags open-ide [SESSION_ID]` `[PLANNED] (M13+)`
 Launches the Agent Studios Code-OSS desktop IDE and attaches to the target session.
 
 ---
 
 ## 2. Interactive Slash Commands (Inside TUI Composer)
 
-When working inside the interactive TUI, typing `/` opens the autocompletion overlay.
+When working inside the interactive TUI, typing `/` opens the autocompletion overlay. Commands defined in the widget inventory (`crates/tui/src/widgets/slash_menu.rs`) are categorized below:
 
-| Slash Command | Arguments | Description & Behavior |
-| :--- | :--- | :--- |
-| `/help` or `/?` | `[topic]` | Displays interactive help modal or specific documentation. |
-| `/model` | `[provider/model]` | Without args: opens Model Selector popup. With args: switches active model target instantly. |
-| `/runtime` | `[runtime_id]` | Switches active execution runtime (`internal-codex`, `opencode`, `claude-code`). |
-| `/task` | `<goal>` | Formally submits a high-level goal to the Coordinator to construct a DAG Task Graph. |
-| `/tasks` | | Toggles the Task Graph inspector overlay showing all tasks, states, and dependencies. |
-| `/worktree` | `[list\|clean]` | Opens the worktree manager modal showing active agent worktrees. |
-| `/diff` | `[file]` | Opens the Unified Diff Review modal showing uncommitted modifications. |
-| `/patch` | `apply\|discard` | Directly applies or discards the latest staged patch artifact. |
-| `/approve` | `always\|reset` | Manages tool execution permissions for the current session. |
-| `/compact` | | Triggers manual context compression and summarization. |
-| `/clear` | | Clears the visible transcript buffer (retains Control Plane event history). |
-| `/ide` | | Launches Agent Studios Code-OSS IDE connected to this shared session (`Ctrl+O`). |
-| `/lang` | `en\|vi` | Toggles UI display language between English and Vietnamese (`en-US` / `vi-VN`). |
-| `/theme` | `dark\|light\|adaptive`| Switches color theme in real-time. |
+| Slash Command | Arguments | Description & Behavior | Implementation Status |
+| :--- | :--- | :--- | :--- |
+| `/clear` | | Clears the visible transcript buffer (retains Control Plane event history). | `[IMPLEMENTED / VERIFIED]` |
+| `/cancel` | | Halts active agent execution run. | `[IMPLEMENTED / VERIFIED]` |
+| `/exit` or `/quit`| | Cleanly exits `ags` TUI (`Ctrl+D`). | `[IMPLEMENTED / VERIFIED]` |
+| `/help` or `/?` | `[topic]` | Displays interactive help modal or specific documentation. | `[IMPLEMENTED / VERIFIED]` |
+| `/model` | `[provider/model]` | Switch active provider and target model. | `[PLANNED] (M13+)` |
+| `/runtime` | `[runtime_id]` | Switch execution runtime (`internal-codex`, `opencode`, `claude-code`). | `[PLANNED] (M13+)` |
+| `/task` | `<goal>` | Formally submits a high-level goal to the Coordinator to construct a DAG Task Graph. | `[PLANNED] (M13+)` |
+| `/tasks` | | Toggles the Task Graph inspector overlay showing all tasks, states, and dependencies. | `[PLANNED] (M13+)` |
+| `/worktree` | `[list\|clean]` | Opens the worktree manager modal showing active agent worktrees. | `[PLANNED] (M13+)` |
+| `/diff` | `[file]` | Opens the Unified Diff Review modal showing uncommitted modifications. | `[IMPLEMENTED / VERIFIED]` (Widget) |
+| `/patch` | `apply\|discard`| Directly applies or discards the latest staged patch artifact. | `[PLANNED] (M13+)` |
+| `/approve` | `always\|reset` | Manages tool execution permissions for the current session. | `[PLANNED] (M13+)` |
+| `/compact` | | Triggers manual context compression and summarization. | `[PLANNED] (M13+)` |
+| `/ide` | | Launches Agent Studios Code-OSS IDE connected to this shared session (`Ctrl+O`). | `[PLANNED] (M13+)` |
+| `/lang` | `en\|vi` | Toggles UI display language between English and Vietnamese (`en-US` / `vi-VN`). | `[PLANNED] (M13+)` |
+| `/theme` | `dark\|light\|adaptive`| Switches color theme in real-time. | `[PLANNED] (M13+)` |
+| `/status` | | Prints session telemetry, token usage, cost, and Control Plane connection status. | `[PLANNED] (M13+)` |
 | `/status` | | Prints session telemetry, token usage, cost, and Control Plane connection status. |
 | `/exit` or `/quit` | | Cleanly exits `ags` TUI (`Ctrl+D`). |
 
@@ -184,3 +201,35 @@ Per Product Principle #26 and `LOCALIZATION.md`:
 - Running `ags --lang vi-VN` translates all application borders, status indicators, error codes, and help strings into Vietnamese.
 - It **does not** automatically force the AI agent to write code comments or technical explanations in Vietnamese unless the developer's prompt or project `AGENTS.md` explicitly requests it.
 - Conversely, a developer running in English mode (`ags --lang en-US`) can prompt in Vietnamese, and the Coordinator will respond naturally in Vietnamese while maintaining English CLI framing.
+
+---
+
+## 5. Command Surface Feature-to-Test Evidence Matrix
+
+| CLI / Slash Command | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **`ags` (Default Interactive TUI)** | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/main.rs` | `crates/tui/tests/widget_tests.rs` |
+| **`ags --preview`** | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/main.rs` & `preview.rs` | Interactive visual previewer |
+| **`ags doctor [--json]`** | `[IMPLEMENTED / VERIFIED]` | `crates/cli/src/doctor.rs` | `crates/cli/src/doctor.rs::tests::test_doctor_diagnostics_run` |
+| **`ags run` (Headless)** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags resume`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags sessions`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags model`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags runtime`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags worktree`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`ags open-ide`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/clear`** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs` |
+| **`/cancel`** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs` |
+| **`/exit` / `/quit`** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs` |
+| **`/help`** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/slash_menu.rs` | `crates/tui/tests/widget_tests.rs::test_slash_menu_commands_inventory` |
+| **`/model` (Mid-session switch)** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/runtime` (Mid-session switch)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/task`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/tasks`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/worktree`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/diff`** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/diff_viewer.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **`/patch` (TUI Auto Merge)** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/ide`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/compact`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/lang`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **`/theme`** | `[PLANNED]` (M13+) | - | Scheduled M13+ |

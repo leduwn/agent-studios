@@ -3,8 +3,8 @@
 //! Provides the developer-first command-line interface and interactive TUI
 //! for multi-agent autonomous engineering.
 
-use std::sync::Arc;
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
 
 mod doctor;
 use doctor::AgsDoctor;

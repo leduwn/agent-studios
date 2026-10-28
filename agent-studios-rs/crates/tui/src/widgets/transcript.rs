@@ -33,7 +33,10 @@ impl<'a> Widget for TranscriptWidget<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.border_subtle_style())
-            .title(Span::styled(" Transcript ", Style::default().fg(self.theme.text_secondary)))
+            .title(Span::styled(
+                " Transcript ",
+                Style::default().fg(self.theme.text_secondary),
+            ))
             .style(self.theme.base_style());
 
         let inner_area = block.inner(area);
@@ -50,21 +53,39 @@ impl<'a> Widget for TranscriptWidget<'a> {
             match item {
                 TranscriptItem::UserPrompt(prompt) => {
                     lines.push(Line::from(vec![
-                        Span::styled("You: ", Style::default().fg(self.theme.accent_sky).add_modifier(Modifier::BOLD)),
-                        Span::styled(prompt, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "You: ",
+                            Style::default()
+                                .fg(self.theme.accent_sky)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            prompt,
+                            Style::default()
+                                .fg(self.theme.text_primary)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                     ]));
                     lines.push(Line::raw(""));
                 }
                 TranscriptItem::AssistantThought(thought) => {
                     lines.push(Line::from(vec![
-                        Span::styled("  * thinking: ", Style::default().fg(self.theme.text_muted).add_modifier(Modifier::ITALIC)),
+                        Span::styled(
+                            "  * thinking: ",
+                            Style::default()
+                                .fg(self.theme.text_muted)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
                         Span::styled(thought, Style::default().fg(self.theme.text_muted)),
                     ]));
                 }
                 TranscriptItem::AssistantMessage(msg) => {
-                    lines.push(Line::from(vec![
-                        Span::styled("Agent: ", Style::default().fg(self.theme.accent_emerald).add_modifier(Modifier::BOLD)),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        "Agent: ",
+                        Style::default()
+                            .fg(self.theme.accent_emerald)
+                            .add_modifier(Modifier::BOLD),
+                    )]));
                     for l in msg.lines() {
                         lines.push(Line::from(vec![
                             Span::raw("  "),
@@ -76,8 +97,16 @@ impl<'a> Widget for TranscriptWidget<'a> {
                 TranscriptItem::ToolInvocation { tool_name, status } => {
                     lines.push(Line::from(vec![
                         Span::styled("  [tool] ", Style::default().fg(self.theme.accent_purple)),
-                        Span::styled(tool_name, Style::default().fg(self.theme.text_secondary).add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" -> {status}"), Style::default().fg(self.theme.text_muted)),
+                        Span::styled(
+                            tool_name,
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" -> {status}"),
+                            Style::default().fg(self.theme.text_muted),
+                        ),
                     ]));
                 }
                 TranscriptItem::SystemNotice { level, message } => {
@@ -87,7 +116,10 @@ impl<'a> Widget for TranscriptWidget<'a> {
                         _ => self.theme.accent_sky,
                     };
                     lines.push(Line::from(vec![
-                        Span::styled(format!("  ! [{level}] "), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            format!("  ! [{level}] "),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(message, Style::default().fg(color)),
                     ]));
                 }

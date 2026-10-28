@@ -33,26 +33,55 @@ impl<'a> Widget for AgentBarWidget<'a> {
         }
 
         let mut spans = Vec::new();
-        spans.push(Span::styled("AGENTS: ", Style::default().fg(self.theme.text_muted).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "AGENTS: ",
+            Style::default()
+                .fg(self.theme.text_muted)
+                .add_modifier(Modifier::BOLD),
+        ));
 
         for (i, agent) in self.agents.iter().enumerate() {
             if i > 0 {
-                spans.push(Span::styled(" | ", Style::default().fg(self.theme.border_subtle)));
+                spans.push(Span::styled(
+                    " | ",
+                    Style::default().fg(self.theme.border_subtle),
+                ));
             }
 
             let (pill_style, dot) = if agent.is_failed {
-                (Style::default().fg(self.theme.accent_crimson).add_modifier(Modifier::BOLD), "●")
+                (
+                    Style::default()
+                        .fg(self.theme.accent_crimson)
+                        .add_modifier(Modifier::BOLD),
+                    "●",
+                )
             } else if agent.is_awaiting_approval {
-                (Style::default().fg(self.theme.accent_amber).add_modifier(Modifier::BOLD), "▲")
+                (
+                    Style::default()
+                        .fg(self.theme.accent_amber)
+                        .add_modifier(Modifier::BOLD),
+                    "▲",
+                )
             } else if agent.is_active {
-                (Style::default().fg(self.theme.accent_emerald).add_modifier(Modifier::BOLD), "●")
+                (
+                    Style::default()
+                        .fg(self.theme.accent_emerald)
+                        .add_modifier(Modifier::BOLD),
+                    "●",
+                )
             } else {
                 (Style::default().fg(self.theme.text_muted), "○")
             };
 
             spans.push(Span::styled(format!("{dot} "), pill_style));
-            spans.push(Span::styled(&agent.role, Style::default().fg(self.theme.text_primary)));
-            spans.push(Span::styled(format!(" [{}]", agent.state_label), pill_style));
+            spans.push(Span::styled(
+                &agent.role,
+                Style::default().fg(self.theme.text_primary),
+            ));
+            spans.push(Span::styled(
+                format!(" [{}]", agent.state_label),
+                pill_style,
+            ));
         }
 
         let line = Line::from(spans);

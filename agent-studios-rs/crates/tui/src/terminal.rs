@@ -3,21 +3,24 @@
 //! Ensures clean entry and exit from raw mode and alternate screen, preventing
 //! broken terminal state on crash or early termination.
 
-use std::io::{self, stdout, Stdout, Write};
-use std::panic;
 use crossterm::{
     cursor,
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use std::io::{self, Stdout, Write, stdout};
+use std::panic;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Practical upper bound on terminal title characters
 pub const MAX_TERMINAL_TITLE_CHARS: usize = 240;
+
+static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static PANIC_HOOK_SET: Once = Once::new();
 
 /// RAII Guard ensuring terminal restoration when dropped.
 pub struct TerminalGuard {
@@ -28,34 +31,62 @@ impl TerminalGuard {
     /// Initializes terminal in raw mode, alternate screen, and installs panic hook.
     pub fn enter() -> io::Result<(Terminal<CrosstermBackend<Stdout>>, Self)> {
         enable_raw_mode()?;
+        RAW_MODE_ACTIVE.store(true, Ordering::SeqCst);
+
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture, cursor::Hide)?;
+        if let Err(err) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            cursor::Hide
+        ) {
+            let _ = disable_raw_mode();
+            RAW_MODE_ACTIVE.store(false, Ordering::SeqCst);
+            return Err(err);
+        }
 
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+        let terminal = match Terminal::new(backend) {
+            Ok(t) => t,
+            Err(err) => {
+                let _ = Self::restore_raw_terminal();
+                return Err(err);
+            }
+        };
 
         // Install panic hook to cleanly restore terminal before printing panic backtrace
-        let default_panic_hook = panic::take_hook();
-        panic::set_hook(Box::new(move |panic_info| {
-            let _ = Self::restore_raw_terminal();
-            default_panic_hook(panic_info);
-        }));
+        PANIC_HOOK_SET.call_once(|| {
+            let default_panic_hook = panic::take_hook();
+            panic::set_hook(Box::new(move |panic_info| {
+                let _ = Self::restore_raw_terminal();
+                default_panic_hook(panic_info);
+            }));
+        });
 
         Ok((terminal, Self { _private: () }))
     }
 
     /// Explicitly restores terminal state.
+    ///
+    /// Restores mouse capture (DisableMouseCapture), reveals cursor, leaves alternate screen,
+    /// disables raw mode, and flushes stdout. Safe and idempotent to call multiple times.
     pub fn restore_raw_terminal() -> io::Result<()> {
         let mut stdout = stdout();
         let _ = execute!(
             stdout,
-            cursor::Show,
             DisableMouseCapture,
+            cursor::Show,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
         let _ = stdout.flush();
+        RAW_MODE_ACTIVE.store(false, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Returns true if terminal is currently recorded as being in raw mode.
+    pub fn is_raw_mode_active() -> bool {
+        RAW_MODE_ACTIVE.load(Ordering::SeqCst)
     }
 }
 

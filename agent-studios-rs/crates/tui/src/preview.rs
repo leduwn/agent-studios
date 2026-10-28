@@ -4,7 +4,7 @@
 //! color themes, responsive breakpoints, and security gate modals without
 //! needing a running agent backend.
 
-use std::io;
+use agent_studios_protocol::id::ApprovalId;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::Rect,
@@ -12,7 +12,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
-use agent_studios_protocol::id::ApprovalId;
+use std::io;
 
 use crate::layout::MainLayout;
 use crate::terminal::TerminalGuard;
@@ -23,7 +23,7 @@ use crate::widgets::{
     composer::ComposerWidget,
     diff_viewer::DiffViewerWidget,
     header::HeaderWidget,
-    slash_menu::{SlashMenuWidget, AVAILABLE_COMMANDS},
+    slash_menu::{AVAILABLE_COMMANDS, SlashMenuWidget},
     status_bar::StatusBarWidget,
     transcript::{TranscriptItem, TranscriptWidget},
 };
@@ -123,7 +123,8 @@ index 8f3c2a1..9e4b7c2 100644
 +    pub bg_base: Color,        // #0d1117 85% slate carbon
 -    pub placeholder: bool,
 +    pub is_production_grade: bool,
- }"#.to_string();
+ }"#
+        .to_string();
 
         Self {
             theme: AgsTheme::dark(),
@@ -155,66 +156,66 @@ index 8f3c2a1..9e4b7c2 100644
 
     pub fn handle_input(&mut self) -> io::Result<()> {
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    return Ok(());
-                }
+            let key = match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => k,
+                _ => return Ok(()),
+            };
 
-                // Global quit
-                if key.code == KeyCode::Char('q')
-                    || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
-                {
-                    self.should_quit = true;
-                    return Ok(());
-                }
+            // Global quit
+            if key.code == KeyCode::Char('q')
+                || (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
+            {
+                self.should_quit = true;
+                return Ok(());
+            }
 
-                // Tab switching
-                match key.code {
-                    KeyCode::Char('1') => self.active_tab = PreviewTab::Transcript,
-                    KeyCode::Char('2') => self.active_tab = PreviewTab::SecurityGate,
-                    KeyCode::Char('3') => self.active_tab = PreviewTab::UnifiedDiff,
-                    KeyCode::Char('4') => self.active_tab = PreviewTab::ThemePalette,
-                    KeyCode::Char('5') => self.active_tab = PreviewTab::ResponsiveLayout,
-                    KeyCode::Tab => {
-                        self.active_tab = match self.active_tab {
-                            PreviewTab::Transcript => PreviewTab::SecurityGate,
-                            PreviewTab::SecurityGate => PreviewTab::UnifiedDiff,
-                            PreviewTab::UnifiedDiff => PreviewTab::ThemePalette,
-                            PreviewTab::ThemePalette => PreviewTab::ResponsiveLayout,
-                            PreviewTab::ResponsiveLayout => PreviewTab::Transcript,
-                        };
-                    }
-                    KeyCode::Char('t') => {
-                        // Toggle theme mode
-                        self.theme = match self.theme.mode {
-                            ThemeMode::Dark => AgsTheme::light(),
-                            ThemeMode::Light => AgsTheme::ansi16(),
-                            ThemeMode::Ansi16 => AgsTheme::no_color(),
-                            ThemeMode::NoColor => AgsTheme::dark(),
-                        };
-                    }
-                    KeyCode::Char('/') => {
-                        self.show_slash_menu = !self.show_slash_menu;
-                    }
-                    KeyCode::Up => {
-                        if self.show_slash_menu && self.slash_menu_index > 0 {
-                            self.slash_menu_index -= 1;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if self.show_slash_menu && self.slash_menu_index + 1 < AVAILABLE_COMMANDS.len() {
-                            self.slash_menu_index += 1;
-                        }
-                    }
-                    KeyCode::Esc => {
-                        if self.show_slash_menu {
-                            self.show_slash_menu = false;
-                        } else {
-                            self.should_quit = true;
-                        }
-                    }
-                    _ => {}
+            // Tab switching
+            match key.code {
+                KeyCode::Char('1') => self.active_tab = PreviewTab::Transcript,
+                KeyCode::Char('2') => self.active_tab = PreviewTab::SecurityGate,
+                KeyCode::Char('3') => self.active_tab = PreviewTab::UnifiedDiff,
+                KeyCode::Char('4') => self.active_tab = PreviewTab::ThemePalette,
+                KeyCode::Char('5') => self.active_tab = PreviewTab::ResponsiveLayout,
+                KeyCode::Tab => {
+                    self.active_tab = match self.active_tab {
+                        PreviewTab::Transcript => PreviewTab::SecurityGate,
+                        PreviewTab::SecurityGate => PreviewTab::UnifiedDiff,
+                        PreviewTab::UnifiedDiff => PreviewTab::ThemePalette,
+                        PreviewTab::ThemePalette => PreviewTab::ResponsiveLayout,
+                        PreviewTab::ResponsiveLayout => PreviewTab::Transcript,
+                    };
                 }
+                KeyCode::Char('t') => {
+                    // Toggle theme mode
+                    self.theme = match self.theme.mode {
+                        ThemeMode::Dark => AgsTheme::light(),
+                        ThemeMode::Light => AgsTheme::ansi16(),
+                        ThemeMode::Ansi16 => AgsTheme::no_color(),
+                        ThemeMode::NoColor => AgsTheme::dark(),
+                    };
+                }
+                KeyCode::Char('/') => {
+                    self.show_slash_menu = !self.show_slash_menu;
+                }
+                KeyCode::Up => {
+                    if self.show_slash_menu && self.slash_menu_index > 0 {
+                        self.slash_menu_index -= 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if self.show_slash_menu && self.slash_menu_index + 1 < AVAILABLE_COMMANDS.len()
+                    {
+                        self.slash_menu_index += 1;
+                    }
+                }
+                KeyCode::Esc => {
+                    if self.show_slash_menu {
+                        self.show_slash_menu = false;
+                    } else {
+                        self.should_quit = true;
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -237,14 +238,62 @@ index 8f3c2a1..9e4b7c2 100644
 
         // Top Navigation Ribbon & Agent ribbon
         let nav_spans = vec![
-            Span::styled(" [1] Transcript ", if self.active_tab == PreviewTab::Transcript { self.theme.badge_style(self.theme.accent_emerald, self.theme.text_inverse) } else { Style::default().fg(self.theme.text_secondary) }),
-            Span::styled(" [2] Security Gate ", if self.active_tab == PreviewTab::SecurityGate { self.theme.badge_style(self.theme.accent_amber, self.theme.text_inverse) } else { Style::default().fg(self.theme.text_secondary) }),
-            Span::styled(" [3] Unified Diff ", if self.active_tab == PreviewTab::UnifiedDiff { self.theme.badge_style(self.theme.accent_sky, self.theme.text_inverse) } else { Style::default().fg(self.theme.text_secondary) }),
-            Span::styled(" [4] Theme Palette ", if self.active_tab == PreviewTab::ThemePalette { self.theme.badge_style(self.theme.accent_purple, self.theme.text_inverse) } else { Style::default().fg(self.theme.text_secondary) }),
-            Span::styled(" [5] Responsive Inspector ", if self.active_tab == PreviewTab::ResponsiveLayout { self.theme.badge_style(self.theme.text_primary, self.theme.text_inverse) } else { Style::default().fg(self.theme.text_secondary) }),
-            Span::styled(" | (t) Theme | (q) Exit", Style::default().fg(self.theme.text_muted)),
+            Span::styled(
+                " [1] Transcript ",
+                if self.active_tab == PreviewTab::Transcript {
+                    self.theme
+                        .badge_style(self.theme.accent_emerald, self.theme.text_inverse)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                },
+            ),
+            Span::styled(
+                " [2] Security Gate ",
+                if self.active_tab == PreviewTab::SecurityGate {
+                    self.theme
+                        .badge_style(self.theme.accent_amber, self.theme.text_inverse)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                },
+            ),
+            Span::styled(
+                " [3] Unified Diff ",
+                if self.active_tab == PreviewTab::UnifiedDiff {
+                    self.theme
+                        .badge_style(self.theme.accent_sky, self.theme.text_inverse)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                },
+            ),
+            Span::styled(
+                " [4] Theme Palette ",
+                if self.active_tab == PreviewTab::ThemePalette {
+                    self.theme
+                        .badge_style(self.theme.accent_purple, self.theme.text_inverse)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                },
+            ),
+            Span::styled(
+                " [5] Responsive Inspector ",
+                if self.active_tab == PreviewTab::ResponsiveLayout {
+                    self.theme
+                        .badge_style(self.theme.text_primary, self.theme.text_inverse)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                },
+            ),
+            Span::styled(
+                " | (t) Theme | (q) Exit",
+                Style::default().fg(self.theme.text_muted),
+            ),
         ];
-        buf.set_line(layout.agent_bar_area.x, layout.agent_bar_area.y, &Line::from(nav_spans), layout.agent_bar_area.width);
+        buf.set_line(
+            layout.agent_bar_area.x,
+            layout.agent_bar_area.y,
+            &Line::from(nav_spans),
+            layout.agent_bar_area.width,
+        );
 
         // Active Content Body
         match self.active_tab {
@@ -308,9 +357,9 @@ index 8f3c2a1..9e4b7c2 100644
         if self.show_slash_menu {
             let menu_area = Rect {
                 x: layout.composer_area.x + 2,
-                y: layout.composer_area.y.saturating_sub(10),
-                width: 60.min(layout.composer_area.width.saturating_sub(4)),
-                height: 10,
+                y: layout.composer_area.y.saturating_sub(12),
+                width: 72.min(layout.composer_area.width.saturating_sub(4)),
+                height: 12,
             };
             SlashMenuWidget {
                 theme: &self.theme,
@@ -335,7 +384,10 @@ index 8f3c2a1..9e4b7c2 100644
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.border_subtle_style())
-            .title(Span::styled(" Semantic Color Token Palette ", Style::default().fg(self.theme.accent_purple)))
+            .title(Span::styled(
+                " Semantic Color Token Palette ",
+                Style::default().fg(self.theme.accent_purple),
+            ))
             .style(self.theme.card_style());
 
         let inner = block.inner(area);
@@ -343,57 +395,129 @@ index 8f3c2a1..9e4b7c2 100644
 
         let lines = vec![
             Line::from(vec![
-                Span::styled("Theme Mode: ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{:?}", self.theme.mode), Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
-                Span::styled(" (Press 't' to cycle Dark -> Light -> Ansi16 -> NoColor)", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "Theme Mode: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!("{:?}", self.theme.mode),
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    " (Press 't' to cycle Dark -> Light -> Ansi16 -> NoColor)",
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
             Line::raw(""),
             Line::from(vec![
-                Span::styled("  bg_base:        ", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  bg_base:        ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
                 Span::styled(" ■■■■ ", Style::default().fg(self.theme.bg_base)),
-                Span::styled("  border_focused: ", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  border_focused: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
                 Span::styled(" ■■■■ ", Style::default().fg(self.theme.border_focused)),
             ]),
             Line::from(vec![
-                Span::styled("  bg_card:        ", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  bg_card:        ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
                 Span::styled(" ■■■■ ", Style::default().fg(self.theme.bg_card)),
-                Span::styled("  accent_emerald: ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" ■■■■ (Focus/Allow)", Style::default().fg(self.theme.accent_emerald)),
+                Span::styled(
+                    "  accent_emerald: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " ■■■■ (Focus/Allow)",
+                    Style::default().fg(self.theme.accent_emerald),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  bg_surface:     ", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  bg_surface:     ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
                 Span::styled(" ■■■■ ", Style::default().fg(self.theme.bg_surface)),
-                Span::styled("  accent_amber:   ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" ■■■■ (Mutating)", Style::default().fg(self.theme.accent_amber)),
+                Span::styled(
+                    "  accent_amber:   ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " ■■■■ (Mutating)",
+                    Style::default().fg(self.theme.accent_amber),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  border_subtle:  ", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  border_subtle:  ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
                 Span::styled(" ■■■■ ", Style::default().fg(self.theme.border_subtle)),
-                Span::styled("  accent_crimson: ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" ■■■■ (Danger/Deny)", Style::default().fg(self.theme.accent_crimson)),
+                Span::styled(
+                    "  accent_crimson: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " ■■■■ (Danger/Deny)",
+                    Style::default().fg(self.theme.accent_crimson),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  text_primary:   ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" Primary Text Display Sample", Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  text_primary:   ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " Primary Text Display Sample",
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  text_secondary: ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" Secondary Metadata and Labels", Style::default().fg(self.theme.text_secondary)),
+                Span::styled(
+                    "  text_secondary: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " Secondary Metadata and Labels",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  text_muted:     ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(" Muted Timestamps and Line Numbers", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "  text_muted:     ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    " Muted Timestamps and Line Numbers",
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
         ];
 
         Paragraph::new(lines).render(inner, buf);
     }
 
-    fn render_layout_inspector(&self, area: Rect, buf: &mut ratatui::buffer::Buffer, layout: &MainLayout) {
+    fn render_layout_inspector(
+        &self,
+        area: Rect,
+        buf: &mut ratatui::buffer::Buffer,
+        layout: &MainLayout,
+    ) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(self.theme.border_subtle_style())
-            .title(Span::styled(" Responsive Layout Engine Inspector ", Style::default().fg(self.theme.accent_sky)))
+            .title(Span::styled(
+                " Responsive Layout Engine Inspector ",
+                Style::default().fg(self.theme.accent_sky),
+            ))
             .style(self.theme.card_style());
 
         let inner = block.inner(area);
@@ -401,33 +525,103 @@ index 8f3c2a1..9e4b7c2 100644
 
         let lines = vec![
             Line::from(vec![
-                Span::styled("Terminal Breakpoint: ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{:?}", layout.breakpoint), Style::default().fg(self.theme.accent_emerald).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Terminal Breakpoint: ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!("{:?}", layout.breakpoint),
+                    Style::default()
+                        .fg(self.theme.accent_emerald)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::raw(""),
             Line::from(vec![
-                Span::styled("  Dimensions:        ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("width = {}, height = {}", area.width, area.height), Style::default().fg(self.theme.text_primary)),
+                Span::styled(
+                    "  Dimensions:        ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!("width = {}, height = {}", area.width, area.height),
+                    Style::default().fg(self.theme.text_primary),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Header Area:       ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{}x{} at ({},{})", layout.header_area.width, layout.header_area.height, layout.header_area.x, layout.header_area.y), Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "  Header Area:       ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!(
+                        "{}x{} at ({},{})",
+                        layout.header_area.width,
+                        layout.header_area.height,
+                        layout.header_area.x,
+                        layout.header_area.y
+                    ),
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Content Area:      ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{}x{} at ({},{})", layout.content_area.width, layout.content_area.height, layout.content_area.x, layout.content_area.y), Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "  Content Area:      ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!(
+                        "{}x{} at ({},{})",
+                        layout.content_area.width,
+                        layout.content_area.height,
+                        layout.content_area.x,
+                        layout.content_area.y
+                    ),
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Side Pane Area:    ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{:?}", layout.side_pane_area), Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "  Side Pane Area:    ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!("{:?}", layout.side_pane_area),
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Composer Area:     ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(format!("{}x{} at ({},{})", layout.composer_area.width, layout.composer_area.height, layout.composer_area.x, layout.composer_area.y), Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "  Composer Area:     ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    format!(
+                        "{}x{} at ({},{})",
+                        layout.composer_area.width,
+                        layout.composer_area.height,
+                        layout.composer_area.x,
+                        layout.composer_area.y
+                    ),
+                    Style::default().fg(self.theme.text_muted),
+                ),
             ]),
             Line::from(vec![
-                Span::styled("  Dual-Pane Status:  ", Style::default().fg(self.theme.text_secondary)),
-                Span::styled(if layout.side_pane_area.is_some() { "ENABLED (>=160 cols)" } else { "DISABLED (<160 cols)" }, Style::default().fg(if layout.side_pane_area.is_some() { self.theme.accent_emerald } else { self.theme.accent_amber })),
+                Span::styled(
+                    "  Dual-Pane Status:  ",
+                    Style::default().fg(self.theme.text_secondary),
+                ),
+                Span::styled(
+                    if layout.side_pane_area.is_some() {
+                        "ENABLED (>=160 cols)"
+                    } else {
+                        "DISABLED (<160 cols)"
+                    },
+                    Style::default().fg(if layout.side_pane_area.is_some() {
+                        self.theme.accent_emerald
+                    } else {
+                        self.theme.accent_amber
+                    }),
+                ),
             ]),
         ];
 

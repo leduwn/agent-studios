@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Visual Design System & Semantic Tokens
 
 > **Document**: `AGS_CLI_VISUAL_DESIGN_SYSTEM.md`  
-> **Status**: Canonical Visual Language & Token Specification  
-> **Target Subsystem**: `ags` / Ratatui Theme Engine / `ags-theme` Crate  
-> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principles #26, #27).
+> **Status**: Canonical Visual Language & Token Specification (Audited & Honesty-Tagged)  
+> **Target Subsystem**: `ags` / Ratatui Theme Engine / `agent-studios-tui` Crate  
+> **Precedence**: Aligned with `PRODUCT_PRINCIPLES.md` (Principles #26, #27).  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -308,3 +314,20 @@ impl AgsTheme {
     }
 }
 ```
+
+---
+
+## 6. Visual Design System Feature-to-Test Evidence Matrix
+
+| Visual Design Feature | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **Dark Theme Tokens** (`AgsTheme::dark()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Light Theme Tokens** (`AgsTheme::light()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **ANSI 16 Fallback** (`AgsTheme::ansi16()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **NO_COLOR Standard** (`AgsTheme::no_color()`) | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/theme.rs` | `crates/tui/tests/widget_tests.rs::test_theme_tokens_contrast` |
+| **Vietnamese NFC Normalization** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **Grapheme Cluster Segmentation** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **Terminal Title Sanitization** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/terminal.rs` | `crates/tui/tests/widget_tests.rs::test_terminal_title_sanitization` |
+| **Centered Modal Math** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/layout.rs` | `crates/tui/tests/widget_tests.rs::test_centered_rect_math` |
+| **Dynamic Nerd Font Probe** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Rounded Unicode Box Drawing** | `[PREVIEW ONLY]` | `crates/tui/src/preview.rs` | Manual inspection via `ags --preview` |

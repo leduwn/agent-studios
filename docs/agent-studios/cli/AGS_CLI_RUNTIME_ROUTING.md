@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Provider & Runtime Routing Architecture
 
 > **Document**: `AGS_CLI_RUNTIME_ROUTING.md`  
-> **Status**: Canonical Provider & Runtime Routing Specification  
+> **Status**: Canonical Provider & Runtime Routing Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` CLI Router / `runtime-session` / `provider` / External Runtime Adapters  
-> **Precedence**: Aligned with `AGS_CLI_COMMAND_SURFACE.md`, `PRODUCT_PRINCIPLES.md`, and `M11`/`M12` architecture specs.
+> **Precedence**: Aligned with `AGS_CLI_COMMAND_SURFACE.md`, `PRODUCT_PRINCIPLES.md`, and `M11`/`M12` architecture specs.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -188,19 +194,19 @@ pub fn build_codex_start_options(
 
 `ags` supports three distinct runtime engines selected via `--runtime <RUNTIME_ID>` or `/runtime <RUNTIME_ID>`.
 
-| Runtime ID | Execution Paradigm | Sandboxing Level | Best Suited For |
-| :--- | :--- | :--- | :--- |
-| `internal-codex` | In-process native Rust actor & thread manager | In-process workspace leases & worktrees | Autonomous multi-agent teams, high velocity, minimum overhead |
-| `opencode` | Subprocess server / HTTP client | Windows Job Objects, Linux cgroups, seccomp | Sandboxed external execution, untrusted repositories |
-| `claude-code` | Subprocess CLI child process (stdio) | Subprocess isolation, interactive approvals | Deep reasoning, complex refactors, native Claude Code workflows |
+| Runtime ID | Execution Paradigm | Sandboxing Level | Best Suited For | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| `internal-codex` | In-process native Rust actor & thread manager | In-process workspace leases & worktrees | Autonomous multi-agent teams, high velocity | `[IMPLEMENTED / VERIFIED]` |
+| `opencode` | Subprocess server / HTTP client | Windows Job Objects, Linux cgroups, seccomp | Sandboxed external execution, untrusted repos | `[IMPLEMENTED / VERIFIED]` |
+| `claude-code` | Subprocess CLI child process (stdio) | Subprocess isolation, interactive approvals | Deep reasoning, complex refactors | `[IMPLEMENTED / VERIFIED]` |
 
-### 4.1 Runtime 1: `internal-codex` (In-Process Engine)
-- **Architecture**: Runs entirely inside the `ags` process using `crates/internal-agent`.
+### 4.1 Runtime 1: `internal-codex` (In-Process Engine) `[IMPLEMENTED / VERIFIED]`
+- **Architecture**: Runs entirely inside the `ags` process using `crates/internal-agent`. Verified in `crates/internal-agent/tests/worktree_orchestration_e2e_tests.rs`.
 - **Concurrency**: Managed by `WorkspacePolicyArbitrator` allowing concurrent read-only agents and single-mutator leases.
 - **Multi-Agent Teams**: Supports the standard Agent Studios team structure (Coordinator, Coder, Tester, Reviewer) where each agent can possess an independent `ModelRef` and budget profile.
 
-### 4.2 Runtime 2: `opencode` (OpenCode Adapter)
-- **Architecture**: Coordinates with an OpenCode HTTP server instance using `crates/opencode-runtime`.
+### 4.2 Runtime 2: `opencode` (OpenCode Adapter) `[IMPLEMENTED / VERIFIED]`
+- **Architecture**: Coordinates with an OpenCode HTTP server instance using `crates/opencode-runtime`. Verified across 11 test suites in `crates/opencode-runtime/tests/`.
 - **Sandboxing**: Automatically places the OpenCode child process inside a Windows Job Object (`JobObjectGuard`) or Unix namespace sandbox:
   ```rust
   use agent_studios_opencode_runtime::sandbox::{JobObjectGuard, SandboxPolicy};
@@ -215,18 +221,18 @@ pub fn build_codex_start_options(
   ```
 - **Event Streaming**: Reads Server-Sent Events (SSE) from OpenCode `/events` endpoint and translates them into canonical `ControlPlaneEvent` envelopes via `translate_opencode_event_filtered()`.
 
-### 4.3 Runtime 3: `claude-code` (Claude Code Adapter)
-- **Architecture**: Launches the Claude Code CLI (`claude`) in headless JSON streaming mode via stdin/stdout NDJSON pipes.
+### 4.3 Runtime 3: `claude-code` (Claude Code Adapter) `[IMPLEMENTED / VERIFIED]`
+- **Architecture**: Launches the Claude Code CLI (`claude`) in headless JSON streaming mode via stdin/stdout NDJSON pipes. Verified across 6 test suites in `crates/claude-code-runtime/tests/`.
 - **Protocol Translation**: Translates Claude Code JSON control requests into Agent Studios `ControlPlaneEvent::ApprovalRequested` and waits for `ResolutionToken` response before writing approval decisions back to child stdin.
 - **Subagent Tracking**: Captures subagent creation events, assigning hierarchical `AgentId` tags and correlating tool costs against the parent task budget.
 
 ---
 
-## 5. Dynamic Mid-Session Runtime & Model Switching
+## 5. Dynamic Mid-Session Runtime & Model Switching `[PLANNED] (M13+)`
 
-A developer can switch models or runtimes dynamically without exiting `ags` or losing conversation context.
+*Status Reality Check*: Dynamic mid-session switching between models (`/model`) and runtimes (`/runtime`) without restarting the CLI session is currently **PLANNED** for Milestone M13+. In the current M12 release, the runtime and model are bound at session bootstrap time via `EmbeddedClient::bootstrap`.
 
-### 5.1 The `/model` Switch Flow
+### 5.1 The `/model` Switch Flow (Design Target)
 
 ```text
 Developer enters: /model openai/o3-mini
@@ -245,7 +251,7 @@ Developer enters: /model openai/o3-mini
 6. Status notice printed to transcript: "Switched active model to openai/o3-mini".
 ```
 
-### 5.2 The `/runtime` Switch Flow
+### 5.2 The `/runtime` Switch Flow (Design Target)
 
 When switching runtimes (e.g., from `internal-codex` to `claude-code`):
 1. Active in-flight tools complete or are cleanly cancelled.
@@ -305,3 +311,19 @@ pub enum RuntimeRoutingError {
     },
 }
 ```
+
+---
+
+## 7. Runtime Routing Feature-to-Test Evidence Matrix
+
+| Routing Subsystem | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **`internal-codex` Adapter** | `[IMPLEMENTED / VERIFIED]` | `crates/internal-agent/src/` | `crates/internal-agent/tests/worktree_orchestration_e2e_tests.rs` |
+| **`opencode` Adapter** | `[IMPLEMENTED / VERIFIED]` | `crates/opencode-runtime/src/`| 11 suites in `crates/opencode-runtime/tests/` |
+| **`claude-code` Adapter** | `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/`| 6 suites in `crates/claude-code-runtime/tests/` |
+| **Windows Job Object Sandbox**| `[IMPLEMENTED / VERIFIED]` | `crates/opencode-runtime/src/sandbox.rs`| `crates/opencode-runtime/tests/sandbox_lifecycle_tests.rs` |
+| **Claude Stdio NDJSON Streaming**| `[IMPLEMENTED / VERIFIED]` | `crates/claude-code-runtime/src/adapter.rs`| `crates/claude-code-runtime/tests/` |
+| **Runtime Session Factory** | `[IMPLEMENTED / VERIFIED]` | `crates/runtime-session/src/factory.rs`| `crates/runtime-session/tests/` |
+| **Provider Catalog & Resolution**| `[IMPLEMENTED / VERIFIED]` | `crates/provider/src/catalog.rs`| `crates/provider/tests/` |
+| **Mid-session `/model` switch**| `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Mid-session `/runtime` switch**| `[PLANNED]` (M13+) | - | Scheduled M13+ |

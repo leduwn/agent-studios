@@ -102,18 +102,12 @@ impl MainLayout {
 
                 let middle_chunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(65),
-                        Constraint::Percentage(35),
-                    ])
+                    .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
                     .split(main_chunks[2]);
 
                 let left_column = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(10),
-                        Constraint::Length(4),
-                    ])
+                    .constraints([Constraint::Min(10), Constraint::Length(4)])
                     .split(middle_chunks[0]);
 
                 Self {

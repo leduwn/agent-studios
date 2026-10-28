@@ -81,6 +81,13 @@ pub enum ControlPlaneEvent {
         parent_agent_id: Option<AgentId>,
         parent_thread_id: Option<String>,
     },
+    AssistantMessageChunk {
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        content: String,
+        is_thought: bool,
+    },
     ToolStarted {
         agent_id: AgentId,
         task_id: Option<TaskId>,

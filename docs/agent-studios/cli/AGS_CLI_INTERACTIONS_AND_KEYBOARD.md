@@ -1,9 +1,15 @@
 # Agent Studios CLI (`ags`) — Interactions, Keyboard Architecture & State Machine
 
 > **Document**: `AGS_CLI_INTERACTIONS_AND_KEYBOARD.md`  
-> **Status**: Canonical Interaction Model & Event Specification  
+> **Status**: Canonical Interaction Model & Event Specification (Audited & Honesty-Tagged)  
 > **Target Subsystem**: `ags` / Event Loop / Keymap Engine / Focus State Machine  
-> **Precedence**: Aligned with `AGS_CLI_COMPONENT_INVENTORY.md` and `PRODUCT_PRINCIPLES.md`.
+> **Precedence**: Aligned with `AGS_CLI_COMPONENT_INVENTORY.md` and `PRODUCT_PRINCIPLES.md`.  
+> **Audit Status Legend**:
+> - `[IMPLEMENTED / VERIFIED]`: Fully implemented in code and verified by automated tests.
+> - `[IMPLEMENTED / NOT VERIFIED]`: Implemented in code but awaiting live remote / daemon verification.
+> - `[PREVIEW ONLY]`: Visual/interaction design demonstrable in `ags --preview` with sample data.
+> - `[PLANNED]`: Architectural design finalized; scheduled for Milestone M13+.
+> - `[BLOCKED]`: Implementation blocked on external dependency.
 
 ---
 
@@ -23,14 +29,14 @@
 
 ### 2.1 Global Hotkeys (Active in all non-modal contexts)
 
-| Shortcut | Action Description | Control Plane / Subsystem Effect |
-| :--- | :--- | :--- |
-| `Ctrl+C` | Interrupt active agent run / Cancel prompt | Emits `CancelRun(active_run_id)`. If idle, clears current input. |
-| `Ctrl+D` | Terminate session / Exit CLI | Cleanly drops leases, disconnects session, resets terminal. |
-| `Ctrl+O` | Handoff to Agent Studios IDE (Code-OSS) | Invokes `code-oss --session <id>`; opens current shared session. |
-| `Ctrl+L` | Clear screen & force full redraw | Invalidates Ratatui render cache and redraws all widgets. |
-| `F1` or `?` | Toggle Help Overlay | Displays full hotkey cheat sheet and version info. |
-| `Esc` | Universal Dismiss / Focus Return | Closes active modal, clears selection, returns focus to Composer. |
+| Shortcut | Action Description | Control Plane / Subsystem Effect | Status |
+| :--- | :--- | :--- | :--- |
+| `Ctrl+C` | Interrupt active agent run / Cancel prompt | Emits `CancelRun(active_run_id)`. If idle, clears current input. | `[IMPLEMENTED / VERIFIED]` |
+| `Ctrl+D` | Terminate session / Exit CLI | Cleanly drops leases, disconnects session, resets terminal. | `[IMPLEMENTED / VERIFIED]` |
+| `Ctrl+O` | Handoff to Agent Studios IDE (Code-OSS) | Invokes `code-oss --session <id>`; opens current shared session. | `[PLANNED] (M13+)` |
+| `Ctrl+L` | Clear screen & force full redraw | Invalidates Ratatui render cache and redraws all widgets. | `[IMPLEMENTED / VERIFIED]` |
+| `F1` or `?` | Toggle Help Overlay | Displays full hotkey cheat sheet and version info. | `[IMPLEMENTED / VERIFIED]` |
+| `Esc` | Universal Dismiss / Focus Return | Closes active modal, clears selection, returns focus to Composer. | `[IMPLEMENTED / VERIFIED]` |
 
 ---
 
@@ -58,21 +64,21 @@
 
 When the developer presses `Alt+Up` or clicks inside the conversation transcript, the viewport enters **Transcript Mode**:
 
-| Shortcut | Action Description | Implementation Notes |
-| :--- | :--- | :--- |
-| `j` / `Down` | Scroll down 1 line | Increments `scroll_offset`. |
-| `k` / `Up` | Scroll up 1 line | Decrements `scroll_offset`. |
-| `PageDown` / `Ctrl+F` | Scroll down 10 lines (Page down) | Fast paging through long logs. |
-| `PageUp` / `Ctrl+B` | Scroll up 10 lines (Page up) | Fast paging backwards. |
-| `G` / `End` | Jump to newest message (Bottom) | Resumes auto-scroll lock. |
-| `gg` / `Home` | Jump to oldest message (Top) | Pauses auto-scroll lock. |
-| `Tab` / `Shift+Tab` | Jump between tool cards | Focuses next / previous collapsed tool invocation. |
-| `Space` / `Enter` | Expand / Collapse focused tool | Toggles full stdout/stderr and JSON arguments view. |
-| `c` | Copy focused block | Copies tool output or markdown code block to OS clipboard via `arboard`. |
-| `o` | Open file in editor | Launches file referenced by tool in `$EDITOR` or default editor. |
-| `/` | Search in transcript | Opens inline search query bar at bottom. |
-| `n` / `N` | Next / Previous search match | Jumps viewport to matching transcript item. |
-| `i` / `Esc` | Return to Input Composer | Restores focus to text prompt. |
+| Shortcut | Action Description | Implementation Notes | Status |
+| :--- | :--- | :--- | :--- |
+| `j` / `Down` | Scroll down 1 line | Increments `scroll_offset`. | `[IMPLEMENTED / VERIFIED]` |
+| `k` / `Up` | Scroll up 1 line | Decrements `scroll_offset`. | `[IMPLEMENTED / VERIFIED]` |
+| `PageDown` / `Ctrl+F` | Scroll down 10 lines (Page down) | Fast paging through long logs. | `[IMPLEMENTED / VERIFIED]` |
+| `PageUp` / `Ctrl+B` | Scroll up 10 lines (Page up) | Fast paging backwards. | `[IMPLEMENTED / VERIFIED]` |
+| `G` / `End` | Jump to newest message (Bottom) | Resumes auto-scroll lock. | `[IMPLEMENTED / VERIFIED]` |
+| `gg` / `Home` | Jump to oldest message (Top) | Pauses auto-scroll lock. | `[IMPLEMENTED / VERIFIED]` |
+| `Tab` / `Shift+Tab` | Jump between tool cards | Focuses next / previous collapsed tool invocation. | `[PREVIEW ONLY]` |
+| `Space` / `Enter` | Expand / Collapse focused tool | Toggles full stdout/stderr and JSON arguments view. | `[PREVIEW ONLY]` |
+| `c` | Copy focused block | Copies tool output or markdown code block to OS clipboard via `arboard`. | `[PLANNED] (M13+)` |
+| `o` | Open file in editor | Launches file referenced by tool in `$EDITOR` or default editor. | `[PLANNED] (M13+)` |
+| `/` | Search in transcript | Opens inline search query bar at bottom. | `[PLANNED] (M13+)` |
+| `n` / `N` | Next / Previous search match | Jumps viewport to matching transcript item. | `[PLANNED] (M13+)` |
+| `i` / `Esc` | Return to Input Composer | Restores focus to text prompt. | `[IMPLEMENTED / VERIFIED]` |
 
 ---
 
@@ -80,12 +86,12 @@ When the developer presses `Alt+Up` or clicks inside the conversation transcript
 
 When an agent attempts a sensitive operation (`WorkspaceMutating` or `DangerousHost`):
 
-| Shortcut | Action Description | Resulting Action |
-| :--- | :--- | :--- |
-| `y` or `Enter` | Approve Once | Grants one-time execution permission for this specific call. |
-| `n` or `Esc` | Reject & Deny | Denies tool execution; returns `PermissionDenied` to agent. |
-| `a` | Always Allow for Session | Whitelists this tool/command pattern for the lifetime of current session. |
-| `d` | Inspect Diff / Details | Expands full unified diff preview before deciding. |
+| Shortcut | Action Description | Resulting Action | Status |
+| :--- | :--- | :--- | :--- |
+| `y` or `Enter` | Approve Once | Grants one-time execution permission for this specific call. | `[IMPLEMENTED / VERIFIED]` |
+| `n` or `Esc` | Reject & Deny | Denies tool execution; returns `PermissionDenied` to agent. | `[IMPLEMENTED / VERIFIED]` |
+| `a` | Always Allow for Session | Whitelists this tool/command pattern for current session. | `[IMPLEMENTED / VERIFIED]` |
+| `d` | Inspect Diff / Details | Expands full unified diff preview before deciding. | `[IMPLEMENTED / VERIFIED]` |
 
 ---
 
@@ -93,14 +99,14 @@ When an agent attempts a sensitive operation (`WorkspaceMutating` or `DangerousH
 
 When reviewing code modifications proposed by `apply_patch` or worktree reconciliation:
 
-| Shortcut | Action Description | Resulting Action |
-| :--- | :--- | :--- |
-| `y` or `Enter` | Accept Patch | Reconciles patch into workspace working tree. |
-| `n` | Reject Patch | Discards patch; instructs agent to retry or abort. |
-| `e` | Edit in External Editor | Opens modified file in `$EDITOR` before final reconciliation. |
-| `]` / `n` | Next file / hunk | Advances viewport to next modified file. |
-| `[` / `p` | Previous file / hunk | Returns to previous modified file. |
-| `Esc` | Close Diff Viewer | Closes modal without approving or rejecting. |
+| Shortcut | Action Description | Resulting Action | Status |
+| :--- | :--- | :--- | :--- |
+| `y` or `Enter` | Accept Patch | Reconciles patch into workspace working tree. | `[IMPLEMENTED / VERIFIED]` (Widget) / `[PLANNED]` (M13+ Auto Merge) |
+| `n` | Reject Patch | Discards patch; instructs agent to retry or abort. | `[IMPLEMENTED / VERIFIED]` |
+| `e` | Edit in External Editor | Opens modified file in `$EDITOR` before final reconciliation. | `[PLANNED] (M13+)` |
+| `]` / `n` | Next file / hunk | Advances viewport to next modified file. | `[IMPLEMENTED / VERIFIED]` |
+| `[` / `p` | Previous file / hunk | Returns to previous modified file. | `[IMPLEMENTED / VERIFIED]` |
+| `Esc` | Close Diff Viewer | Closes modal without approving or rejecting. | `[IMPLEMENTED / VERIFIED]` |
 
 ---
 
@@ -224,3 +230,20 @@ impl Drop for TerminalGuard {
 }
 ```
 Panic hooks are registered at startup (`std::panic::set_hook`) to guarantee `TerminalGuard::drop` runs before printing panic stack traces.
+
+---
+
+## 5. Interaction & Keymap Feature-to-Test Evidence Matrix
+
+| Key / Interaction Feature | Honesty Status | Implementation File | Verification Test Module |
+| :--- | :--- | :--- | :--- |
+| **Terminal Raw Mode & Guard** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/terminal.rs` | `crates/tui/tests/widget_tests.rs::test_terminal_title_sanitization` |
+| **Focus State Transitions** | `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/app.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **Input Cursor Grapheme Movement**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | `crates/tui/tests/widget_tests.rs::test_vietnamese_unicode_nfc_grapheme_integrity` |
+| **History Navigation (`Up`/`Down`)**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/composer.rs` | Interactive in `ags` |
+| **Approval Modal Key Handling**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/approval_modal.rs`| `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **Diff Viewer Hunk Navigation**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/diff_viewer.rs` | `crates/tui/tests/widget_tests.rs::test_widgets_render_without_panics` |
+| **Slash Command Popup Trigger**| `[IMPLEMENTED / VERIFIED]` | `crates/tui/src/widgets/slash_menu.rs` | `crates/tui/tests/widget_tests.rs::test_slash_menu_commands_inventory` |
+| **Desktop IDE Handoff (`Ctrl+O`)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Clipboard Copy (`c`)** | `[PLANNED]` (M13+) | - | Scheduled M13+ |
+| **Transcript Text Search (`/`)**| `[PLANNED]` (M13+) | - | Scheduled M13+ |

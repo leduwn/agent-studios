@@ -3,10 +3,10 @@
 //! Provides an asynchronous, UI-decoupled contract for both Embedded (in-process)
 //! and Connected (daemon/IPC) execution modes.
 
-use std::fmt;
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::sync::Arc;
 
 use agent_studios_orchestration::read_models::{
     AgentSummary, TaskGraphSnapshot, TaskTimelineProjection,
@@ -59,6 +59,15 @@ pub struct WorktreeRecordSummary {
     pub state: String,
 }
 
+/// Contextual information about the current workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub project_name: String,
+    pub branch_name: Option<String>,
+    pub is_dirty: bool,
+    pub cwd: String,
+}
+
 /// Subscription stream returning historical backfill plus live receiver.
 pub struct ClientSubscription {
     pub backfill: Vec<EventEnvelope>,
@@ -66,7 +75,7 @@ pub struct ClientSubscription {
 }
 
 /// Errors produced by the Agent Studios client abstraction.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum ClientError {
     #[error("Transport or IPC error: {0}")]
     Transport(String),
@@ -79,6 +88,9 @@ pub enum ClientError {
 
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+
+    #[error("Unsupported capability: {0}")]
+    Unsupported(String),
 
     #[error("Operation timed out")]
     Timeout,
@@ -93,8 +105,14 @@ pub trait AgentStudiosClient: Send + Sync {
     /// Unique identifier for this studio session.
     fn studio_id(&self) -> StudioId;
 
+    /// Workspace name associated with this client session.
+    fn workspace_name(&self) -> &str;
+
     /// Current execution mode (Embedded or Connected).
     fn execution_mode(&self) -> ExecutionMode;
+
+    /// Queries workspace context including git branch, dirty status, and directory information.
+    async fn get_workspace_info(&self) -> Result<WorkspaceInfo, ClientError>;
 
     /// Cleanly terminates the client session and associated background workers.
     async fn shutdown(&self) -> Result<(), ClientError>;
@@ -110,7 +128,8 @@ pub trait AgentStudiosClient: Send + Sync {
     async fn cancel_active_run(&self, reason: Option<String>) -> Result<(), ClientError>;
 
     /// Subscribes to the authoritative event stream starting from a sequence number.
-    async fn subscribe_events(&self, from_sequence: u64) -> Result<ClientSubscription, ClientError>;
+    async fn subscribe_events(&self, from_sequence: u64)
+    -> Result<ClientSubscription, ClientError>;
 
     /// Returns the current projection snapshot of the multi-agent task graph.
     async fn get_task_graph(&self) -> Result<TaskGraphSnapshot, ClientError>;
@@ -119,7 +138,10 @@ pub trait AgentStudiosClient: Send + Sync {
     async fn get_agent_summaries(&self) -> Result<Vec<AgentSummary>, ClientError>;
 
     /// Returns the execution timeline projection for a specific task.
-    async fn get_task_timeline(&self, task_id: TaskId) -> Result<TaskTimelineProjection, ClientError>;
+    async fn get_task_timeline(
+        &self,
+        task_id: TaskId,
+    ) -> Result<TaskTimelineProjection, ClientError>;
 
     /// Resolves an interactive tool execution approval request.
     async fn resolve_approval(
@@ -132,7 +154,10 @@ pub trait AgentStudiosClient: Send + Sync {
     async fn list_worktrees(&self) -> Result<Vec<WorktreeRecordSummary>, ClientError>;
 
     /// Returns captured file diffs for a managed worktree.
-    async fn get_worktree_diff(&self, worktree_id: WorktreeId) -> Result<CapturedChanges, ClientError>;
+    async fn get_worktree_diff(
+        &self,
+        worktree_id: WorktreeId,
+    ) -> Result<CapturedChanges, ClientError>;
 
     /// Reconciles an agent patch back into the target branch.
     async fn reconcile_patch(

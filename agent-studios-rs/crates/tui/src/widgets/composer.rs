@@ -33,7 +33,10 @@ impl<'a> Widget for ComposerWidget<'a> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
-            .title(Span::styled(" Input Prompt ", Style::default().fg(self.theme.text_secondary)))
+            .title(Span::styled(
+                " Input Prompt ",
+                Style::default().fg(self.theme.text_secondary),
+            ))
             .style(self.theme.card_style());
 
         let inner_area = block.inner(area);
@@ -44,12 +47,12 @@ impl<'a> Widget for ComposerWidget<'a> {
         }
 
         if self.input_text.is_empty() {
-            let placeholder = Line::from(vec![
-                Span::styled(
-                    "Type prompt or / for commands... (Enter để gửi, / xem lệnh)",
-                    Style::default().fg(self.theme.text_muted).add_modifier(Modifier::ITALIC),
-                ),
-            ]);
+            let placeholder = Line::from(vec![Span::styled(
+                "Type prompt or / for commands... (Enter để gửi, / xem lệnh)",
+                Style::default()
+                    .fg(self.theme.text_muted)
+                    .add_modifier(Modifier::ITALIC),
+            )]);
             buf.set_line(inner_area.x, inner_area.y, &placeholder, inner_area.width);
             return;
         }
@@ -74,7 +77,10 @@ impl<'a> Widget for ComposerWidget<'a> {
                         .add_modifier(Modifier::BOLD),
                 ));
             } else {
-                spans.push(Span::styled(g, Style::default().fg(self.theme.text_primary)));
+                spans.push(Span::styled(
+                    g,
+                    Style::default().fg(self.theme.text_primary),
+                ));
             }
             visual_x += g.width();
         }
@@ -84,7 +90,9 @@ impl<'a> Widget for ComposerWidget<'a> {
             cursor_visual_x = visual_x;
             spans.push(Span::styled(
                 " ",
-                Style::default().bg(self.theme.accent_emerald).fg(self.theme.text_inverse),
+                Style::default()
+                    .bg(self.theme.accent_emerald)
+                    .fg(self.theme.text_inverse),
             ));
         }
 
