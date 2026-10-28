@@ -34,16 +34,35 @@ impl OpenCodeSessionContext {
 /// Enforces canonical path resolution and verifies that the working directory does not escape the managed worktree root.
 pub fn validate_session_workspace(
     workspace: &ExecutionWorkspace,
-    _access_mode: WorkspaceAccessMode,
+    access_mode: WorkspaceAccessMode,
 ) -> Result<PathBuf, OpenCodeError> {
     match workspace {
-        ExecutionWorkspace::Managed { cwd, root, .. } => {
+        ExecutionWorkspace::Managed {
+            cwd,
+            root,
+            source_root,
+            ..
+        } => {
             let canonical_root = root.canonicalize().map_err(|e| {
                 OpenCodeError::WorktreeIsolationViolation(format!(
                     "Managed worktree root path cannot be resolved or does not exist: {}: {e}",
                     root.display()
                 ))
             })?;
+
+            if access_mode == WorkspaceAccessMode::Mutating {
+                let same_path = match (root.canonicalize(), source_root.canonicalize()) {
+                    (Ok(cr), Ok(cs)) => cr == cs,
+                    _ => root == source_root,
+                };
+                if same_path {
+                    return Err(OpenCodeError::WorktreeIsolationViolation(format!(
+                        "Managed worktree root '{}' equals source root '{}' under Mutating access mode; physical worktree isolation required",
+                        root.display(),
+                        source_root.display()
+                    )));
+                }
+            }
 
             let p = if cwd.as_os_str().is_empty() {
                 canonical_root.clone()
@@ -77,10 +96,25 @@ pub fn validate_session_workspace(
             }
             Ok(p)
         }
-        ExecutionWorkspace::SharedSource { .. } => {
-            Err(OpenCodeError::WorktreeIsolationViolation(
-                "ExecutionWorkspace::SharedSource is strictly prohibited for external runtimes to protect repository integrity".into(),
-            ))
+        ExecutionWorkspace::SharedSource { cwd } => {
+            if access_mode == WorkspaceAccessMode::Mutating {
+                return Err(OpenCodeError::WorktreeIsolationViolation(
+                    "ExecutionWorkspace::SharedSource is strictly prohibited for Mutating access mode to protect repository integrity".into(),
+                ));
+            }
+            let canonical_cwd = cwd.canonicalize().map_err(|e| {
+                OpenCodeError::WorktreeIsolationViolation(format!(
+                    "SharedSource cwd cannot be resolved or does not exist: {}: {e}",
+                    cwd.display()
+                ))
+            })?;
+            if !canonical_cwd.is_dir() {
+                return Err(OpenCodeError::WorktreeIsolationViolation(format!(
+                    "SharedSource path is not a directory: {}",
+                    canonical_cwd.display()
+                )));
+            }
+            Ok(canonical_cwd)
         }
     }
 }

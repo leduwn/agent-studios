@@ -123,11 +123,35 @@ fn test_workspace_validation_managed_vs_shared() {
     let fail_res = validate_session_workspace(&non_existent, WorkspaceAccessMode::Mutating);
     assert!(fail_res.is_err());
 
-    // 3. SharedSource strictly fails closed
-    let shared = ExecutionWorkspace::shared_source(temp_path);
+    // 3. SharedSource strictly fails closed for Mutating mode
+    let shared = ExecutionWorkspace::shared_source(temp_path.clone());
     let shared_res = validate_session_workspace(&shared, WorkspaceAccessMode::Mutating);
     assert!(
         shared_res.is_err(),
-        "SharedSource must be rejected to prevent direct repository mutation"
+        "SharedSource must be rejected for Mutating mode to prevent direct repository mutation"
+    );
+
+    // 4. SharedSource succeeds for ReadOnly mode
+    let shared_readonly = validate_session_workspace(&shared, WorkspaceAccessMode::ReadOnly);
+    assert!(
+        shared_readonly.is_ok(),
+        "SharedSource should be permitted for ReadOnly mode"
+    );
+    assert_eq!(shared_readonly.unwrap(), temp_path.canonicalize().unwrap());
+
+    // 5. Managed worktree where root == source_root fails closed under Mutating mode (CLI-1.2-R01)
+    let equal_root_managed = ExecutionWorkspace::managed(
+        WorktreeId::new(),
+        temp_path.clone(),
+        temp_path.clone(),
+        temp_path.clone(),
+        temp_path.clone(),
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+    let equal_root_res =
+        validate_session_workspace(&equal_root_managed, WorkspaceAccessMode::Mutating);
+    assert!(
+        equal_root_res.is_err(),
+        "Managed worktree root == source_root must be rejected under Mutating mode"
     );
 }

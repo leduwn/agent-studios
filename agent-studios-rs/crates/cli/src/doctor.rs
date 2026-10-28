@@ -358,25 +358,13 @@ mod tests {
         assert!(!report.checks.is_empty());
 
         let check_names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(check_names.iter().any(|&n| n == "Platform"));
-        assert!(check_names.iter().any(|&n| n == "Git Executable"));
-        assert!(
-            check_names
-                .iter()
-                .any(|&n| n == "Git Repository & Worktree")
-        );
-        assert!(check_names.iter().any(|&n| n == "Terminal Geometry"));
-        assert!(
-            check_names
-                .iter()
-                .any(|&n| n == "Color & ANSI Capabilities")
-        );
-        assert!(
-            check_names
-                .iter()
-                .any(|&n| n == "Unicode NFC & Vietnamese Tone Pipeline")
-        );
-        assert!(check_names.iter().any(|&n| n == "Control Plane Engine"));
+        assert!(check_names.contains(&"Platform"));
+        assert!(check_names.contains(&"Git Executable"));
+        assert!(check_names.contains(&"Git Repository & Worktree"));
+        assert!(check_names.contains(&"Terminal Geometry"));
+        assert!(check_names.contains(&"Color & ANSI Capabilities"));
+        assert!(check_names.contains(&"Unicode NFC & Vietnamese Tone Pipeline"));
+        assert!(check_names.contains(&"Control Plane Engine"));
 
         let json = serde_json::to_string(&report);
         assert!(json.is_ok());

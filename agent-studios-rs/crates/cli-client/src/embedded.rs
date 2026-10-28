@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -13,8 +14,8 @@ use agent_studios_control_plane::clock::SystemClock;
 use agent_studios_control_plane::engine::ControlPlane;
 use agent_studios_control_plane::store::{EventStore, InMemoryStore};
 use agent_studios_external_runtime::{
-    AgentRuntime, RuntimeCorrelation, RuntimeEventKind, RuntimeInstanceRef, RuntimeSessionRef,
-    RuntimeStartRequest, WorkspaceAccessMode,
+    AgentRuntime, RuntimeCorrelation, RuntimeEventKind, RuntimeInstanceRef, RuntimeSessionId,
+    RuntimeSessionRef, RuntimeStartRequest, WorkspaceAccessMode,
 };
 use agent_studios_orchestration::projection::{
     build_task_graph_snapshot, project_agent_summary, project_task_timeline,
@@ -23,10 +24,12 @@ use agent_studios_orchestration::read_models::{
     AgentSummary, TaskGraphSnapshot, TaskTimelineProjection,
 };
 use agent_studios_protocol::agent::AgentKind;
-use agent_studios_protocol::approval::ApprovalState;
+use agent_studios_protocol::approval::{ApprovalKind, ApprovalState};
 use agent_studios_protocol::cancellation::CancellationScope;
-use agent_studios_protocol::event::EventEnvelope;
-use agent_studios_protocol::id::{ApprovalId, ReconciliationId, StudioId, TaskId, WorktreeId};
+use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
+use agent_studios_protocol::id::{
+    AgentId, ApprovalId, EventId, ReconciliationId, RunId, StudioId, TaskId, WorktreeId,
+};
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
 use agent_studios_protocol::worktree::ExecutionWorkspace;
@@ -48,6 +51,7 @@ pub struct EmbeddedClient {
     events_history: Arc<RwLock<Vec<EventEnvelope>>>,
     runtime: Arc<dyn AgentRuntime>,
     active_sessions: Arc<RwLock<Vec<RuntimeSessionRef>>>,
+    approval_sessions: Arc<RwLock<HashMap<ApprovalId, RuntimeSessionId>>>,
     mode: RuntimeMode,
 }
 
@@ -166,6 +170,7 @@ impl EmbeddedClient {
             events_history,
             runtime,
             active_sessions: Arc::new(RwLock::new(Vec::new())),
+            approval_sessions: Arc::new(RwLock::new(HashMap::new())),
             mode,
         })
     }
@@ -186,6 +191,144 @@ impl EmbeddedClient {
             }
         }
     }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_arguments,
+        clippy::needless_borrows_for_generic_args
+    )]
+    async fn fail_task_and_run(
+        cp: &mut ControlPlane<SystemClock, InMemoryStore>,
+        studio_id: StudioId,
+        task_id: TaskId,
+        run_id: RunId,
+        agent_id: AgentId,
+        err_msg: &str,
+        events_history: &RwLock<Vec<EventEnvelope>>,
+        events_tx: &broadcast::Sender<EventEnvelope>,
+    ) {
+        let _ = cp.record_assistant_chunk(
+            studio_id,
+            agent_id,
+            Some(task_id),
+            Some(run_id),
+            &format!("[Startup Error] {err_msg}\n"),
+            false,
+        );
+        let _ = cp.record_run_outcome(run_id, "startup_failed", Some(err_msg.to_string()));
+        let _ = cp.transition_run_state(run_id, RunState::Failed);
+        let _ = cp.transition_task_state(task_id, TaskState::Failed);
+        Self::sync_events_internal(cp, studio_id, events_history, events_tx).await;
+    }
+
+    #[allow(dead_code)]
+    async fn record_startup_failure(
+        &self,
+        task_id: TaskId,
+        run_id: RunId,
+        agent_id: AgentId,
+        err_msg: &str,
+    ) {
+        let mut cp = self.control_plane.lock().await;
+        Self::fail_task_and_run(
+            &mut cp,
+            self.studio_id,
+            task_id,
+            run_id,
+            agent_id,
+            err_msg,
+            &self.events_history,
+            &self.events_tx,
+        )
+        .await;
+    }
+
+    /// Access internal active runtime sessions (for inspection/testing).
+    pub fn active_sessions(&self) -> &Arc<RwLock<Vec<RuntimeSessionRef>>> {
+        &self.active_sessions
+    }
+
+    /// Access internal control plane instance (for inspection/testing).
+    pub fn control_plane(&self) -> &Arc<Mutex<ControlPlane<SystemClock, InMemoryStore>>> {
+        &self.control_plane
+    }
+
+    /// Injects an event envelope directly into history and/or broadcast channel.
+    /// Used for testing gap recovery, broadcast loss, and fault injection.
+    #[doc(hidden)]
+    pub async fn inject_raw_event_for_testing(
+        &self,
+        envelope: EventEnvelope,
+        to_history: bool,
+        to_broadcast: bool,
+    ) {
+        if to_history {
+            let mut history = self.events_history.write().await;
+            history.push(envelope.clone());
+        }
+        if to_broadcast {
+            let _ = self.events_tx.send(envelope);
+        }
+    }
+}
+
+fn is_terminal_event(event: &ControlPlaneEvent) -> bool {
+    match event {
+        ControlPlaneEvent::TaskStateChanged { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::RunStateChanged { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::RunOutcomeRecorded { .. } => true,
+        ControlPlaneEvent::ApprovalResolved { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::AgentStateChanged { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::WorktreeStateChanged { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::WorktreeReleased { .. } => true,
+        ControlPlaneEvent::ReconciliationStateChanged { new_state, .. } => new_state.is_terminal(),
+        ControlPlaneEvent::ReconciliationApplied { .. }
+        | ControlPlaneEvent::ReconciliationFailed { .. } => true,
+        ControlPlaneEvent::CancellationRequested { .. } => true,
+        _ => false,
+    }
+}
+
+async fn deliver_events_with_continuity_check(
+    candidates: Vec<EventEnvelope>,
+    last_delivered: &mut u64,
+    delivered_terminal_events: &mut HashSet<EventId>,
+    tx: &mpsc::Sender<EventEnvelope>,
+) -> bool {
+    let mut has_unrecovered_gap = false;
+
+    for candidate in candidates {
+        if candidate.sequence <= *last_delivered {
+            continue;
+        }
+
+        if !has_unrecovered_gap && candidate.sequence == *last_delivered + 1 {
+            *last_delivered = candidate.sequence;
+            if tx.send(candidate).await.is_err() {
+                return false;
+            }
+        } else {
+            if !has_unrecovered_gap {
+                has_unrecovered_gap = true;
+                tracing::warn!(
+                    studio_id = %candidate.studio_id,
+                    last_delivered = *last_delivered,
+                    expected = *last_delivered + 1,
+                    found = candidate.sequence,
+                    "Unrecoverable sequence gap detected: missing events in history"
+                );
+            }
+
+            if is_terminal_event(&candidate.event)
+                && delivered_terminal_events.insert(candidate.event_id)
+                && tx.send(candidate).await.is_err()
+            {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 #[async_trait]
@@ -257,11 +400,21 @@ impl AgentStudiosClient for EmbeddedClient {
     async fn shutdown(&self) -> Result<(), ClientError> {
         tracing::info!(studio_id = %self.studio_id, "Embedded client shutting down");
         let active_sessions = {
-            let active = self.active_sessions.read().await;
-            active.clone()
+            let mut active = self.active_sessions.write().await;
+            std::mem::take(&mut *active)
         };
+        let mut stop_errors = Vec::new();
         for session in active_sessions {
-            let _ = self.runtime.stop(&session).await;
+            if let Err(e) = self.runtime.stop(&session).await {
+                stop_errors.push(format!(
+                    "Failed to stop session {}: {e}",
+                    session.session_id
+                ));
+            }
+        }
+        self.approval_sessions.write().await.clear();
+        if !stop_errors.is_empty() {
+            return Err(ClientError::OperationFailed(stop_errors.join("; ")));
         }
         Ok(())
     }
@@ -285,7 +438,7 @@ impl AgentStudiosClient for EmbeddedClient {
                 )
                 .map_err(|e| ClientError::OperationFailed(format!("Failed to submit task: {e}")))?;
 
-            let agent = cp
+            let agent = match cp
                 .state()
                 .agents
                 .values()
@@ -297,49 +450,127 @@ impl AgentStudiosClient for EmbeddedClient {
                         .find(|a| a.studio_id == self.studio_id)
                 })
                 .cloned()
-                .ok_or_else(|| {
-                    ClientError::OperationFailed("No registered agent found for studio".to_string())
-                })?;
+            {
+                Some(a) => a,
+                None => {
+                    let _ = cp.transition_task_state(task.id, TaskState::Failed);
+                    Self::sync_events_internal(
+                        &cp,
+                        self.studio_id,
+                        &self.events_history,
+                        &self.events_tx,
+                    )
+                    .await;
+                    return Err(ClientError::OperationFailed(
+                        "No registered agent found for studio".to_string(),
+                    ));
+                }
+            };
 
-            let run = cp
-                .create_run(task.id, agent.id)
-                .map_err(|e| ClientError::OperationFailed(format!("Failed to create run: {e}")))?;
+            let run = match cp.create_run(task.id, agent.id) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = cp.transition_task_state(task.id, TaskState::Failed);
+                    Self::sync_events_internal(
+                        &cp,
+                        self.studio_id,
+                        &self.events_history,
+                        &self.events_tx,
+                    )
+                    .await;
+                    return Err(ClientError::OperationFailed(format!(
+                        "Failed to create run: {e}"
+                    )));
+                }
+            };
 
-            cp.transition_task_state(task.id, TaskState::Running)
-                .map_err(|e| {
-                    ClientError::OperationFailed(format!(
-                        "Failed to transition task to Running: {e}"
-                    ))
-                })?;
+            if let Err(e) = cp.transition_task_state(task.id, TaskState::Running) {
+                let _ = cp.transition_run_state(run.id, RunState::Failed);
+                let _ = cp.transition_task_state(task.id, TaskState::Failed);
+                Self::sync_events_internal(
+                    &cp,
+                    self.studio_id,
+                    &self.events_history,
+                    &self.events_tx,
+                )
+                .await;
+                return Err(ClientError::OperationFailed(format!(
+                    "Failed to transition task to Running: {e}"
+                )));
+            }
 
-            cp.transition_run_state(run.id, RunState::Starting)
-                .map_err(|e| {
-                    ClientError::OperationFailed(format!(
-                        "Failed to transition run to Starting: {e}"
-                    ))
-                })?;
-            cp.transition_run_state(run.id, RunState::Running)
-                .map_err(|e| {
-                    ClientError::OperationFailed(format!(
-                        "Failed to transition run to Running: {e}"
-                    ))
-                })?;
+            if let Err(e) = cp.transition_run_state(run.id, RunState::Starting) {
+                let _ = cp.transition_run_state(run.id, RunState::Failed);
+                let _ = cp.transition_task_state(task.id, TaskState::Failed);
+                Self::sync_events_internal(
+                    &cp,
+                    self.studio_id,
+                    &self.events_history,
+                    &self.events_tx,
+                )
+                .await;
+                return Err(ClientError::OperationFailed(format!(
+                    "Failed to transition run to Starting: {e}"
+                )));
+            }
+
+            if let Err(e) = cp.transition_run_state(run.id, RunState::Running) {
+                let _ = cp.transition_run_state(run.id, RunState::Failed);
+                let _ = cp.transition_task_state(task.id, TaskState::Failed);
+                Self::sync_events_internal(
+                    &cp,
+                    self.studio_id,
+                    &self.events_history,
+                    &self.events_tx,
+                )
+                .await;
+                return Err(ClientError::OperationFailed(format!(
+                    "Failed to transition run to Running: {e}"
+                )));
+            }
 
             let cwd_path =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let wt = cp
-                .create_worktree(
-                    self.studio_id,
-                    format!("worktree-{}", task.id),
-                    cwd_path.clone(),
-                    cwd_path.clone(),
-                    "HEAD",
-                )
-                .map_err(|e| {
-                    ClientError::OperationFailed(format!("Failed to register worktree: {e}"))
-                })?;
+            let wt = match cp.create_worktree(
+                self.studio_id,
+                format!("worktree-{}", task.id),
+                cwd_path.clone(),
+                cwd_path.clone(),
+                "HEAD",
+            ) {
+                Ok(wt) => wt,
+                Err(e) => {
+                    let err_msg = format!("Failed to register worktree: {e}");
+                    Self::fail_task_and_run(
+                        &mut cp,
+                        self.studio_id,
+                        task.id,
+                        run.id,
+                        agent.id,
+                        &err_msg,
+                        &self.events_history,
+                        &self.events_tx,
+                    )
+                    .await;
+                    return Err(ClientError::OperationFailed(err_msg));
+                }
+            };
 
-            let _ = cp.assign_worktree(wt.id, task.id, agent.id, Some(run.id));
+            if let Err(e) = cp.assign_worktree(wt.id, task.id, agent.id, Some(run.id)) {
+                let err_msg = format!("Failed to assign worktree: {e}");
+                Self::fail_task_and_run(
+                    &mut cp,
+                    self.studio_id,
+                    task.id,
+                    run.id,
+                    agent.id,
+                    &err_msg,
+                    &self.events_history,
+                    &self.events_tx,
+                )
+                .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
 
             Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
                 .await;
@@ -348,18 +579,29 @@ impl AgentStudiosClient for EmbeddedClient {
         };
 
         // 2. Discover runtime instance
-        let instances =
-            self.runtime.discover().await.map_err(|e| {
-                ClientError::OperationFailed(format!("Runtime discovery error: {e}"))
-            })?;
+        let instances = match self.runtime.discover().await {
+            Ok(inst) => inst,
+            Err(e) => {
+                let err_msg = format!("Runtime discovery error: {e}");
+                self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                    .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
+        };
 
-        let instance = instances
+        let instance = match instances
             .iter()
             .find(|i| i.is_available())
             .or_else(|| instances.first())
-            .ok_or_else(|| {
-                ClientError::OperationFailed("No runtime instances discovered".to_string())
-            })?;
+        {
+            Some(inst) => inst,
+            None => {
+                let err_msg = "No runtime instances discovered".to_string();
+                self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                    .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
+        };
 
         // 3. Build RuntimeStartRequest with correlation
         let correlation = RuntimeCorrelation::new()
@@ -387,30 +629,50 @@ impl AgentStudiosClient for EmbeddedClient {
             .with_initial_prompt(prompt.to_string())
             .with_correlation(correlation);
 
-        let handle = self.runtime.start(start_req).await.map_err(|e| {
-            ClientError::OperationFailed(format!("Failed to start runtime session: {e}"))
-        })?;
+        let handle = match self.runtime.start(start_req).await {
+            Ok(h) => h,
+            Err(e) => {
+                let err_msg = format!("Failed to start runtime session: {e}");
+                self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                    .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
+        };
 
         let session_ref = handle.session_ref();
+        let session_id = session_ref.session_id;
         {
             let mut active = self.active_sessions.write().await;
             active.push(session_ref.clone());
         }
 
         // 4. Subscribe to runtime events
-        let mut runtime_sub = self
-            .runtime
-            .events_after(&session_ref, None)
-            .await
-            .map_err(|e| {
-                ClientError::OperationFailed(format!("Failed to subscribe to runtime events: {e}"))
-            })?;
+        let mut runtime_sub = match self.runtime.events_after(&session_ref, None).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                let err_msg = format!("Failed to subscribe to runtime events: {e}");
+                if let Err(stop_err) = self.runtime.stop(&session_ref).await {
+                    tracing::warn!(
+                        "Failed to stop runtime session after subscription failure: {stop_err}"
+                    );
+                }
+                {
+                    let mut active = self.active_sessions.write().await;
+                    active.retain(|s| s != &session_ref);
+                }
+                self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                    .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
+        };
 
         // 5. Ingestion loop in background: routes RuntimeEvents into Control Plane & event stream
         let cp_arc = self.control_plane.clone();
         let studio_id = self.studio_id;
         let events_tx = self.events_tx.clone();
         let events_history = self.events_history.clone();
+        let active_sessions = self.active_sessions.clone();
+        let approval_sessions = self.approval_sessions.clone();
 
         tokio::spawn(async move {
             while let Ok(Some(runtime_event)) = runtime_sub.next_event().await {
@@ -481,14 +743,44 @@ impl AgentStudiosClient for EmbeddedClient {
                             );
                         }
                     }
-                    RuntimeEventKind::Completed { summary } => {
-                        let _ = cp.record_run_outcome(
-                            run_id,
-                            "succeeded",
-                            summary.clone(),
+                    RuntimeEventKind::ApprovalRequested {
+                        approval_id,
+                        description,
+                        command,
+                    } => {
+                        // Authoritative typed session correlation: map approval_id -> session_id
+                        {
+                            let mut mapping = approval_sessions.write().await;
+                            mapping.insert(*approval_id, session_id);
+                        }
+
+                        let kind = if command.is_some() {
+                            ApprovalKind::CommandExecution
+                        } else {
+                            ApprovalKind::Other
+                        };
+
+                        let _ = cp.record_approval_request(
+                            *approval_id,
+                            studio_id,
+                            task_id,
+                            agent_id,
+                            kind,
+                            description.as_str(),
                         );
+                    }
+                    RuntimeEventKind::Completed { summary } => {
+                        let _ = cp.record_run_outcome(run_id, "succeeded", summary.clone());
                         let _ = cp.transition_run_state(run_id, RunState::Succeeded);
                         let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
+                        active_sessions
+                            .write()
+                            .await
+                            .retain(|s| s.session_id != session_id);
+                        approval_sessions
+                            .write()
+                            .await
+                            .retain(|_, sid| *sid != session_id);
                     }
                     RuntimeEventKind::Failed { safe_error_summary } => {
                         let _ = cp.record_run_outcome(
@@ -498,6 +790,14 @@ impl AgentStudiosClient for EmbeddedClient {
                         );
                         let _ = cp.transition_run_state(run_id, RunState::Failed);
                         let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                        active_sessions
+                            .write()
+                            .await
+                            .retain(|s| s.session_id != session_id);
+                        approval_sessions
+                            .write()
+                            .await
+                            .retain(|_, sid| *sid != session_id);
                     }
                     RuntimeEventKind::Stopped => {
                         let _ = cp.record_run_outcome(
@@ -507,6 +807,14 @@ impl AgentStudiosClient for EmbeddedClient {
                         );
                         let _ = cp.transition_run_state(run_id, RunState::Cancelled);
                         let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                        active_sessions
+                            .write()
+                            .await
+                            .retain(|s| s.session_id != session_id);
+                        approval_sessions
+                            .write()
+                            .await
+                            .retain(|_, sid| *sid != session_id);
                     }
                     RuntimeEventKind::Interrupted { reason } => {
                         let _ = cp.record_run_outcome(
@@ -516,6 +824,14 @@ impl AgentStudiosClient for EmbeddedClient {
                         );
                         let _ = cp.transition_run_state(run_id, RunState::Cancelled);
                         let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                        active_sessions
+                            .write()
+                            .await
+                            .retain(|s| s.session_id != session_id);
+                        approval_sessions
+                            .write()
+                            .await
+                            .retain(|_, sid| *sid != session_id);
                     }
                     _ => {}
                 }
@@ -534,11 +850,24 @@ impl AgentStudiosClient for EmbeddedClient {
                 let _ = cp.record_run_outcome(
                     run_id,
                     "aborted",
-                    Some("Runtime event stream terminated without explicit terminal event".to_string()),
+                    Some(
+                        "Runtime event stream terminated without explicit terminal event"
+                            .to_string(),
+                    ),
                 );
                 let _ = cp.transition_run_state(run_id, RunState::Cancelled);
                 let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
                 Self::sync_events_internal(&cp, studio_id, &events_history, &events_tx).await;
+            }
+
+            // Clean up active session and correlated approvals on session termination
+            {
+                let mut active = active_sessions.write().await;
+                active.retain(|s| s.session_id != session_id);
+            }
+            {
+                let mut mapping = approval_sessions.write().await;
+                mapping.retain(|_, sid| *sid != session_id);
             }
         });
 
@@ -556,13 +885,34 @@ impl AgentStudiosClient for EmbeddedClient {
         Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
             .await;
 
-        let active_sessions = {
-            let active = self.active_sessions.read().await;
-            active.clone()
+        let sessions = {
+            let mut active = self.active_sessions.write().await;
+            std::mem::take(&mut *active)
         };
 
-        for session in active_sessions {
-            let _ = self.runtime.stop(&session).await;
+        let mut stop_errors = Vec::new();
+        let mut failed_to_stop = Vec::new();
+
+        for session in sessions {
+            if let Err(e) = self.runtime.stop(&session).await {
+                stop_errors.push(format!(
+                    "Failed to stop runtime session {}: {e}",
+                    session.session_id
+                ));
+                failed_to_stop.push(session);
+            }
+        }
+
+        if !failed_to_stop.is_empty() {
+            let mut active = self.active_sessions.write().await;
+            active.extend(failed_to_stop);
+        } else {
+            let mut mapping = self.approval_sessions.write().await;
+            mapping.clear();
+        }
+
+        if !stop_errors.is_empty() {
+            return Err(ClientError::OperationFailed(stop_errors.join("; ")));
         }
 
         Ok(())
@@ -583,6 +933,22 @@ impl AgentStudiosClient for EmbeddedClient {
             .cloned()
             .collect();
 
+        // Check for any unrecoverable gap in backfill history
+        if !backfill.is_empty() {
+            let mut prev_seq = backfill[0].sequence;
+            for env in &backfill[1..] {
+                if env.sequence > prev_seq + 1 {
+                    tracing::warn!(
+                        studio_id = %env.studio_id,
+                        expected = prev_seq + 1,
+                        found = env.sequence,
+                        "Unrecoverable sequence gap detected in backfill history"
+                    );
+                }
+                prev_seq = env.sequence;
+            }
+        }
+
         let mut last_delivered = backfill
             .last()
             .map(|e| e.sequence)
@@ -594,51 +960,91 @@ impl AgentStudiosClient for EmbeddedClient {
         let history_arc = self.events_history.clone();
 
         tokio::spawn(async move {
+            let mut delivered_terminal_events = HashSet::new();
+
             loop {
                 match bcast_rx.recv().await {
                     Ok(env) => {
-                        // Deduplicate events already included in backfill
+                        // Deduplicate events already included in backfill or delivered
                         if env.sequence <= last_delivered {
                             continue;
                         }
 
+                        let mut candidates = Vec::new();
+
                         // Monotonic gap recovery: if sequence jumped ahead, catch up from history
                         if env.sequence > last_delivered + 1 {
                             let history = history_arc.read().await;
-                            let missed: Vec<EventEnvelope> = history
+                            let mut missed: Vec<EventEnvelope> = history
                                 .iter()
-                                .filter(|e| e.sequence > last_delivered && e.sequence < env.sequence)
+                                .filter(|e| {
+                                    e.sequence > last_delivered && e.sequence < env.sequence
+                                })
                                 .cloned()
                                 .collect();
                             drop(history);
-                            for gap_env in missed {
-                                if tx.send(gap_env).await.is_err() {
-                                    return;
-                                }
-                            }
+                            missed.sort_by_key(|e| e.sequence);
+                            candidates.extend(missed);
                         }
 
-                        last_delivered = env.sequence;
-                        if tx.send(env).await.is_err() {
+                        candidates.push(env);
+
+                        if !deliver_events_with_continuity_check(
+                            candidates,
+                            &mut last_delivered,
+                            &mut delivered_terminal_events,
+                            &tx,
+                        )
+                        .await
+                        {
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                    Err(broadcast::error::RecvError::Lagged(skipped_count)) => {
+                        tracing::warn!(
+                            skipped_count = skipped_count,
+                            last_delivered = last_delivered,
+                            "Broadcast receiver lagged; recovering missing events from history"
+                        );
                         let history = history_arc.read().await;
-                        let missed: Vec<EventEnvelope> = history
+                        let mut missed: Vec<EventEnvelope> = history
                             .iter()
                             .filter(|e| e.sequence > last_delivered)
                             .cloned()
                             .collect();
                         drop(history);
-                        for env in missed {
-                            last_delivered = env.sequence;
-                            if tx.send(env).await.is_err() {
-                                return;
-                            }
+                        missed.sort_by_key(|e| e.sequence);
+
+                        if !deliver_events_with_continuity_check(
+                            missed,
+                            &mut last_delivered,
+                            &mut delivered_terminal_events,
+                            &tx,
+                        )
+                        .await
+                        {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
+                        // Final drain on channel close to deliver any pending events recorded in history
+                        let history = history_arc.read().await;
+                        let mut missed: Vec<EventEnvelope> = history
+                            .iter()
+                            .filter(|e| e.sequence > last_delivered)
+                            .cloned()
+                            .collect();
+                        drop(history);
+                        missed.sort_by_key(|e| e.sequence);
+
+                        let _ = deliver_events_with_continuity_check(
+                            missed,
+                            &mut last_delivered,
+                            &mut delivered_terminal_events,
+                            &tx,
+                        )
+                        .await;
+
                         break;
                     }
                 }
@@ -687,17 +1093,27 @@ impl AgentStudiosClient for EmbeddedClient {
         approval_id: ApprovalId,
         decision: ClientApprovalDecision,
     ) -> Result<(), ClientError> {
-        // Enforce fail-closed approval bridge: require active runtime session
+        // Enforce fail-closed approval bridge: require exact correlated active runtime session
+        let session_id = {
+            let mapping = self.approval_sessions.read().await;
+            mapping.get(&approval_id).copied()
+        };
+
+        let session_id = session_id.ok_or_else(|| {
+            ClientError::OperationFailed(format!(
+                "No active runtime session correlated with approval ID {approval_id}"
+            ))
+        })?;
+
         let active_session = {
             let active = self.active_sessions.read().await;
-            active.last().cloned()
+            active.iter().find(|s| s.session_id == session_id).cloned()
         };
 
         let session = active_session.ok_or_else(|| {
-            ClientError::OperationFailed(
-                "Cannot resolve approval: no active runtime session attached to receive resolution frame"
-                    .to_string(),
-            )
+            ClientError::OperationFailed(format!(
+                "No active runtime session correlated with approval ID {approval_id}"
+            ))
         })?;
 
         let approved = matches!(
@@ -726,13 +1142,21 @@ impl AgentStudiosClient for EmbeddedClient {
             ApprovalState::Denied
         };
 
-        cp.resolve_approval(approval_id, target_state)
-            .map_err(|e| {
-                ClientError::OperationFailed(format!("Failed to resolve approval: {e}"))
-            })?;
+        if cp.get_approval(approval_id).is_some() {
+            cp.resolve_approval(approval_id, target_state)
+                .map_err(|e| {
+                    ClientError::OperationFailed(format!("Failed to resolve approval: {e}"))
+                })?;
 
-        Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
-            .await;
+            Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
+                .await;
+        }
+
+        // Clean up correlation mapping on successful resolution
+        {
+            let mut mapping = self.approval_sessions.write().await;
+            mapping.remove(&approval_id);
+        }
 
         Ok(())
     }

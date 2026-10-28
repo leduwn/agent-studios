@@ -53,10 +53,30 @@ pub struct AgsApp {
     pub cost_usd: f64,
 }
 
-fn detect_workspace_info() -> (String, String, bool) {
+pub fn detect_workspace_info() -> (String, String, bool) {
     let project_name = detect_project_name();
     let (branch_name, is_dirty) = detect_git_status();
     (project_name, branch_name, is_dirty)
+}
+
+pub fn detect_workspace_path() -> String {
+    // Try git rev-parse --show-toplevel
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+
+    if let Ok(p) = std::env::current_dir() {
+        return p.display().to_string();
+    }
+
+    ".".to_string()
 }
 
 fn detect_project_name() -> String {
@@ -151,7 +171,25 @@ impl AgsApp {
         ];
 
         let (project_name, branch_name, is_dirty) = detect_workspace_info();
-        let execution_mode = format!("{} [{}]", client.execution_mode(), client.runtime_mode());
+        let mode_badge = match client.runtime_mode() {
+            agent_studios_cli_client::client::RuntimeMode::Production => "[LIVE]",
+            agent_studios_cli_client::client::RuntimeMode::Demo => "[DEMO]",
+            agent_studios_cli_client::client::RuntimeMode::Preview => "[PREVIEW]",
+        };
+        let execution_mode = format!("{} {}", client.execution_mode(), mode_badge);
+
+        let mut initial_transcript = Vec::new();
+        if client.runtime_mode() == agent_studios_cli_client::client::RuntimeMode::Demo {
+            initial_transcript.push(TranscriptItem::SystemNotice {
+                level: "Info".to_string(),
+                message: "Welcome to Agent Studios! Running in simulated Demo mode [DEMO]."
+                    .to_string(),
+            });
+            initial_transcript.push(TranscriptItem::SystemNotice {
+                level: "Info".to_string(),
+                message: "No live remote AI credentials configured. Type a prompt or type / for commands.".to_string(),
+            });
+        }
 
         Self {
             client,
@@ -159,7 +197,7 @@ impl AgsApp {
             input_text: String::new(),
             cursor_grapheme_index: 0,
             agents: default_agents,
-            transcript: Vec::new(),
+            transcript: initial_transcript,
             pending_approval: None,
             active_diff: None,
             show_slash_menu: false,
@@ -204,6 +242,18 @@ impl AgsApp {
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
         self.cost_usd = cost_usd;
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    pub fn set_scroll_offset(&mut self, offset: usize) {
+        self.scroll_offset = offset;
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
     }
 
     /// Refresh workspace metadata from client

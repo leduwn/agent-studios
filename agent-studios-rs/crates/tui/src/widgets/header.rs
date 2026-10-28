@@ -85,18 +85,61 @@ impl<'a> Widget for HeaderWidget<'a> {
             Span::styled(")", Style::default().fg(self.theme.text_muted)),
         ];
 
-        let badges_spans = vec![
-            Span::styled(
-                format!(" [{}] ", model_display),
-                Style::default().fg(self.theme.accent_purple),
-            ),
-            Span::styled(
+        // Mode badge extraction and styling
+        let upper_mode = mode_display.to_uppercase();
+        let (mode_badge, badge_bg, badge_fg) = if upper_mode.contains("DEMO") {
+            ("[DEMO]", self.theme.accent_amber, self.theme.text_inverse)
+        } else if upper_mode.contains("PREVIEW") {
+            ("[PREVIEW]", self.theme.accent_sky, self.theme.text_inverse)
+        } else if upper_mode.contains("PROD") || upper_mode.contains("LIVE") {
+            ("[LIVE]", self.theme.accent_emerald, self.theme.text_inverse)
+        } else if upper_mode.contains("SETUP") || upper_mode.contains("ONBOARDING") {
+            ("[SETUP]", self.theme.accent_purple, self.theme.text_inverse)
+        } else {
+            ("", self.theme.bg_surface, self.theme.text_secondary)
+        };
+
+        let mut badges_spans = vec![Span::styled(
+            format!(" [{}] ", model_display),
+            Style::default().fg(self.theme.accent_purple),
+        )];
+
+        if !mode_badge.is_empty() {
+            let base_mode = mode_display
+                .replace("[LIVE]", "")
+                .replace("[DEMO]", "")
+                .replace("[PREVIEW]", "")
+                .replace("[SETUP]", "")
+                .replace("[Production]", "")
+                .replace("[Demo]", "")
+                .replace("[Preview]", "")
+                .trim()
+                .to_string();
+
+            if !base_mode.is_empty() {
+                badges_spans.push(Span::styled(
+                    format!(" {base_mode} "),
+                    Style::default()
+                        .bg(self.theme.bg_surface)
+                        .fg(self.theme.text_secondary),
+                ));
+            }
+
+            badges_spans.push(Span::styled(
+                format!(" {} ", mode_badge),
+                Style::default()
+                    .bg(badge_bg)
+                    .fg(badge_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            badges_spans.push(Span::styled(
                 format!(" {} ", mode_display),
                 Style::default()
                     .bg(self.theme.bg_surface)
                     .fg(self.theme.text_secondary),
-            ),
-        ];
+            ));
+        }
 
         if self.compact {
             // Render 1-2 lines without border

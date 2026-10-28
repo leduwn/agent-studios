@@ -366,6 +366,7 @@ name = "agent-studios-tui"
 version = "0.1.0"
 dependencies = [
  "agent-studios-cli-client",
+ "agent-studios-external-runtime",
  "agent-studios-orchestration",
  "agent-studios-protocol",
  "agent-studios-workspace",

@@ -1,0 +1,87 @@
+name: Agent Studios Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'agent-studios-rs/**'
+      - '.github/workflows/agent-studios-rust-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'agent-studios-rs/**'
+      - '.github/workflows/agent-studios-rust-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust-ci:
+    name: Rust Quality Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: agent-studios-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "agent-studios-rs -> target"
+
+      - name: Check Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
+      - name: Cargo Check (all targets)
+        run: cargo check --workspace --all-targets
+
+      - name: Cargo Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo Test
+        run: cargo test --workspace
+
+      - name: Build AGS CLI Binary
+        run: cargo build --bin ags
+
+      - name: Deterministic CLI Smoke Tests
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            BIN_PATH="./target/debug/ags.exe"
+          else
+            BIN_PATH="./target/debug/ags"
+          fi
+
+          echo "Running CLI doctor verification..."
+          $BIN_PATH doctor
+
+          echo "Running CLI help verification..."
+          $BIN_PATH --help

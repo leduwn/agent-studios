@@ -25,7 +25,10 @@ struct Cli {
     preview: bool,
 
     /// Run in deterministic simulated demo mode (no remote model credentials required)
-    #[arg(long, help = "Run in simulated demo mode without remote model credentials")]
+    #[arg(
+        long,
+        help = "Run in simulated demo mode without remote model credentials"
+    )]
     demo: bool,
 
     #[command(subcommand)]
@@ -81,20 +84,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await
     {
-        Ok(client) => client,
+        Ok(client) => Some(client),
         Err(agent_studios_cli_client::client::ClientError::Configuration(msg)) => {
-            eprintln!("\nError: {msg}\n");
-            eprintln!("To run simulated execution without live AI credentials, use: `ags --demo`");
-            eprintln!("To preview UI themes and modal components, use: `ags --preview`\n");
-            std::process::exit(1);
+            let detected = agent_studios_cli_client::runtime::discover_available_runtimes().await;
+            let mut onboarding = agent_studios_tui::OnboardingApp::new(detected, Some(msg));
+            match onboarding.run() {
+                Ok(agent_studios_tui::OnboardingAction::LaunchDemo) => {
+                    let client = EmbeddedClient::bootstrap_with_mode(
+                        "agent-studios-workspace",
+                        agent_studios_cli_client::client::RuntimeMode::Demo,
+                    )
+                    .await?;
+                    Some(client)
+                }
+                Ok(agent_studios_tui::OnboardingAction::LaunchPreview) => {
+                    let mut preview_app = OfflinePreviewApp::new();
+                    preview_app.run()?;
+                    return Ok(());
+                }
+                Ok(agent_studios_tui::OnboardingAction::RunDoctor) => {
+                    let report = AgsDoctor::run_diagnostics();
+                    AgsDoctor::print_human_report(&report);
+                    return Ok(());
+                }
+                Ok(agent_studios_tui::OnboardingAction::Exit) => {
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Non-interactive or headless environment: display friendly guidance
+                    eprintln!("\nAgent Studios — Runtime Configuration Notice:");
+                    eprintln!("  No AI runtime configured or discovered.");
+                    eprintln!(
+                        "  To run in simulated execution without live AI credentials: `ags --demo`"
+                    );
+                    eprintln!("  To preview UI themes and modal components: `ags --preview`");
+                    eprintln!("  To inspect environment health: `ags doctor`\n");
+                    return Ok(());
+                }
+            }
         }
         Err(e) => return Err(e.into()),
     };
 
-    let client_arc = Arc::new(embedded_client);
-
-    let mut app = AgsApp::new(client_arc);
-    app.run().await?;
+    if let Some(client) = embedded_client {
+        let client_arc = Arc::new(client);
+        let mut app = AgsApp::new(client_arc);
+        app.run().await?;
+    }
 
     Ok(())
 }

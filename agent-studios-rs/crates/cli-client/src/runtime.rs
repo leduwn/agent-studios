@@ -335,7 +335,9 @@ pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>,
                     .iter()
                     .any(|i| i.availability == RuntimeAvailability::Available)
                 {
-                    tracing::info!("Discovered live OpenCode runtime instance; using OpenCodeRuntime");
+                    tracing::info!(
+                        "Discovered live OpenCode runtime instance; using OpenCodeRuntime"
+                    );
                     return Ok(Arc::new(opencode));
                 }
             }

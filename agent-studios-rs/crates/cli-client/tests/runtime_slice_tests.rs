@@ -71,10 +71,8 @@ async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
                     task_id: tid,
                     new_state,
                     ..
-                } => {
-                    if *tid == task_id && *new_state == TaskState::Succeeded {
-                        task_succeeded = true;
-                    }
+                } if *tid == task_id && *new_state == TaskState::Succeeded => {
+                    task_succeeded = true;
                 }
                 _ => {}
             }
@@ -117,15 +115,13 @@ async fn test_ui_event_translation_for_runtime_streaming() {
     let mut seen_ui_chunk = false;
 
     for _ in 0..30 {
-        if let Ok(Some(envelope)) = timeout(Duration::from_millis(300), sub.stream.recv()).await {
-            if let Some(ui_event) = translate_control_plane_event(&envelope) {
-                if let UiEvent::AssistantChunk { content, .. } = ui_event {
-                    if !content.is_empty() {
-                        seen_ui_chunk = true;
-                        break;
-                    }
-                }
-            }
+        if let Ok(Some(envelope)) = timeout(Duration::from_millis(300), sub.stream.recv()).await
+            && let Some(UiEvent::AssistantChunk { content, .. }) =
+                translate_control_plane_event(&envelope)
+            && !content.is_empty()
+        {
+            seen_ui_chunk = true;
+            break;
         }
     }
 
@@ -176,7 +172,10 @@ async fn test_truthful_reporting_deterministic_local_runtime() {
 
     let caps = runtime.capabilities().await;
     assert!(caps.streaming_events.is_supported());
-    assert!(!caps.tools.is_supported(), "Deterministic mock execution must truthfully report tools=false");
+    assert!(
+        !caps.tools.is_supported(),
+        "Deterministic mock execution must truthfully report tools=false"
+    );
     assert!(caps.stop.is_supported());
     assert!(caps.workspace_binding.is_supported());
 }
@@ -340,10 +339,8 @@ async fn test_runtime_failure_propagation_to_control_plane() {
                     task_id: tid,
                     new_state,
                     ..
-                } => {
-                    if *tid == task_id && *new_state == TaskState::Failed {
-                        task_failed = true;
-                    }
+                } if *tid == task_id && *new_state == TaskState::Failed => {
+                    task_failed = true;
                 }
                 _ => {}
             }
@@ -394,12 +391,12 @@ async fn test_cancellation_stops_active_runtime_sessions() {
 
     let mut cancellation_recorded = false;
     for _ in 0..20 {
-        if let Ok(Some(envelope)) = timeout(Duration::from_millis(200), sub.stream.recv()).await {
-            if let ControlPlaneEvent::CancellationRequested { reason, .. } = &envelope.event {
-                assert_eq!(reason.as_deref(), Some("User requested stop"));
-                cancellation_recorded = true;
-                break;
-            }
+        if let Ok(Some(envelope)) = timeout(Duration::from_millis(200), sub.stream.recv()).await
+            && let ControlPlaneEvent::CancellationRequested { reason, .. } = &envelope.event
+        {
+            assert_eq!(reason.as_deref(), Some("User requested stop"));
+            cancellation_recorded = true;
+            break;
         }
     }
 
@@ -423,7 +420,10 @@ async fn test_production_mode_fails_closed_when_unconfigured() {
         }
         Err(err) => {
             assert!(
-                matches!(err, agent_studios_cli_client::client::ClientError::Configuration(_)),
+                matches!(
+                    err,
+                    agent_studios_cli_client::client::ClientError::Configuration(_)
+                ),
                 "Expected ClientError::Configuration, got: {err:?}"
             );
         }
@@ -450,7 +450,323 @@ async fn test_resolve_approval_fails_closed_without_active_session() {
     );
     let err = res.unwrap_err();
     assert!(
-        matches!(err, agent_studios_cli_client::client::ClientError::OperationFailed(ref msg) if msg.contains("no active runtime session attached")),
+        matches!(err, agent_studios_cli_client::client::ClientError::OperationFailed(ref msg) if msg.contains("No active runtime session correlated with approval ID")),
         "Expected missing active session error, got: {err:?}"
+    );
+}
+
+/// Mock runtime for verifying concurrent session isolation and typed approval routing
+struct ApprovalRoutingMockRuntime {
+    impl_id: RuntimeImplementationId,
+    inst_id: RuntimeInstanceId,
+    hubs: Arc<
+        RwLock<
+            std::collections::HashMap<
+                agent_studios_external_runtime::RuntimeSessionId,
+                Arc<SessionEventHub>,
+            >,
+        >,
+    >,
+    received_inputs: Arc<
+        tokio::sync::Mutex<
+            Vec<(
+                agent_studios_external_runtime::RuntimeSessionId,
+                RuntimeInput,
+            )>,
+        >,
+    >,
+}
+
+impl ApprovalRoutingMockRuntime {
+    fn new(
+        received_inputs: Arc<
+            tokio::sync::Mutex<
+                Vec<(
+                    agent_studios_external_runtime::RuntimeSessionId,
+                    RuntimeInput,
+                )>,
+            >,
+        >,
+    ) -> Self {
+        Self {
+            impl_id: RuntimeImplementationId::new("approval-mock").unwrap(),
+            inst_id: RuntimeInstanceId::generate(),
+            hubs: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            received_inputs,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentRuntime for ApprovalRoutingMockRuntime {
+    fn implementation_id(&self) -> &RuntimeImplementationId {
+        &self.impl_id
+    }
+
+    async fn discover(&self) -> Result<Vec<DiscoveredRuntimeInstance>, RuntimeError> {
+        Ok(vec![DiscoveredRuntimeInstance::available(
+            self.inst_id,
+            self.impl_id.clone(),
+            "Approval Routing Mock Engine",
+            RuntimeCapabilities::default().with_streaming_events(true),
+        )])
+    }
+
+    async fn capabilities(&self) -> RuntimeCapabilities {
+        RuntimeCapabilities::default().with_streaming_events(true)
+    }
+
+    async fn start(
+        &self,
+        request: RuntimeStartRequest,
+    ) -> Result<RuntimeSessionHandle, RuntimeError> {
+        let session_id = agent_studios_external_runtime::RuntimeSessionId::generate();
+        let hub = Arc::new(SessionEventHub::new(session_id, self.inst_id, 128));
+        self.hubs.write().await.insert(session_id, hub.clone());
+
+        let handle = RuntimeSessionHandle::new(
+            session_id,
+            self.inst_id,
+            self.impl_id.clone(),
+            RuntimeLifecycleState::Running,
+            request.workspace,
+            request.workspace_access_mode,
+            RuntimeCapabilities::default().with_streaming_events(true),
+            None,
+            Utc::now(),
+        );
+
+        hub.emit(RuntimeEventKind::SessionStarted {
+            session_id,
+            instance_id: self.inst_id,
+        })
+        .await?;
+
+        // Extract approval ID encoded in prompt or generate fresh ID
+        let prompt = request.initial_prompt.clone().unwrap_or_default();
+        let approval_id = if let Some(stripped) = prompt.strip_prefix("approval:") {
+            uuid::Uuid::parse_str(stripped)
+                .map(agent_studios_protocol::id::ApprovalId::from_uuid)
+                .unwrap_or_else(|_| agent_studios_protocol::id::ApprovalId::new())
+        } else {
+            agent_studios_protocol::id::ApprovalId::new()
+        };
+
+        let hub_clone = hub.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = hub_clone
+                .emit(RuntimeEventKind::ApprovalRequested {
+                    approval_id,
+                    description: SanitizedRuntimeMessage::new(format!(
+                        "Privileged approval for session {session_id}"
+                    )),
+                    command: Some(SanitizedRuntimeMessage::new("cargo build")),
+                })
+                .await;
+        });
+
+        Ok(handle)
+    }
+
+    async fn send(
+        &self,
+        session: &RuntimeSessionRef,
+        input: RuntimeInput,
+    ) -> Result<(), RuntimeError> {
+        self.received_inputs
+            .lock()
+            .await
+            .push((session.session_id, input));
+        Ok(())
+    }
+
+    async fn interrupt(&self, _session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    async fn resume(
+        &self,
+        _session: &RuntimeSessionRef,
+        _input: Option<RuntimeInput>,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    async fn stop(&self, _session: &RuntimeSessionRef) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    async fn status(
+        &self,
+        _session: &RuntimeSessionRef,
+    ) -> Result<RuntimeLifecycleState, RuntimeError> {
+        Ok(RuntimeLifecycleState::Running)
+    }
+
+    async fn events_after(
+        &self,
+        session: &RuntimeSessionRef,
+        after: Option<u64>,
+    ) -> Result<RuntimeEventSubscription, RuntimeError> {
+        let hubs = self.hubs.read().await;
+        let hub = hubs
+            .get(&session.session_id)
+            .cloned()
+            .expect("hub initialized for session");
+        hub.subscribe(after).await
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_sessions_isolated_approval_routing() {
+    use agent_studios_cli_client::client::ClientApprovalDecision;
+    use agent_studios_protocol::id::ApprovalId;
+
+    let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
+
+    let client =
+        EmbeddedClient::bootstrap_with_runtime("concurrent-approval-routing-test", mock_runtime)
+            .await
+            .expect("bootstrap failed");
+
+    let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
+
+    let approval_id_a = ApprovalId::new();
+    let approval_id_b = ApprovalId::new();
+
+    // Start Session A and Session B concurrently
+    let _task_a = client
+        .submit_goal(
+            &format!("approval:{approval_id_a}"),
+            GoalSubmissionOptions::default(),
+        )
+        .await
+        .expect("submit goal A failed");
+
+    let _task_b = client
+        .submit_goal(
+            &format!("approval:{approval_id_b}"),
+            GoalSubmissionOptions::default(),
+        )
+        .await
+        .expect("submit goal B failed");
+
+    // Wait until both approval requests are received and ingested into control plane
+    let mut seen_a = false;
+    let mut seen_b = false;
+    let deadline = Duration::from_secs(5);
+    let start = tokio::time::Instant::now();
+
+    while start.elapsed() < deadline && (!seen_a || !seen_b) {
+        if let Ok(Some(env)) = timeout(Duration::from_millis(200), sub.stream.recv()).await
+            && let ControlPlaneEvent::ApprovalRequested { approval } = &env.event
+        {
+            if approval.id == approval_id_a {
+                seen_a = true;
+            } else if approval.id == approval_id_b {
+                seen_b = true;
+            }
+        }
+    }
+
+    assert!(
+        seen_a,
+        "ApprovalRequested event for Session A must be received"
+    );
+    assert!(
+        seen_b,
+        "ApprovalRequested event for Session B must be received"
+    );
+
+    // 1. Unknown approval must fail closed
+    let unknown_approval_id = ApprovalId::new();
+    let unknown_res = client
+        .resolve_approval(unknown_approval_id, ClientApprovalDecision::Allow)
+        .await;
+    assert!(
+        unknown_res.is_err(),
+        "Resolving unknown approval must fail closed"
+    );
+    let unknown_err = unknown_res.unwrap_err();
+    assert!(
+        matches!(
+            unknown_err,
+            agent_studios_cli_client::client::ClientError::OperationFailed(ref msg)
+                if msg.contains("No active runtime session correlated with approval ID")
+        ),
+        "Expected missing correlation error, got: {unknown_err:?}"
+    );
+
+    // 2. Resolve Session A's approval with Allow
+    client
+        .resolve_approval(approval_id_a, ClientApprovalDecision::Allow)
+        .await
+        .expect("resolve approval A succeeded");
+
+    // 3. Resolve Session B's approval with Deny
+    client
+        .resolve_approval(approval_id_b, ClientApprovalDecision::Deny)
+        .await
+        .expect("resolve approval B succeeded");
+
+    // 4. Verify received inputs in mock runtime
+    let inputs = received_inputs.lock().await.clone();
+    assert_eq!(
+        inputs.len(),
+        2,
+        "Exactly two resolution frames must be delivered to runtime"
+    );
+
+    let (sess_a_id, input_a) = inputs
+        .iter()
+        .find(|(_, inp)| match inp {
+            RuntimeInput::ApprovalResponse { approval_id, .. } => *approval_id == approval_id_a,
+            _ => false,
+        })
+        .expect("Delivery for Session A approval must exist");
+
+    let (sess_b_id, input_b) = inputs
+        .iter()
+        .find(|(_, inp)| match inp {
+            RuntimeInput::ApprovalResponse { approval_id, .. } => *approval_id == approval_id_b,
+            _ => false,
+        })
+        .expect("Delivery for Session B approval must exist");
+
+    // Authoritative session isolation: deliveries must target different sessions
+    assert_ne!(
+        sess_a_id, sess_b_id,
+        "Approval A and Approval B must be delivered to distinct sessions"
+    );
+
+    // Verify Session A received Allow (approved: true)
+    assert_eq!(
+        *input_a,
+        RuntimeInput::ApprovalResponse {
+            approval_id: approval_id_a,
+            approved: true,
+            reason: None,
+        }
+    );
+
+    // Verify Session B received Deny (approved: false)
+    assert_eq!(
+        *input_b,
+        RuntimeInput::ApprovalResponse {
+            approval_id: approval_id_b,
+            approved: false,
+            reason: None,
+        }
+    );
+
+    // 5. Verify cleanup on resolution: re-resolving approval A or B fails closed
+    let re_resolve_a = client
+        .resolve_approval(approval_id_a, ClientApprovalDecision::Allow)
+        .await;
+    assert!(
+        re_resolve_a.is_err(),
+        "Re-resolving already resolved approval must fail closed because mapping was cleaned up"
     );
 }
