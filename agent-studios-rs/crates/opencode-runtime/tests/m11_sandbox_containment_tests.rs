@@ -173,11 +173,17 @@ fn test_zero_window_suspended_containment_and_resume() {
 
 #[tokio::test]
 async fn test_spawn_invalid_binary_fails_immediately() {
+    let policy = if cfg!(windows) {
+        SandboxPolicy::default()
+    } else {
+        SandboxPolicy::unconstrained()
+    };
     let config = OpenCodeServerConfig::new(
         "non_existent_opencode_binary_xyz_123.exe",
         std::env::temp_dir(),
     )
-    .with_startup_timeout(Duration::from_millis(500));
+    .with_startup_timeout(Duration::from_millis(500))
+    .with_sandbox_policy(policy);
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;
@@ -205,8 +211,14 @@ async fn test_early_child_crash_detected_without_hanging() {
     #[cfg(not(windows))]
     let binary = "false";
 
+    let policy = if cfg!(windows) {
+        SandboxPolicy::default()
+    } else {
+        SandboxPolicy::unconstrained()
+    };
     let config = OpenCodeServerConfig::new(binary, std::env::temp_dir())
-        .with_startup_timeout(Duration::from_secs(5));
+        .with_startup_timeout(Duration::from_secs(5))
+        .with_sandbox_policy(policy);
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;

@@ -212,6 +212,7 @@ pub async fn spawn_opencode_server(
     };
 
     // 3. Initialize OS process containment BEFORE child process startup (fails closed if unavailable)
+    #[cfg(windows)]
     let requires_os_containment = config.sandbox_policy.level.requires_os_containment();
     let containment = ProcessContainment::new(config.sandbox_policy)?;
 
