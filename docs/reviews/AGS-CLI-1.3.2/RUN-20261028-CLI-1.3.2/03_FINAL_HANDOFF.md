@@ -2,10 +2,10 @@
 
 - **Milestone**: `AGS CLI 1.3.2 CI Hotfix Verification`
 - **Execution Run**: `RUN-20261028-CLI-1.3.2`
-- **Date**: `2026-10-28T17:40:00+07:00`
+- **Date**: `2026-10-28T20:30:00+07:00`
 - **Branch**: `feat/ags-cli-tui-foundation`
 - **PR**: `#16` (`https://github.com/leduwn/agent-studios/pull/16`)
-- **Status**: **READY FOR REMOTE CI RUN / STRICT NO SELF-MERGE**
+- **Status**: **ALL QUALITY GATES PASSED (100% GREEN REMOTE CI) / STRICT NO SELF-MERGE**
 
 ---
 
@@ -23,11 +23,23 @@
    - Verified nested workspace execution from `agent-studios-rs`.
    - Enforced physical path separation (`worktree_root != source_root`), base commit match, and untracked/dirty file preservation in source.
    - Isolated `subscription_tests.rs` with `TestFixture` to prevent concurrent Git worktree lock collisions.
+   - Resolved Windows short-path (8.3 `RUNNER~1`) mismatch against canonicalized orchestrator root in `workspace_tests.rs`.
 
-3. **Subagent C — Local Quality Gates Verification**:
-   - All tests passing across workspace:
+3. **Subagent C — Local & Remote Quality Gates Verification**:
+   - All tests passing across workspace locally and remotely:
      - `client_tests`: 4/4 passing
      - `subscription_tests`: 7/7 passing
+     - `worktree_isolation_tests`: 3/3 passing
+     - `runtime_slice_tests`: 10/10 passing
+     - `opencode-runtime`: 50/50 passing
+     - `agent-studios-tui`: 23/23 passing
+     - `workspace_tests`: 17/17 passing
+   - `cargo clippy --workspace --all-targets -- -D warnings`: 0 warnings.
+   - `rustfmt --edition 2024 --check`: Clean formatting.
+   - Smoke tests verified: `ags doctor` and `ags --help` execute with code 0.
+   - Remote CI Verified:
+     - PR Run `40692576580`: 100% success across Ubuntu and Windows.
+     - Push Run `40692565680`: 100% success across Ubuntu and Windows.
      - `worktree_isolation_tests`: 3/3 passing
      - `runtime_slice_tests`: 10/10 passing
      - `opencode-runtime`: 50/50 passing
