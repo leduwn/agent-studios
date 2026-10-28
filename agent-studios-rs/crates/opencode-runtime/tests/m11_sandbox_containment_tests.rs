@@ -1,9 +1,11 @@
 use std::time::Duration;
 use url::Url;
 
+#[cfg(windows)]
+use agent_studios_opencode_runtime::JobObjectGuard;
 use agent_studios_opencode_runtime::{
-    JobObjectGuard, OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel,
-    SandboxPolicy, generate_secure_password, spawn_opencode_server, verify_loopback_url,
+    OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel, SandboxPolicy,
+    generate_secure_password, spawn_opencode_server, verify_loopback_url,
 };
 
 #[test]

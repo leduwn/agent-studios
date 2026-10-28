@@ -68,6 +68,7 @@ pub struct EmbeddedClient {
     approval_sessions: Arc<RwLock<HashMap<ApprovalId, RuntimeSessionId>>>,
     mode: RuntimeMode,
     orchestrator: Arc<WorkspaceOrchestrator>,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 impl EmbeddedClient {
@@ -190,12 +191,19 @@ impl EmbeddedClient {
             approval_sessions: Arc::new(RwLock::new(HashMap::new())),
             mode,
             orchestrator,
+            working_dir: None,
         })
     }
 
     /// Overrides the internal workspace orchestrator (useful for test isolation).
     pub fn with_orchestrator(mut self, orchestrator: Arc<WorkspaceOrchestrator>) -> Self {
         self.orchestrator = orchestrator;
+        self
+    }
+
+    /// Overrides working directory for workspace root discovery and worktree allocation.
+    pub fn with_working_dir(mut self, working_dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(working_dir.into());
         self
     }
 
@@ -395,7 +403,9 @@ impl AgentStudiosClient for EmbeddedClient {
     }
 
     async fn get_workspace_info(&self) -> Result<WorkspaceInfo, ClientError> {
-        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd_path = self.working_dir.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
         let cwd = cwd_path.to_string_lossy().to_string();
 
         let dir_name = cwd_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -578,8 +588,9 @@ impl AgentStudiosClient for EmbeddedClient {
                 )));
             }
 
-            let cwd_path =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd_path = self.working_dir.clone().unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            });
 
             Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
                 .await;

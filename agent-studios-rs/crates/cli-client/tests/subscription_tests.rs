@@ -1,18 +1,86 @@
 use chrono::Utc;
+use std::fs;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::time::timeout;
 
 use agent_studios_cli_client::{AgentStudiosClient, EmbeddedClient, GoalSubmissionOptions};
 use agent_studios_protocol::event::{ControlPlaneEvent, EventEnvelope};
 use agent_studios_protocol::id::{AgentId, TaskId};
 use agent_studios_protocol::task::TaskState;
+use agent_studios_workspace::WorkspaceOrchestrator;
+
+fn init_git_repo(path: &std::path::Path) -> String {
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to run git {:?}: {e}", args));
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+
+    run(&["init"]);
+    run(&["config", "user.name", "Agent Studios Test"]);
+    run(&["config", "user.email", "test@agent-studios.internal"]);
+    run(&["config", "commit.gpgsign", "false"]);
+
+    fs::write(path.join("file_in_main.txt"), "Initial main content\n").unwrap();
+    run(&["add", "file_in_main.txt"]);
+    run(&["commit", "-m", "Initial commit"]);
+
+    run(&["rev-parse", "HEAD"])
+}
+
+struct TestFixture {
+    _source_dir: tempfile::TempDir,
+    _orchestrator_dir: tempfile::TempDir,
+    client: EmbeddedClient,
+}
+
+impl TestFixture {
+    async fn new(workspace_name: &str, capacity: usize) -> Self {
+        let source_dir = tempdir().expect("source tempdir");
+        init_git_repo(source_dir.path());
+
+        let orchestrator_dir = tempdir().expect("orchestrator tempdir");
+        let wt_root = orchestrator_dir.path().join("worktrees");
+        let art_root = orchestrator_dir.path().join("artifacts");
+
+        let orchestrator = Arc::new(
+            WorkspaceOrchestrator::new(wt_root, art_root).expect("orchestrator initialization"),
+        );
+
+        let client = EmbeddedClient::bootstrap_with_capacity(workspace_name, capacity)
+            .await
+            .expect("bootstrap failed")
+            .with_orchestrator(orchestrator)
+            .with_working_dir(source_dir.path().to_path_buf());
+
+        Self {
+            _source_dir: source_dir,
+            _orchestrator_dir: orchestrator_dir,
+            client,
+        }
+    }
+
+    fn into_parts(self) -> (tempfile::TempDir, tempfile::TempDir, EmbeddedClient) {
+        (self._source_dir, self._orchestrator_dir, self.client)
+    }
+}
 
 #[tokio::test]
 async fn test_subscription_backfill_and_stream_deduplication() {
-    let client = EmbeddedClient::bootstrap("sub-dedup-test")
-        .await
-        .expect("bootstrap failed");
+    let fixture = TestFixture::new("sub-dedup-test", 512).await;
+    let client = &fixture.client;
 
     // Initial events: StudioCreated (1) + 4x AgentRegistered (2..=5) = 5 events
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
@@ -57,9 +125,8 @@ async fn test_subscription_backfill_and_stream_deduplication() {
 
 #[tokio::test]
 async fn test_subscription_future_sequence_filtering() {
-    let client = EmbeddedClient::bootstrap("future-seq-test")
-        .await
-        .expect("bootstrap failed");
+    let fixture = TestFixture::new("future-seq-test", 512).await;
+    let client = &fixture.client;
 
     // Client starts at sequence 5. Subscribe from sequence 7 (future sequence)
     let mut sub = client.subscribe_events(7).await.expect("subscribe failed");
@@ -95,9 +162,8 @@ async fn test_subscription_future_sequence_filtering() {
 #[tokio::test]
 async fn test_subscription_broadcast_lag_recovery_zero_event_loss() {
     // Bootstrap client with tiny broadcast capacity (4) to intentionally force broadcast lag
-    let client = EmbeddedClient::bootstrap_with_capacity("lag-recovery-test", 4)
-        .await
-        .expect("bootstrap failed");
+    let fixture = TestFixture::new("lag-recovery-test", 4).await;
+    let client = &fixture.client;
 
     // Initial events: 5. Subscribe from 0.
     let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
@@ -294,11 +360,8 @@ async fn test_subscription_unrecoverable_gap_preserves_terminal_events() {
 
 #[tokio::test]
 async fn test_simultaneous_multiple_subscribers() {
-    let client = Arc::new(
-        EmbeddedClient::bootstrap("multi-sub-test")
-            .await
-            .expect("bootstrap failed"),
-    );
+    let fixture = TestFixture::new("multi-sub-test", 512).await;
+    let client = Arc::new(fixture.client);
 
     // Initial 5 events
     let sub1 = client.subscribe_events(0).await.expect("sub1 failed");
@@ -359,9 +422,7 @@ async fn test_simultaneous_multiple_subscribers() {
 
 #[tokio::test]
 async fn test_channel_shutdown_and_lag_recovery() {
-    let client = EmbeddedClient::bootstrap_with_capacity("lag-shutdown-test", 2)
-        .await
-        .expect("bootstrap failed");
+    let (_src, _orch, client) = TestFixture::new("lag-shutdown-test", 2).await.into_parts();
 
     let mut sub = client.subscribe_events(0).await.expect("sub failed");
     assert_eq!(sub.backfill.len(), 5);
@@ -387,6 +448,7 @@ async fn test_channel_shutdown_and_lag_recovery() {
 
     // Channel shutdown: drop client while remaining events are unread
     drop(client);
+    let _ = (&_src, &_orch);
 
     // Subscriber drains history on Closed event in strict monotonic order until stream EOF (None)
     let mut last_seq = 10;

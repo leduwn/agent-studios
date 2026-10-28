@@ -22,7 +22,9 @@ pub use discovery::{DEFAULT_INSTANCE_ID, OPENCODE_IMPLEMENTATION_ID, OpenCodeDis
 pub use error::OpenCodeError;
 pub use provider_mapping::{OpenCodeModelBinding, map_model_ref_to_opencode};
 pub use runtime::{OpenCodeActiveSession, OpenCodeRuntime};
-pub use sandbox::{JobObjectGuard, ProcessContainment, SandboxLevel, SandboxPolicy};
+#[cfg(windows)]
+pub use sandbox::JobObjectGuard;
+pub use sandbox::{ProcessContainment, SandboxLevel, SandboxPolicy};
 pub use server::{
     OpenCodeServerConfig, OpenCodeServerHandle, generate_secure_password, spawn_opencode_server,
     verify_loopback_url,
