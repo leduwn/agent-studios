@@ -24,6 +24,10 @@ struct Cli {
     #[arg(long, help = "Run offline interactive visual design previewer")]
     preview: bool,
 
+    /// Run in deterministic simulated demo mode (no remote model credentials required)
+    #[arg(long, help = "Run in simulated demo mode without remote model credentials")]
+    demo: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -64,8 +68,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Route 3: Default Interactive TUI
-    let embedded_client = EmbeddedClient::bootstrap("agent-studios-workspace").await?;
+    // Route 3: Interactive TUI
+    let runtime_mode = if cli.demo {
+        agent_studios_cli_client::client::RuntimeMode::Demo
+    } else {
+        agent_studios_cli_client::client::RuntimeMode::Production
+    };
+
+    let embedded_client = match EmbeddedClient::bootstrap_with_mode(
+        "agent-studios-workspace",
+        runtime_mode,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(agent_studios_cli_client::client::ClientError::Configuration(msg)) => {
+            eprintln!("\nError: {msg}\n");
+            eprintln!("To run simulated execution without live AI credentials, use: `ags --demo`");
+            eprintln!("To preview UI themes and modal components, use: `ags --preview`\n");
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
     let client_arc = Arc::new(embedded_client);
 
     let mut app = AgsApp::new(client_arc);

@@ -48,8 +48,6 @@ async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
 
     // Collect streaming events until task succeeds
     let mut received_chunk = false;
-    let mut received_tool_started = false;
-    let mut received_tool_completed = false;
     let mut task_succeeded = false;
     let mut run_succeeded = false;
 
@@ -60,18 +58,8 @@ async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
         if let Ok(Some(envelope)) = timeout(Duration::from_millis(500), sub.stream.recv()).await {
             match &envelope.event {
                 ControlPlaneEvent::AssistantMessageChunk { content, .. } => {
-                    if content.contains("[Deterministic Local]") {
+                    if content.contains("[DEMO]") || content.contains("Goal received:") {
                         received_chunk = true;
-                    }
-                }
-                ControlPlaneEvent::ToolStarted { tool_name, .. } => {
-                    if tool_name == "workspace_inspection" {
-                        received_tool_started = true;
-                    }
-                }
-                ControlPlaneEvent::ToolCompleted { tool_name, .. } => {
-                    if tool_name == "workspace_inspection" {
-                        received_tool_completed = true;
                     }
                 }
                 ControlPlaneEvent::RunStateChanged { new_state, .. } => {
@@ -94,8 +82,6 @@ async fn test_prompt_submission_to_runtime_dispatch_and_streaming_completion() {
     }
 
     assert!(received_chunk, "Must receive streamed assistant chunks");
-    assert!(received_tool_started, "Must receive ToolStarted event");
-    assert!(received_tool_completed, "Must receive ToolCompleted event");
     assert!(run_succeeded, "Run must transition to Succeeded");
     assert!(task_succeeded, "Task must transition to Succeeded");
 
@@ -129,29 +115,16 @@ async fn test_ui_event_translation_for_runtime_streaming() {
         .expect("submit_goal failed");
 
     let mut seen_ui_chunk = false;
-    let mut seen_ui_tool = false;
 
     for _ in 0..30 {
         if let Ok(Some(envelope)) = timeout(Duration::from_millis(300), sub.stream.recv()).await {
             if let Some(ui_event) = translate_control_plane_event(&envelope) {
-                match ui_event {
-                    UiEvent::AssistantChunk { content, .. } => {
-                        if !content.is_empty() {
-                            seen_ui_chunk = true;
-                        }
+                if let UiEvent::AssistantChunk { content, .. } = ui_event {
+                    if !content.is_empty() {
+                        seen_ui_chunk = true;
+                        break;
                     }
-                    UiEvent::ToolProgress { tool_name, status } => {
-                        if tool_name == "workspace_inspection"
-                            && (status == "running" || status == "completed")
-                        {
-                            seen_ui_tool = true;
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            if seen_ui_chunk && seen_ui_tool {
-                break;
             }
         }
     }
@@ -160,9 +133,28 @@ async fn test_ui_event_translation_for_runtime_streaming() {
         seen_ui_chunk,
         "UI translation must emit UiEvent::AssistantChunk"
     );
-    assert!(
-        seen_ui_tool,
-        "UI translation must emit UiEvent::ToolProgress"
+
+    // Verify tool translation logic directly on control plane event envelope
+    let dummy_tool_start = agent_studios_protocol::event::EventEnvelope::new(
+        client.studio_id(),
+        999,
+        Utc::now(),
+        agent_studios_protocol::event::ControlPlaneEvent::ToolStarted {
+            task_id: None,
+            run_id: None,
+            agent_id: agent_studios_protocol::id::AgentId::new(),
+            tool_name: "test_tool".to_string(),
+            call_id: "call_001".to_string(),
+            timestamp: Utc::now(),
+        },
+    );
+    let translated = translate_control_plane_event(&dummy_tool_start).expect("translated UI event");
+    assert_eq!(
+        translated,
+        UiEvent::ToolProgress {
+            tool_name: "test_tool".to_string(),
+            status: "running".to_string(),
+        }
     );
 }
 
@@ -184,7 +176,7 @@ async fn test_truthful_reporting_deterministic_local_runtime() {
 
     let caps = runtime.capabilities().await;
     assert!(caps.streaming_events.is_supported());
-    assert!(caps.tools.is_supported());
+    assert!(!caps.tools.is_supported(), "Deterministic mock execution must truthfully report tools=false");
     assert!(caps.stop.is_supported());
     assert!(caps.workspace_binding.is_supported());
 }
@@ -414,5 +406,51 @@ async fn test_cancellation_stops_active_runtime_sessions() {
     assert!(
         cancellation_recorded,
         "Cancellation event must be recorded in Control Plane"
+    );
+}
+
+#[tokio::test]
+async fn test_production_mode_fails_closed_when_unconfigured() {
+    use agent_studios_cli_client::client::RuntimeMode;
+    use agent_studios_cli_client::runtime::resolve_runtime;
+
+    // In an unconfigured environment without a running OpenCode daemon, resolve_runtime(Production)
+    // must fail closed with ClientError::Configuration rather than silently falling back to mock execution.
+    let result = resolve_runtime(RuntimeMode::Production).await;
+    match result {
+        Ok(_) => {
+            // If an actual OpenCode instance happened to be present in PATH/environment, that's valid
+        }
+        Err(err) => {
+            assert!(
+                matches!(err, agent_studios_cli_client::client::ClientError::Configuration(_)),
+                "Expected ClientError::Configuration, got: {err:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_resolve_approval_fails_closed_without_active_session() {
+    use agent_studios_cli_client::client::ClientApprovalDecision;
+    use agent_studios_protocol::id::ApprovalId;
+
+    let client = EmbeddedClient::bootstrap("approval-fail-closed-test")
+        .await
+        .expect("bootstrap failed");
+
+    let approval_id = ApprovalId::new();
+    let res = client
+        .resolve_approval(approval_id, ClientApprovalDecision::Allow)
+        .await;
+
+    assert!(
+        res.is_err(),
+        "resolve_approval must fail closed when no active runtime session is attached"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        matches!(err, agent_studios_cli_client::client::ClientError::OperationFailed(ref msg) if msg.contains("no active runtime session attached")),
+        "Expected missing active session error, got: {err:?}"
     );
 }

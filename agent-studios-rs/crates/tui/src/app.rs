@@ -42,6 +42,7 @@ pub struct AgsApp {
     slash_menu_index: usize,
     scroll_offset: usize,
     should_quit: bool,
+    last_ctrl_c: Option<std::time::Instant>,
     pub project_name: String,
     pub branch_name: String,
     pub is_dirty: bool,
@@ -150,7 +151,7 @@ impl AgsApp {
         ];
 
         let (project_name, branch_name, is_dirty) = detect_workspace_info();
-        let execution_mode = client.execution_mode().to_string();
+        let execution_mode = format!("{} [{}]", client.execution_mode(), client.runtime_mode());
 
         Self {
             client,
@@ -165,6 +166,7 @@ impl AgsApp {
             slash_menu_index: 0,
             scroll_offset: 0,
             should_quit: false,
+            last_ctrl_c: None,
             project_name,
             branch_name,
             is_dirty,
@@ -326,8 +328,18 @@ impl AgsApp {
                 is_thought,
             } => {
                 if is_thought {
-                    self.transcript
-                        .push(TranscriptItem::AssistantThought(content));
+                    if let Some(TranscriptItem::AssistantThought(existing)) =
+                        self.transcript.last_mut()
+                    {
+                        existing.push_str(&content);
+                    } else {
+                        self.transcript
+                            .push(TranscriptItem::AssistantThought(content));
+                    }
+                } else if let Some(TranscriptItem::AssistantMessage(existing)) =
+                    self.transcript.last_mut()
+                {
+                    existing.push_str(&content);
                 } else {
                     self.transcript
                         .push(TranscriptItem::AssistantMessage(content));
@@ -381,21 +393,47 @@ impl AgsApp {
             return Ok(());
         }
 
-        // Global keys
+        // Global keys: two-stage Ctrl+C semantics
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if !self.input_text.is_empty() {
                 self.input_text.clear();
                 self.cursor_grapheme_index = 0;
-            } else {
-                if let Err(e) = self
-                    .client
-                    .cancel_active_run(Some("User requested cancel".to_string()))
-                    .await
-                {
+                return Ok(());
+            }
+
+            let has_active_agent = self.agents.iter().any(|a| a.is_active);
+            let recently_pressed = self
+                .last_ctrl_c
+                .map(|t| t.elapsed() < Duration::from_millis(1500))
+                .unwrap_or(false);
+
+            if recently_pressed {
+                self.should_quit = true;
+                return Ok(());
+            }
+
+            self.last_ctrl_c = Some(std::time::Instant::now());
+            match self
+                .client
+                .cancel_active_run(Some("User requested cancel".to_string()))
+                .await
+            {
+                Err(e) => {
                     self.transcript.push(TranscriptItem::SystemNotice {
                         level: "Error".to_string(),
                         message: format!("Action failed: {e}"),
                     });
+                }
+                Ok(()) => {
+                    if has_active_agent {
+                        self.transcript.push(TranscriptItem::SystemNotice {
+                            level: "Warning".to_string(),
+                            message: "Run cancelled. Press Ctrl+C again within 1.5s to exit."
+                                .to_string(),
+                        });
+                    } else {
+                        self.should_quit = true;
+                    }
                 }
             }
             return Ok(());
@@ -443,6 +481,7 @@ impl AgsApp {
                     if prompt.starts_with('/') {
                         self.execute_slash_command(&prompt).await?;
                     } else {
+                        self.scroll_offset = 0;
                         self.transcript
                             .push(TranscriptItem::UserPrompt(prompt.clone()));
                         if let Err(e) = self

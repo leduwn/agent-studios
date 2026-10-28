@@ -127,12 +127,15 @@ impl<'a> Widget for TranscriptWidget<'a> {
         }
 
         // Calculate visible slice
+        // scroll_offset = 0 pins to the bottom (latest stream tokens)
+        // scroll_offset > 0 scrolls upwards into historical output
         let total_lines = lines.len();
         let height = inner_area.height as usize;
 
         let start_index = if total_lines > height {
             let max_offset = total_lines.saturating_sub(height);
-            self.scroll_offset.min(max_offset)
+            let offset_from_bottom = self.scroll_offset.min(max_offset);
+            max_offset.saturating_sub(offset_from_bottom)
         } else {
             0
         };

@@ -34,6 +34,27 @@ impl fmt::Display for ExecutionMode {
     }
 }
 
+/// Runtime execution environment mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeMode {
+    /// Production model-backed execution (fails closed if unconfigured).
+    Production,
+    /// Explicit deterministic demo execution with labeled simulated output.
+    Demo,
+    /// Offline design preview mode.
+    Preview,
+}
+
+impl fmt::Display for RuntimeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Production => write!(f, "LIVE"),
+            Self::Demo => write!(f, "DEMO"),
+            Self::Preview => write!(f, "PREVIEW"),
+        }
+    }
+}
+
 /// Options supplied when submitting a developer goal/prompt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoalSubmissionOptions {
@@ -92,6 +113,9 @@ pub enum ClientError {
     #[error("Unsupported capability: {0}")]
     Unsupported(String),
 
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+
     #[error("Operation timed out")]
     Timeout,
 
@@ -110,6 +134,9 @@ pub trait AgentStudiosClient: Send + Sync {
 
     /// Current execution mode (Embedded or Connected).
     fn execution_mode(&self) -> ExecutionMode;
+
+    /// Current runtime execution mode (Production, Demo, or Preview).
+    fn runtime_mode(&self) -> RuntimeMode;
 
     /// Queries workspace context including git branch, dirty status, and directory information.
     async fn get_workspace_info(&self) -> Result<WorkspaceInfo, ClientError>;

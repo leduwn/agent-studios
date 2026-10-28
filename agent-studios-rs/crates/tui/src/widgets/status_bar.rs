@@ -66,7 +66,7 @@ impl<'a> Widget for StatusBarWidget<'a> {
 
         // Right side token / cost metrics
         let token_text = if self.input_tokens == 0 && self.output_tokens == 0 {
-            "0 tokens".to_string()
+            "tokens: unknown".to_string()
         } else {
             format!(
                 "tokens: in {}+out {}",

@@ -324,8 +324,8 @@ fn test_status_bar_widget_tokens_and_status_buffer_snapshot() {
 
     let idle_line = buffer_line_to_string(&idle_buf, 0, 120);
     assert!(
-        idle_line.contains("0 tokens"),
-        "Expected '0 tokens' in line: {idle_line}"
+        idle_line.contains("tokens: unknown"),
+        "Expected 'tokens: unknown' in line: {idle_line}"
     );
     assert!(
         idle_line.contains("($0.000)"),
@@ -494,7 +494,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use agent_studios_cli_client::client::{
     AgentStudiosClient, ClientApprovalDecision, ClientError, ClientSubscription, ExecutionMode,
-    GoalSubmissionOptions, WorkspaceInfo, WorktreeRecordSummary,
+    GoalSubmissionOptions, RuntimeMode, WorkspaceInfo, WorktreeRecordSummary,
 };
 use agent_studios_orchestration::read_models::{
     AgentSummary, TaskGraphSnapshot, TaskTimelineProjection,
@@ -530,6 +530,9 @@ impl AgentStudiosClient for MockTestClient {
     }
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Embedded
+    }
+    fn runtime_mode(&self) -> RuntimeMode {
+        RuntimeMode::Demo
     }
     async fn get_workspace_info(&self) -> Result<WorkspaceInfo, ClientError> {
         Ok(WorkspaceInfo {

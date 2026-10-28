@@ -35,9 +35,9 @@ use agent_studios_workspace::reconciliation::ReconciliationOutcome;
 
 use crate::client::{
     AgentStudiosClient, ClientApprovalDecision, ClientError, ClientSubscription, ExecutionMode,
-    GoalSubmissionOptions, WorkspaceInfo, WorktreeRecordSummary,
+    GoalSubmissionOptions, RuntimeMode, WorkspaceInfo, WorktreeRecordSummary,
 };
-use crate::runtime::resolve_default_runtime;
+use crate::runtime::{resolve_default_runtime, resolve_runtime};
 
 /// In-process client running the deterministic control plane inside the CLI process.
 pub struct EmbeddedClient {
@@ -48,13 +48,22 @@ pub struct EmbeddedClient {
     events_history: Arc<RwLock<Vec<EventEnvelope>>>,
     runtime: Arc<dyn AgentRuntime>,
     active_sessions: Arc<RwLock<Vec<RuntimeSessionRef>>>,
+    mode: RuntimeMode,
 }
 
 impl EmbeddedClient {
     /// Bootstraps a fresh in-process EmbeddedClient using default discovered runtime.
     pub async fn bootstrap(workspace_name: &str) -> Result<Self, ClientError> {
-        let runtime = resolve_default_runtime().await;
-        Self::bootstrap_with_runtime_and_capacity(workspace_name, runtime, 512).await
+        Self::bootstrap_with_mode(workspace_name, RuntimeMode::Demo).await
+    }
+
+    /// Bootstraps a fresh in-process EmbeddedClient with explicit runtime execution mode.
+    pub async fn bootstrap_with_mode(
+        workspace_name: &str,
+        mode: RuntimeMode,
+    ) -> Result<Self, ClientError> {
+        let runtime = resolve_runtime(mode).await?;
+        Self::bootstrap_with_runtime_mode_and_capacity(workspace_name, runtime, mode, 512).await
     }
 
     /// Bootstraps a fresh in-process EmbeddedClient with custom broadcast channel capacity.
@@ -63,7 +72,13 @@ impl EmbeddedClient {
         capacity: usize,
     ) -> Result<Self, ClientError> {
         let runtime = resolve_default_runtime().await;
-        Self::bootstrap_with_runtime_and_capacity(workspace_name, runtime, capacity).await
+        Self::bootstrap_with_runtime_mode_and_capacity(
+            workspace_name,
+            runtime,
+            RuntimeMode::Demo,
+            capacity,
+        )
+        .await
     }
 
     /// Bootstraps a fresh in-process EmbeddedClient with an explicit runtime adapter.
@@ -71,13 +86,35 @@ impl EmbeddedClient {
         workspace_name: &str,
         runtime: Arc<dyn AgentRuntime>,
     ) -> Result<Self, ClientError> {
-        Self::bootstrap_with_runtime_and_capacity(workspace_name, runtime, 512).await
+        Self::bootstrap_with_runtime_mode_and_capacity(
+            workspace_name,
+            runtime,
+            RuntimeMode::Demo,
+            512,
+        )
+        .await
     }
 
     /// Bootstraps a fresh in-process EmbeddedClient with explicit runtime adapter and capacity.
     pub async fn bootstrap_with_runtime_and_capacity(
         workspace_name: &str,
         runtime: Arc<dyn AgentRuntime>,
+        capacity: usize,
+    ) -> Result<Self, ClientError> {
+        Self::bootstrap_with_runtime_mode_and_capacity(
+            workspace_name,
+            runtime,
+            RuntimeMode::Demo,
+            capacity,
+        )
+        .await
+    }
+
+    /// Bootstraps a fresh in-process EmbeddedClient with explicit runtime adapter, mode, and capacity.
+    pub async fn bootstrap_with_runtime_mode_and_capacity(
+        workspace_name: &str,
+        runtime: Arc<dyn AgentRuntime>,
+        mode: RuntimeMode,
         capacity: usize,
     ) -> Result<Self, ClientError> {
         let store = InMemoryStore::new();
@@ -129,6 +166,7 @@ impl EmbeddedClient {
             events_history,
             runtime,
             active_sessions: Arc::new(RwLock::new(Vec::new())),
+            mode,
         })
     }
 
@@ -162,6 +200,10 @@ impl AgentStudiosClient for EmbeddedClient {
 
     fn execution_mode(&self) -> ExecutionMode {
         ExecutionMode::Embedded
+    }
+
+    fn runtime_mode(&self) -> RuntimeMode {
+        self.mode
     }
 
     async fn get_workspace_info(&self) -> Result<WorkspaceInfo, ClientError> {
@@ -230,7 +272,7 @@ impl AgentStudiosClient for EmbeddedClient {
         _options: GoalSubmissionOptions,
     ) -> Result<TaskId, ClientError> {
         // 1. Create Control Plane Task and Run, and transition to Running
-        let (task_id, run_id, agent_id) = {
+        let (task_id, run_id, agent_id, worktree_id, cwd_path) = {
             let mut cp = self.control_plane.lock().await;
             let task = cp
                 .create_task(
@@ -283,10 +325,26 @@ impl AgentStudiosClient for EmbeddedClient {
                     ))
                 })?;
 
+            let cwd_path =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let wt = cp
+                .create_worktree(
+                    self.studio_id,
+                    format!("worktree-{}", task.id),
+                    cwd_path.clone(),
+                    cwd_path.clone(),
+                    "HEAD",
+                )
+                .map_err(|e| {
+                    ClientError::OperationFailed(format!("Failed to register worktree: {e}"))
+                })?;
+
+            let _ = cp.assign_worktree(wt.id, task.id, agent.id, Some(run.id));
+
             Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
                 .await;
 
-            (task.id, run.id, agent.id)
+            (task.id, run.id, agent.id, wt.id, cwd_path)
         };
 
         // 2. Discover runtime instance
@@ -315,15 +373,14 @@ impl AgentStudiosClient for EmbeddedClient {
             instance.instance_id,
         );
 
-        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let workspace = ExecutionWorkspace::Managed {
-            worktree_id: WorktreeId::new(),
-            root: cwd_path.clone(),
-            cwd: cwd_path.clone(),
-            source_root: cwd_path.clone(),
-            source_cwd: cwd_path,
-            base_sha: "HEAD".to_string(),
-        };
+        let workspace = ExecutionWorkspace::managed(
+            worktree_id,
+            cwd_path.clone(),
+            cwd_path.clone(),
+            cwd_path.clone(),
+            cwd_path,
+            "HEAD",
+        );
 
         let start_req = RuntimeStartRequest::new(instance_ref, workspace)
             .with_workspace_access_mode(WorkspaceAccessMode::ReadOnly)
@@ -424,7 +481,12 @@ impl AgentStudiosClient for EmbeddedClient {
                             );
                         }
                     }
-                    RuntimeEventKind::Completed { .. } => {
+                    RuntimeEventKind::Completed { summary } => {
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "succeeded",
+                            summary.clone(),
+                        );
                         let _ = cp.transition_run_state(run_id, RunState::Succeeded);
                         let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
                     }
@@ -437,9 +499,45 @@ impl AgentStudiosClient for EmbeddedClient {
                         let _ = cp.transition_run_state(run_id, RunState::Failed);
                         let _ = cp.transition_task_state(task_id, TaskState::Failed);
                     }
+                    RuntimeEventKind::Stopped => {
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "stopped",
+                            Some("Runtime session stopped".to_string()),
+                        );
+                        let _ = cp.transition_run_state(run_id, RunState::Cancelled);
+                        let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                    }
+                    RuntimeEventKind::Interrupted { reason } => {
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "interrupted",
+                            Some(reason.as_str().to_string()),
+                        );
+                        let _ = cp.transition_run_state(run_id, RunState::Cancelled);
+                        let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                    }
                     _ => {}
                 }
 
+                Self::sync_events_internal(&cp, studio_id, &events_history, &events_tx).await;
+            }
+
+            // Terminal lifecycle safety: reap exit status on stream termination so no run remains permanently in Running
+            let mut cp = cp_arc.lock().await;
+            if let Some(_run) = cp
+                .state()
+                .runs
+                .get(&run_id)
+                .filter(|r| !r.state.is_terminal())
+            {
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "aborted",
+                    Some("Runtime event stream terminated without explicit terminal event".to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Cancelled);
+                let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
                 Self::sync_events_internal(&cp, studio_id, &events_history, &events_tx).await;
             }
         });
@@ -474,6 +572,10 @@ impl AgentStudiosClient for EmbeddedClient {
         &self,
         from_sequence: u64,
     ) -> Result<ClientSubscription, ClientError> {
+        // Linearizable handoff: subscribe to broadcast channel BEFORE taking snapshot
+        // so no events emitted during backfill extraction are lost.
+        let mut bcast_rx = self.events_tx.subscribe();
+
         let history = self.events_history.read().await;
         let backfill: Vec<EventEnvelope> = history
             .iter()
@@ -489,18 +591,36 @@ impl AgentStudiosClient for EmbeddedClient {
         drop(history);
 
         let (tx, rx) = mpsc::channel(512);
-        let mut bcast_rx = self.events_tx.subscribe();
         let history_arc = self.events_history.clone();
 
         tokio::spawn(async move {
             loop {
                 match bcast_rx.recv().await {
                     Ok(env) => {
-                        if env.sequence > last_delivered {
-                            last_delivered = env.sequence;
-                            if tx.send(env).await.is_err() {
-                                break;
+                        // Deduplicate events already included in backfill
+                        if env.sequence <= last_delivered {
+                            continue;
+                        }
+
+                        // Monotonic gap recovery: if sequence jumped ahead, catch up from history
+                        if env.sequence > last_delivered + 1 {
+                            let history = history_arc.read().await;
+                            let missed: Vec<EventEnvelope> = history
+                                .iter()
+                                .filter(|e| e.sequence > last_delivered && e.sequence < env.sequence)
+                                .cloned()
+                                .collect();
+                            drop(history);
+                            for gap_env in missed {
+                                if tx.send(gap_env).await.is_err() {
+                                    return;
+                                }
                             }
+                        }
+
+                        last_delivered = env.sequence;
+                        if tx.send(env).await.is_err() {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -567,13 +687,43 @@ impl AgentStudiosClient for EmbeddedClient {
         approval_id: ApprovalId,
         decision: ClientApprovalDecision,
     ) -> Result<(), ClientError> {
+        // Enforce fail-closed approval bridge: require active runtime session
+        let active_session = {
+            let active = self.active_sessions.read().await;
+            active.last().cloned()
+        };
+
+        let session = active_session.ok_or_else(|| {
+            ClientError::OperationFailed(
+                "Cannot resolve approval: no active runtime session attached to receive resolution frame"
+                    .to_string(),
+            )
+        })?;
+
+        let approved = matches!(
+            decision,
+            ClientApprovalDecision::Allow | ClientApprovalDecision::AllowForSession
+        );
+
+        let input = agent_studios_external_runtime::RuntimeInput::ApprovalResponse {
+            approval_id,
+            approved,
+            reason: None,
+        };
+
+        // Deliver resolution frame to runtime first; fail closed if delivery fails
+        self.runtime.send(&session, input).await.map_err(|e| {
+            ClientError::OperationFailed(format!(
+                "Failed to deliver approval resolution frame to runtime: {e}"
+            ))
+        })?;
+
         let mut cp = self.control_plane.lock().await;
 
-        let target_state = match decision {
-            ClientApprovalDecision::Allow | ClientApprovalDecision::AllowForSession => {
-                ApprovalState::Approved
-            }
-            ClientApprovalDecision::Deny => ApprovalState::Denied,
+        let target_state = if approved {
+            ApprovalState::Approved
+        } else {
+            ApprovalState::Denied
         };
 
         cp.resolve_approval(approval_id, target_state)
