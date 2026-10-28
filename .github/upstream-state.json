@@ -1,0 +1,35 @@
+{
+  "last_updated": "2026-10-28T00:00:00Z",
+  "repositories": {
+    "openai/codex": {
+      "integrated_version": "rust-v0.164.0",
+      "target_version": "rust-v0.164.0",
+      "notes": "Upstream codex base; patches 001-004 in CODEX_PATCHES.md"
+    },
+    "anomalyco/opencode": {
+      "integrated_version": "v1.19.4",
+      "target_version": "v1.19.4",
+      "notes": "OpenCode CLI runtime adapter (M11)"
+    },
+    "anthropics/claude-code": {
+      "integrated_version": "v2.1.311",
+      "target_version": "v2.1.311",
+      "notes": "Claude Code CLI runtime adapter (M12/M12.1)"
+    },
+    "microsoft/vscode": {
+      "integrated_version": "1.143.1",
+      "target_version": "1.143.1",
+      "notes": "Code-OSS Shell Integration foundation (M13)"
+    },
+    "777genius/agent-teams-ai": {
+      "integrated_version": "v2.18.4",
+      "target_version": "v2.18.4",
+      "notes": "AGPL-3.0 clean-room visual UX reference only (zero code copy)"
+    },
+    "agentscope-ai/AgentTeams": {
+      "integrated_version": "v1.2.5",
+      "target_version": "v1.2.5",
+      "notes": "Multi-agent framework reference"
+    }
+  }
+}

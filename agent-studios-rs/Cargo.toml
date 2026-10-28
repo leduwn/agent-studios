@@ -13,6 +13,7 @@ members = [
     "crates/workspace",
     "crates/external-runtime",
     "crates/opencode-runtime",
+    "crates/claude-code-runtime",
 ]
 
 [workspace.package]

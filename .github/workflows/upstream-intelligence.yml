@@ -1,0 +1,313 @@
+name: Upstream Intelligence & Compatibility Monitor
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-upstream:
+    name: Check Upstream Releases & Security Drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Upstream Releases & Manage Drift Issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            // Helper: classify GitHub API errors explicitly (403, 429 rate limit, 404, 500 server error)
+            function classifyError(err) {
+              const status = err && (err.status || (err.response && err.response.status));
+              const msg = (err && err.message) || String(err);
+              const isRateLimit = status === 429 || (status === 403 && (
+                msg.toLowerCase().includes('rate limit') ||
+                msg.toLowerCase().includes('secondary rate') ||
+                (err.response && err.response.headers && err.response.headers['x-ratelimit-remaining'] === '0')
+              ));
+
+              if (isRateLimit) {
+                return {
+                  status: status || 429,
+                  type: 'RATE_LIMIT',
+                  description: `HTTP ${status || 429} Rate limit exceeded`
+                };
+              }
+              if (status === 403) {
+                return {
+                  status: 403,
+                  type: 'FORBIDDEN',
+                  description: 'HTTP 403 Access forbidden'
+                };
+              }
+              if (status === 404) {
+                return {
+                  status: 404,
+                  type: 'NOT_FOUND',
+                  description: 'HTTP 404 Not found'
+                };
+              }
+              if (status >= 500 && status < 600) {
+                return {
+                  status,
+                  type: 'SERVER_ERROR',
+                  description: `HTTP ${status} GitHub service error`
+                };
+              }
+              return {
+                status: status || 'ERR',
+                type: 'API_ERROR',
+                description: `HTTP ${status || 'ERR'}: ${msg}`
+              };
+            }
+
+            // 1. Read upstream baseline state file
+            const stateFile = '.github/upstream-state.json';
+            if (!fs.existsSync(stateFile)) {
+              core.setFailed(`State file ${stateFile} not found.`);
+              return;
+            }
+
+            let state;
+            try {
+              state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+            } catch (err) {
+              core.setFailed(`Failed to parse ${stateFile}: ${err.message}`);
+              return;
+            }
+
+            const rawRepos = state.repositories || state;
+            const repoList = Array.isArray(rawRepos)
+              ? rawRepos.map(item => ({
+                  repo: item.repo || item.name,
+                  integrated_version: item.integrated_version || item.target_version || item.version,
+                  notes: item.notes || ''
+                }))
+              : Object.entries(rawRepos).map(([repo, details]) => ({
+                  repo,
+                  integrated_version: typeof details === 'string'
+                    ? details
+                    : (details.integrated_version || details.target_version || details.version),
+                  notes: typeof details === 'object' ? details.notes : ''
+                }));
+
+            // 2. Fetch existing issues (both OPEN and CLOSED) to prevent duplicate alerts
+            let allIssues = [];
+            let issueListingFailed = false;
+            let issueListingError = null;
+            try {
+              allIssues = await github.paginate(github.rest.issues.listForRepo, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'all',
+                per_page: 100
+              });
+            } catch (err) {
+              issueListingFailed = true;
+              issueListingError = classifyError(err);
+              core.error(`Failed to list existing issues (${issueListingError.description}): ${err.message}`);
+            }
+
+            const results = [];
+            let rateLimitEncountered = false;
+
+            // 3. Scan each repository for upstream drift
+            for (const { repo, integrated_version, notes } of repoList) {
+              const [owner, repoName] = repo.split('/');
+              let latestDetected = null;
+              let detectionSource = 'none';
+              let errorNotice = null;
+
+              if (rateLimitEncountered) {
+                results.push({
+                  repo,
+                  integrated_version,
+                  latestDetected: 'UNKNOWN',
+                  status: 'SKIPPED (Rate Limited)',
+                  actionSummary: 'Skipped due to upstream API rate limit'
+                });
+                continue;
+              }
+
+              // Step A: Attempt to get latest published release
+              try {
+                const release = await github.rest.repos.getLatestRelease({
+                  owner,
+                  repo: repoName
+                });
+                if (release && release.data && release.data.tag_name) {
+                  latestDetected = release.data.tag_name;
+                  detectionSource = 'release';
+                }
+              } catch (err) {
+                const classified = classifyError(err);
+                if (classified.type === 'NOT_FOUND') {
+                  // 404 indicates no published releases; fall through to tags
+                  core.info(`No published releases for ${repo} (HTTP 404). Falling back to tags.`);
+                } else if (classified.type === 'RATE_LIMIT') {
+                  rateLimitEncountered = true;
+                  errorNotice = classified.description;
+                  core.error(`Rate limit encountered while querying ${repo}: ${err.message}`);
+                } else {
+                  errorNotice = classified.description;
+                  core.warning(`Error fetching release for ${repo} (${classified.description}): ${err.message}`);
+                }
+              }
+
+              // Step B: Fallback to latest git tag if no release detected and no rate limit
+              if (!latestDetected && !rateLimitEncountered) {
+                try {
+                  const tags = await github.rest.repos.listTags({
+                    owner,
+                    repo: repoName,
+                    per_page: 1
+                  });
+                  if (tags && tags.data && tags.data.length > 0) {
+                    latestDetected = tags.data[0].name;
+                    detectionSource = 'tag';
+                    errorNotice = null; // Cleared because tags succeeded
+                  } else if (!errorNotice) {
+                    errorNotice = 'No releases or tags found';
+                  }
+                } catch (err) {
+                  const classified = classifyError(err);
+                  if (classified.type === 'RATE_LIMIT') {
+                    rateLimitEncountered = true;
+                    errorNotice = classified.description;
+                    core.error(`Rate limit encountered while querying tags for ${repo}: ${err.message}`);
+                  } else {
+                    errorNotice = classified.description;
+                    core.warning(`Error fetching tags for ${repo} (${classified.description}): ${err.message}`);
+                  }
+                }
+              }
+
+              let status = 'UP TO DATE';
+              let actionSummary = 'Up to date';
+
+              if (!latestDetected) {
+                status = errorNotice ? `ERROR (${errorNotice})` : 'UNKNOWN';
+                actionSummary = errorNotice ? `Detection failed: ${errorNotice}` : 'Failed to detect latest version';
+              } else if (latestDetected !== integrated_version) {
+                status = 'NEW RELEASE DETECTED';
+                const issueTitle = `[Upstream Drift] ${repo} new release ${latestDetected}`;
+
+                // Deduplication check across open AND closed issues
+                const existingIssue = allIssues.find(i =>
+                  !i.pull_request &&
+                  i.title &&
+                  (i.title.trim().toLowerCase() === issueTitle.trim().toLowerCase() ||
+                   (i.title.includes(`[Upstream Drift] ${repo}`) && i.title.includes(latestDetected)))
+                );
+
+                if (existingIssue) {
+                  const stateLabel = existingIssue.state === 'closed' ? 'acknowledged and closed' : 'open';
+                  core.info(`Issue #${existingIssue.number} (${existingIssue.state}) already exists for "${issueTitle}". Skipping duplicate creation.`);
+                  actionSummary = `Duplicate skipped (${stateLabel} in #${existingIssue.number})`;
+                } else if (issueListingFailed) {
+                  core.warning(`Skipping issue creation for ${repo} to avoid duplicates: issue listing failed (${issueListingError.description})`);
+                  actionSummary = `Issue creation deferred (issue listing failed: ${issueListingError.description})`;
+                } else {
+                  core.info(`New version detected for ${repo}: ${latestDetected} (integrated: ${integrated_version}). Creating alert issue.`);
+                  const diffUrl = `https://github.com/${repo}/compare/${integrated_version}...${latestDetected}`;
+                  const releaseUrl = `https://github.com/${repo}/releases/tag/${latestDetected}`;
+
+                  const bodyLines = [
+                    '## Upstream Intelligence Alert: Upstream Drift Detected',
+                    '',
+                    `A new upstream release has been detected for repository \`${repo}\`.`,
+                    '',
+                    `- **Repository:** https://github.com/${repo}`,
+                    `- **Integrated Baseline Version:** \`${integrated_version}\``,
+                    `- **Detected Upstream Version:** \`${latestDetected}\` (via ${detectionSource})`,
+                    `- **Comparison Diff:** ${diffUrl}`,
+                    `- **Upstream Release Notes:** ${releaseUrl}`,
+                    `- **Detected At:** ${new Date().toISOString()}`
+                  ];
+                  if (notes) {
+                    bodyLines.push(`- **Integration Notes:** ${notes}`);
+                  }
+                  bodyLines.push(
+                    '',
+                    '### Traceability & Comparison',
+                    'Review the full code changes between integrated baseline and upstream release:',
+                    `[${integrated_version} → ${latestDetected} Diff](${diffUrl})`,
+                    '',
+                    '### Action Required',
+                    `1. Inspect changes and breaking notes: [Release Notes](${releaseUrl}) and [Diff View](${diffUrl})`,
+                    '2. Assess compatibility, security, and breaking changes for Agent Studios runtime adapters.',
+                    '3. Update \`.github/upstream-state.json\` with new integrated version once migration tests pass.',
+                    '',
+                    '> **Policy Reminder:** Automated notification only. Zero automatic merge or rebase is executed.'
+                  );
+
+                  try {
+                    const newIssue = await github.rest.issues.create({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      title: issueTitle,
+                      body: bodyLines.join('\n'),
+                      labels: ['upstream-intelligence', 'automated-notice']
+                    });
+                    core.info(`Created issue #${newIssue.data.number} for ${repo}`);
+                    actionSummary = `Created issue #${newIssue.data.number}`;
+                    allIssues.push(newIssue.data);
+                  } catch (err) {
+                    const classified = classifyError(err);
+                    core.error(`Failed to create issue for ${repo} (${classified.description}): ${err.message}`);
+                    actionSummary = `Issue creation failed: ${classified.description}`;
+                  }
+                }
+              }
+
+              results.push({
+                repo,
+                integrated_version,
+                latestDetected: latestDetected || 'UNKNOWN',
+                status,
+                actionSummary
+              });
+            }
+
+            // 4. Generate summary report table
+            const tableRows = [
+              [
+                { data: 'Repository', header: true },
+                { data: 'Integrated Baseline', header: true },
+                { data: 'Latest Detected', header: true },
+                { data: 'Status', header: true },
+                { data: 'Action / Traceability', header: true }
+              ],
+              ...results.map(r => {
+                let traceCol = r.actionSummary;
+                if (r.status === 'NEW RELEASE DETECTED' && r.latestDetected !== 'UNKNOWN') {
+                  traceCol = `${r.actionSummary} | [Diff](https://github.com/${r.repo}/compare/${r.integrated_version}...${r.latestDetected})`;
+                }
+                return [
+                  r.repo,
+                  `\`${r.integrated_version}\``,
+                  `\`${r.latestDetected}\``,
+                  r.status === 'NEW RELEASE DETECTED' ? `**${r.status}**` : r.status,
+                  traceCol
+                ];
+              })
+            ];
+
+            await core.summary
+              .addHeading('Upstream Intelligence Scan Results')
+              .addTable(tableRows)
+              .addQuote('Distinction: Integrated Baseline is the version currently adapted in Agent Studios. Latest Detected is the upstream release. Policy: Zero automatic merge or rebase is executed.')
+              .write();
+
+            console.log('\n--- Upstream Intelligence Scan Results ---');
+            for (const r of results) {
+              console.log(`${r.repo}: integrated=${r.integrated_version}, detected=${r.latestDetected}, status=${r.status}, action=${r.actionSummary}`);
+            }

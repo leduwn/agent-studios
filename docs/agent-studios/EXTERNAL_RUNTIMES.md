@@ -1,7 +1,7 @@
 ﻿# Agent Studios — External Runtimes Architecture
 
-> **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; Adapters M11–M12 PLANNED)
-> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface, hardened contract boundaries, and 70-test contract verification suite (68 contract tests + 2 unit tests) are **IMPLEMENTED & VERIFIED**. Concrete adapters are **PLANNED**.
+> **Status**: Interface Implemented & Hardened (Milestones M10 & M10.1 COMPLETED; M11 OpenCode COMPLETED; M12 Claude Code COMPLETED)
+> **Current Reality**: Internal Codex (`codex-rs`) is the active production runtime. Vendor-neutral `agent-studios-external-runtime` interface (M10/M10.1), `agent-studios-opencode-runtime` adapter (M11), and `agent-studios-claude-code-runtime` adapter (M12) are **IMPLEMENTED & VERIFIED**. External Codex CLI adapter is **PLANNED**.
 > **Precedence**: Subservient to `MASTER_VISION.md` and `PRODUCT_PRINCIPLES.md`.
 
 ---
@@ -29,8 +29,8 @@ The External Runtime subsystem integrates these distinct CLI agents into the Age
 ├────────────────────────────────┼────────────────────────────────┤
 │ Internal Codex (`codex-rs`)    │ [IMPLEMENTED & PRODUCTION]     │
 │ External Runtime API (M10)     │ [IMPLEMENTED & TESTED]         │
-│ OpenCode Adapter (M11)         │ [PLANNED]                      │
-│ Claude Code Adapter (M12)      │ [PLANNED]                      │
+│ OpenCode Adapter (M11)         │ [COMPLETED & VERIFIED]         │
+│ Claude Code Adapter (M12)      │ [COMPLETED & VERIFIED]         │
 │ External Codex CLI Adapter     │ [PLANNED]                      │
 └────────────────────────────────┴────────────────────────────────┘
 ```
