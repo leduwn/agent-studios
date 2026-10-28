@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_studios_claude_code_runtime::approval::{ApprovalAuthority, ApprovalDecision};
+use agent_studios_claude_code_runtime::approval::{
+    ApprovalAuthority, ApprovalDecision, ApprovalState,
+};
 use agent_studios_claude_code_runtime::discovery::CLAUDE_CODE_RUNTIME_ID;
 use agent_studios_claude_code_runtime::error::ClaudeCodeError;
 use agent_studios_claude_code_runtime::process::{ClaudeCodeProcessConfig, spawn_claude_process};
@@ -412,6 +414,99 @@ async fn test_child_stdin_write_failure_fails_closed_and_not_marked_delivered() 
 }
 
 #[tokio::test]
+async fn test_two_phase_commit_stdin_write_failure_transitions_to_delivery_failed() {
+    let (temp_dir, _ws) = test_managed_workspace();
+    let dummy_bin = if cfg!(windows) {
+        PathBuf::from("cmd.exe")
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+
+    let process_config = ClaudeCodeProcessConfig {
+        binary_path: dummy_bin,
+        working_dir: temp_dir.path().to_path_buf(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        sandbox_policy: SandboxPolicy::default(),
+        permission_mode: Some("manual".to_string()),
+        max_budget_usd: None,
+        model: None,
+        bare: false,
+        env_vars: Vec::new(),
+    };
+
+    let (process, _stdout) = spawn_claude_process(process_config)
+        .await
+        .expect("Process spawn should succeed");
+
+    // Close child stdin immediately to simulate broken pipe
+    process.close_stdin().await;
+
+    let authority = Arc::new(ApprovalAuthority::new());
+    let req_id = "req_2pc_fail_01";
+    let control_req = ControlRequest {
+        request_id: req_id.to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"command": "dangerous_action"}),
+            tool_use_id: Some("call_2pc_fail".to_string()),
+            agent_id: None,
+            decision_reason: None,
+            blocked_path: None,
+            default_to_no: None,
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("Registration must succeed");
+
+    // Phase 1: Prepare resolution
+    let (control_resp, token) = authority
+        .prepare_resolution(approval_id, true, None)
+        .expect("prepare_resolution should succeed");
+
+    assert_eq!(
+        authority.get_approval_state(&approval_id),
+        Some(ApprovalState::Resolving)
+    );
+
+    let json_frame = serde_json::to_string(&control_resp).unwrap();
+
+    // Attempt stdin write - must fail due to closed pipe
+    let write_res = process.write_stdin_line(&json_frame).await;
+    assert!(write_res.is_err(), "Stdin write must fail when pipe is closed");
+
+    // Phase 2: Failure triggers fail_delivery
+    authority.fail_delivery(token.clone());
+
+    // Invariants:
+    // 1. State must be DeliveryFailed (retained, never Delivered or approved)
+    assert_eq!(
+        authority.get_approval_state(&approval_id),
+        Some(ApprovalState::DeliveryFailed)
+    );
+    assert_eq!(authority.pending_count(), 0);
+    assert!(!authority.is_pending(req_id));
+
+    // 2. confirm_delivery must fail
+    let confirm_res = authority.confirm_delivery(token);
+    assert!(
+        confirm_res.is_err(),
+        "Cannot confirm delivery on a delivery-failed approval"
+    );
+
+    // 3. prepare_resolution must fail
+    let re_resolve = authority.prepare_resolution(approval_id, true, None);
+    assert!(
+        re_resolve.is_err(),
+        "Cannot re-prepare a delivery-failed approval"
+    );
+
+    let _ = process.terminate().await;
+}
+
+#[tokio::test]
 async fn test_runtime_send_approval_when_session_terminal_fails_closed() {
     let runtime = ClaudeCodeRuntime::new().unwrap();
     let instance_ref = RuntimeInstanceRef::new(
@@ -650,4 +745,57 @@ async fn test_watchdog_timeout_async_on_timeout_not_cancelled() {
 
     assert!(!authority.is_watchdog_active(&approval_id));
     assert_eq!(authority.pending_count(), 0);
+}
+
+#[tokio::test]
+async fn test_watchdog_immediate_zero_duration_timeout_no_leak() {
+    let authority = Arc::new(ApprovalAuthority::new());
+    for i in 0..100 {
+        let req_id = format!("req_zero_timeout_{i:03}");
+        let control_req = ControlRequest {
+            request_id: req_id.clone(),
+            request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+                tool_name: "Bash".to_string(),
+                input: serde_json::json!({}),
+                tool_use_id: None,
+                agent_id: None,
+                decision_reason: None,
+                blocked_path: None,
+                default_to_no: None,
+                suggestions: None,
+            }),
+        };
+
+        let approval_id = authority
+            .register_request(&control_req)
+            .expect("Registration should succeed");
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let watchdog_handle = authority.spawn_watchdog(
+            approval_id,
+            Duration::ZERO,
+            move |deny_resp| async move {
+                let _ = tx.send(deny_resp);
+            },
+        );
+
+        let deny = tokio::time::timeout(Duration::from_millis(200), rx)
+            .await
+            .expect("Zero-duration timeout must fire promptly")
+            .expect("Deny response must be received");
+
+        assert_eq!(deny.request_id(), req_id);
+
+        let join_res = tokio::time::timeout(Duration::from_millis(200), watchdog_handle).await;
+        assert!(
+            join_res.is_ok(),
+            "Watchdog task must terminate cleanly on zero-duration timeout"
+        );
+
+        assert!(
+            !authority.is_watchdog_active(&approval_id),
+            "Watchdog handle must not leak or remain active for iteration {i}"
+        );
+        assert_eq!(authority.pending_count(), 0);
+    }
 }

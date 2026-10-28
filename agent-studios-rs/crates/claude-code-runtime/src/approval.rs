@@ -481,8 +481,20 @@ impl ApprovalAuthority {
 
     /// Checks if a watchdog task is actively tracked for an approval request.
     pub fn is_watchdog_active(&self, id: &ApprovalId) -> bool {
-        let lock = self.watchdog_handles.lock().expect("lock poisoned");
-        lock.contains_key(id)
+        let mut lock = match self.watchdog_handles.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        if let Some(handle) = lock.get(id) {
+            if handle.is_finished() {
+                lock.remove(id);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
     }
 
     /// Prepares an approval resolution in a two-phase commit:
@@ -702,7 +714,10 @@ impl ApprovalAuthority {
             let _ = done_tx.send(());
         });
 
-        if let Ok(mut lock) = self.watchdog_handles.lock() {
+        if let Ok(mut lock) = self.watchdog_handles.lock()
+            && self.is_pending_id(&approval_id)
+            && !inner_task.is_finished()
+        {
             lock.insert(approval_id, inner_task);
         }
 
