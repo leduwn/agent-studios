@@ -156,7 +156,7 @@ fn test_worktree_lifecycle_capture_and_reconciliation_full() {
         .expect("create worktree");
 
     assert!(managed.root.exists());
-    assert!(managed.root.starts_with(&managed_root));
+    assert!(managed.root.starts_with(orchestrator.managed_root()));
 
     // 2. Thread binding test
     let thread_1 = "thread_alpha_123";
@@ -512,7 +512,7 @@ fn test_topology_canonical_repo_and_cwd_separation() {
         "source_cwd must be repo/apps/web"
     );
     assert!(
-        managed.root.starts_with(&managed_root),
+        managed.root.starts_with(orchestrator.managed_root()),
         "root must be under managed_root"
     );
     assert_eq!(
