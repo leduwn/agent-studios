@@ -22,13 +22,21 @@ fn test_strict_fails_closed_without_filesystem_isolation() {
     );
 
     match containment_res.err().unwrap() {
+        #[cfg(windows)]
         OpenCodeError::SandboxPolicyViolation(msg) => {
             assert!(
                 msg.contains("filesystem isolation"),
                 "Expected violation message mentioning filesystem isolation, got: {msg}"
             );
         }
-        other => panic!("Expected SandboxPolicyViolation, got: {other:?}"),
+        #[cfg(not(windows))]
+        OpenCodeError::UnsupportedPlatform(msg) => {
+            assert!(
+                msg.contains("requires OS-level containment"),
+                "Expected unsupported platform message, got: {msg}"
+            );
+        }
+        other => panic!("Expected platform-appropriate sandbox rejection, got: {other:?}"),
     }
 }
 
@@ -229,7 +237,11 @@ async fn test_early_child_crash_detected_without_hanging() {
 #[tokio::test]
 async fn test_non_existent_working_dir_fails_closed() {
     let non_existent_dir = std::env::temp_dir().join("definitely_non_existent_dir_m11_999");
-    let config = OpenCodeServerConfig::new("cmd.exe", non_existent_dir);
+    #[cfg(windows)]
+    let binary = "cmd.exe";
+    #[cfg(not(windows))]
+    let binary = "sh";
+    let config = OpenCodeServerConfig::new(binary, non_existent_dir);
 
     let res = spawn_opencode_server(config).await;
     assert!(res.is_err(), "Non-existent working_dir must fail closed");
