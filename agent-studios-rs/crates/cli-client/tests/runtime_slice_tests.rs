@@ -770,3 +770,111 @@ async fn test_concurrent_sessions_isolated_approval_routing() {
         "Re-resolving already resolved approval must fail closed because mapping was cleaned up"
     );
 }
+
+#[tokio::test]
+async fn test_approval_routing_session_terminated_fails_closed() {
+    use agent_studios_cli_client::client::ClientApprovalDecision;
+    use agent_studios_protocol::id::ApprovalId;
+
+    let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
+
+    let client =
+        EmbeddedClient::bootstrap_with_runtime("session-terminated-approval-test", mock_runtime)
+            .await
+            .expect("bootstrap failed");
+
+    let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
+
+    let approval_id = ApprovalId::new();
+
+    let _task = client
+        .submit_goal(
+            &format!("approval:{approval_id}"),
+            GoalSubmissionOptions::default(),
+        )
+        .await
+        .expect("submit goal failed");
+
+    // Wait until approval is emitted into Control Plane
+    let mut approval_received = false;
+    for _ in 0..25 {
+        if let Ok(Some(env)) = timeout(Duration::from_millis(200), sub.stream.recv()).await
+            && let ControlPlaneEvent::ApprovalRequested { approval } = &env.event
+            && approval.id == approval_id
+        {
+            approval_received = true;
+            break;
+        }
+    }
+    assert!(approval_received, "Approval must be received");
+
+    // Cancel / terminate the active session before resolving approval
+    client
+        .cancel_active_run(Some("Terminating session early".to_string()))
+        .await
+        .expect("cancel active run");
+
+    // Give ingestion loop time to process cancellation
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Attempting to resolve approval for terminated session must fail closed
+    let res = client
+        .resolve_approval(approval_id, ClientApprovalDecision::Allow)
+        .await;
+
+    assert!(
+        res.is_err(),
+        "Resolving approval after session termination must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn test_approval_routing_duplicate_response_fails_closed() {
+    use agent_studios_cli_client::client::ClientApprovalDecision;
+    use agent_studios_protocol::id::ApprovalId;
+
+    let received_inputs = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mock_runtime = Arc::new(ApprovalRoutingMockRuntime::new(received_inputs.clone()));
+
+    let client = EmbeddedClient::bootstrap_with_runtime("duplicate-approval-test", mock_runtime)
+        .await
+        .expect("bootstrap failed");
+
+    let mut sub = client.subscribe_events(0).await.expect("subscribe failed");
+
+    let approval_id = ApprovalId::new();
+
+    let _task = client
+        .submit_goal(
+            &format!("approval:{approval_id}"),
+            GoalSubmissionOptions::default(),
+        )
+        .await
+        .expect("submit goal failed");
+
+    for _ in 0..25 {
+        if let Ok(Some(env)) = timeout(Duration::from_millis(200), sub.stream.recv()).await
+            && let ControlPlaneEvent::ApprovalRequested { approval } = &env.event
+            && approval.id == approval_id
+        {
+            break;
+        }
+    }
+
+    // First resolution succeeds
+    client
+        .resolve_approval(approval_id, ClientApprovalDecision::Allow)
+        .await
+        .expect("first resolution must succeed");
+
+    // Second (duplicate) resolution must fail closed
+    let dup_res = client
+        .resolve_approval(approval_id, ClientApprovalDecision::Allow)
+        .await;
+
+    assert!(
+        dup_res.is_err(),
+        "Duplicate approval resolution must fail closed"
+    );
+}

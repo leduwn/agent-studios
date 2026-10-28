@@ -570,9 +570,12 @@ impl AgentStudiosClient for MockTestClient {
         _from_sequence: u64,
     ) -> Result<ClientSubscription, ClientError> {
         let (_tx, rx) = tokio::sync::mpsc::channel(10);
+        let (_state_tx, state_rx) =
+            tokio::sync::watch::channel(agent_studios_cli_client::StreamSyncState::Healthy);
         Ok(ClientSubscription {
             backfill: Vec::new(),
             stream: rx,
+            sync_state: state_rx,
         })
     }
     async fn get_task_graph(&self) -> Result<TaskGraphSnapshot, ClientError> {

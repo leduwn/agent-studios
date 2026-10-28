@@ -32,15 +32,29 @@ use agent_studios_protocol::id::{
 };
 use agent_studios_protocol::run::RunState;
 use agent_studios_protocol::task::TaskState;
-use agent_studios_protocol::worktree::ExecutionWorkspace;
+use agent_studios_protocol::worktree::{ExecutionWorkspace, WorktreeState};
+use agent_studios_workspace::WorkspaceOrchestrator;
 use agent_studios_workspace::capture::CapturedChanges;
 use agent_studios_workspace::reconciliation::ReconciliationOutcome;
 
 use crate::client::{
     AgentStudiosClient, ClientApprovalDecision, ClientError, ClientSubscription, ExecutionMode,
-    GoalSubmissionOptions, RuntimeMode, WorkspaceInfo, WorktreeRecordSummary,
+    GoalSubmissionOptions, RuntimeMode, StreamSyncState, WorkspaceInfo, WorktreeRecordSummary,
 };
 use crate::runtime::{resolve_default_runtime, resolve_runtime};
+
+fn default_orchestrator() -> Result<Arc<WorkspaceOrchestrator>, ClientError> {
+    let base = match std::env::var_os("AGENT_STUDIOS_HOME") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => std::env::temp_dir().join("agent-studios"),
+    };
+    let wt_root = base.join("worktrees");
+    let art_root = base.join("artifacts");
+    let orchestrator = WorkspaceOrchestrator::new(wt_root, art_root).map_err(|e| {
+        ClientError::OperationFailed(format!("Failed to initialize workspace orchestrator: {e}"))
+    })?;
+    Ok(Arc::new(orchestrator))
+}
 
 /// In-process client running the deterministic control plane inside the CLI process.
 pub struct EmbeddedClient {
@@ -53,6 +67,7 @@ pub struct EmbeddedClient {
     active_sessions: Arc<RwLock<Vec<RuntimeSessionRef>>>,
     approval_sessions: Arc<RwLock<HashMap<ApprovalId, RuntimeSessionId>>>,
     mode: RuntimeMode,
+    orchestrator: Arc<WorkspaceOrchestrator>,
 }
 
 impl EmbeddedClient {
@@ -162,6 +177,8 @@ impl EmbeddedClient {
             }
         }
 
+        let orchestrator = default_orchestrator()?;
+
         Ok(Self {
             studio_id,
             workspace_name: workspace_name.to_string(),
@@ -172,7 +189,19 @@ impl EmbeddedClient {
             active_sessions: Arc::new(RwLock::new(Vec::new())),
             approval_sessions: Arc::new(RwLock::new(HashMap::new())),
             mode,
+            orchestrator,
         })
+    }
+
+    /// Overrides the internal workspace orchestrator (useful for test isolation).
+    pub fn with_orchestrator(mut self, orchestrator: Arc<WorkspaceOrchestrator>) -> Self {
+        self.orchestrator = orchestrator;
+        self
+    }
+
+    /// Access internal workspace orchestrator.
+    pub fn orchestrator(&self) -> &Arc<WorkspaceOrchestrator> {
+        &self.orchestrator
     }
 
     async fn sync_events_internal(
@@ -207,17 +236,25 @@ impl EmbeddedClient {
         events_history: &RwLock<Vec<EventEnvelope>>,
         events_tx: &broadcast::Sender<EventEnvelope>,
     ) {
-        let _ = cp.record_assistant_chunk(
+        if let Err(e) = cp.record_assistant_chunk(
             studio_id,
             agent_id,
             Some(task_id),
             Some(run_id),
             &format!("[Startup Error] {err_msg}\n"),
             false,
-        );
-        let _ = cp.record_run_outcome(run_id, "startup_failed", Some(err_msg.to_string()));
-        let _ = cp.transition_run_state(run_id, RunState::Failed);
-        let _ = cp.transition_task_state(task_id, TaskState::Failed);
+        ) {
+            tracing::warn!("Failed to record assistant error chunk in Control Plane: {e}");
+        }
+        if let Err(e) = cp.record_run_outcome(run_id, "startup_failed", Some(err_msg.to_string())) {
+            tracing::warn!("Failed to record run outcome in Control Plane: {e}");
+        }
+        if let Err(e) = cp.transition_run_state(run_id, RunState::Failed) {
+            tracing::warn!("Failed to transition run {run_id} to Failed: {e}");
+        }
+        if let Err(e) = cp.transition_task_state(task_id, TaskState::Failed) {
+            tracing::warn!("Failed to transition task {task_id} to Failed: {e}");
+        }
         Self::sync_events_internal(cp, studio_id, events_history, events_tx).await;
     }
 
@@ -292,30 +329,38 @@ fn is_terminal_event(event: &ControlPlaneEvent) -> bool {
 async fn deliver_events_with_continuity_check(
     candidates: Vec<EventEnvelope>,
     last_delivered: &mut u64,
+    sync_state: &mut StreamSyncState,
+    sync_state_tx: &tokio::sync::watch::Sender<StreamSyncState>,
     delivered_terminal_events: &mut HashSet<EventId>,
     tx: &mpsc::Sender<EventEnvelope>,
 ) -> bool {
-    let mut has_unrecovered_gap = false;
-
     for candidate in candidates {
         if candidate.sequence <= *last_delivered {
             continue;
         }
 
-        if !has_unrecovered_gap && candidate.sequence == *last_delivered + 1 {
+        if candidate.sequence == *last_delivered + 1 {
             *last_delivered = candidate.sequence;
+            if *sync_state == StreamSyncState::Recovering {
+                *sync_state = StreamSyncState::Healthy;
+                sync_state_tx.send_replace(StreamSyncState::Healthy);
+            }
             if tx.send(candidate).await.is_err() {
                 return false;
             }
         } else {
-            if !has_unrecovered_gap {
-                has_unrecovered_gap = true;
+            let expected = *last_delivered + 1;
+            let found = candidate.sequence;
+            let gap_state = StreamSyncState::GapUnrecoverable { expected, found };
+            if *sync_state != gap_state {
+                *sync_state = gap_state;
+                sync_state_tx.send_replace(gap_state);
                 tracing::warn!(
                     studio_id = %candidate.studio_id,
                     last_delivered = *last_delivered,
-                    expected = *last_delivered + 1,
-                    found = candidate.sequence,
-                    "Unrecoverable sequence gap detected: missing events in history"
+                    expected,
+                    found,
+                    "Unrecoverable sequence gap detected: missing events in history; projection degraded"
                 );
             }
 
@@ -422,10 +467,10 @@ impl AgentStudiosClient for EmbeddedClient {
     async fn submit_goal(
         &self,
         prompt: &str,
-        _options: GoalSubmissionOptions,
+        options: GoalSubmissionOptions,
     ) -> Result<TaskId, ClientError> {
         // 1. Create Control Plane Task and Run, and transition to Running
-        let (task_id, run_id, agent_id, worktree_id, cwd_path) = {
+        let (task_id, run_id, agent_id, cwd_path) = {
             let mut cp = self.control_plane.lock().await;
             let task = cp
                 .create_task(
@@ -500,11 +545,13 @@ impl AgentStudiosClient for EmbeddedClient {
             }
 
             if let Err(e) = cp.transition_run_state(run.id, RunState::Starting) {
-                let _ = cp.transition_run_state(run.id, RunState::Failed);
-                let _ = cp.transition_task_state(task.id, TaskState::Failed);
-                Self::sync_events_internal(
-                    &cp,
+                Self::fail_task_and_run(
+                    &mut cp,
                     self.studio_id,
+                    task.id,
+                    run.id,
+                    agent.id,
+                    &format!("Failed to transition run to Starting: {e}"),
                     &self.events_history,
                     &self.events_tx,
                 )
@@ -515,11 +562,13 @@ impl AgentStudiosClient for EmbeddedClient {
             }
 
             if let Err(e) = cp.transition_run_state(run.id, RunState::Running) {
-                let _ = cp.transition_run_state(run.id, RunState::Failed);
-                let _ = cp.transition_task_state(task.id, TaskState::Failed);
-                Self::sync_events_internal(
-                    &cp,
+                Self::fail_task_and_run(
+                    &mut cp,
                     self.studio_id,
+                    task.id,
+                    run.id,
+                    agent.id,
+                    &format!("Failed to transition run to Running: {e}"),
                     &self.events_history,
                     &self.events_tx,
                 )
@@ -531,39 +580,65 @@ impl AgentStudiosClient for EmbeddedClient {
 
             let cwd_path =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let wt = match cp.create_worktree(
-                self.studio_id,
-                format!("worktree-{}", task.id),
-                cwd_path.clone(),
-                cwd_path.clone(),
-                "HEAD",
-            ) {
-                Ok(wt) => wt,
-                Err(e) => {
-                    let err_msg = format!("Failed to register worktree: {e}");
-                    Self::fail_task_and_run(
-                        &mut cp,
-                        self.studio_id,
-                        task.id,
-                        run.id,
-                        agent.id,
-                        &err_msg,
-                        &self.events_history,
-                        &self.events_tx,
-                    )
-                    .await;
-                    return Err(ClientError::OperationFailed(err_msg));
-                }
-            };
 
-            if let Err(e) = cp.assign_worktree(wt.id, task.id, agent.id, Some(run.id)) {
-                let err_msg = format!("Failed to assign worktree: {e}");
+            Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
+                .await;
+
+            (task.id, run.id, agent.id, cwd_path)
+        };
+
+        // Determine workspace access policy (ReadOnly vs Mutating)
+        let access_mode = match options.workspace_access_mode {
+            Some(mode) => mode,
+            None => {
+                if self.mode == RuntimeMode::Demo {
+                    WorkspaceAccessMode::ReadOnly
+                } else {
+                    WorkspaceAccessMode::Mutating
+                }
+            }
+        };
+
+        // Provision isolated physical worktree via WorkspaceOrchestrator
+        let managed = match self
+            .orchestrator
+            .create_worktree_async(cwd_path.clone(), None)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                let err_msg = format!("Failed to allocate physical worktree for execution: {e}");
+                self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                    .await;
+                return Err(ClientError::OperationFailed(err_msg));
+            }
+        };
+
+        if managed.root == managed.source_root {
+            let err_msg = "Physical worktree root equals source root; worktree isolation violated"
+                .to_string();
+            self.record_startup_failure(task_id, run_id, agent_id, &err_msg)
+                .await;
+            return Err(ClientError::OperationFailed(err_msg));
+        }
+
+        let mut cp = self.control_plane.lock().await;
+        let wt = match cp.create_worktree(
+            self.studio_id,
+            format!("worktree-{}", task_id),
+            managed.root.clone(),
+            managed.cwd.clone(),
+            &managed.head_sha,
+        ) {
+            Ok(wt) => wt,
+            Err(e) => {
+                let err_msg = format!("Failed to register worktree in Control Plane: {e}");
                 Self::fail_task_and_run(
                     &mut cp,
                     self.studio_id,
-                    task.id,
-                    run.id,
-                    agent.id,
+                    task_id,
+                    run_id,
+                    agent_id,
                     &err_msg,
                     &self.events_history,
                     &self.events_tx,
@@ -571,12 +646,67 @@ impl AgentStudiosClient for EmbeddedClient {
                 .await;
                 return Err(ClientError::OperationFailed(err_msg));
             }
-
-            Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
-                .await;
-
-            (task.id, run.id, agent.id, wt.id, cwd_path)
         };
+
+        if let Err(e) = cp.transition_worktree_state(wt.id, WorktreeState::Ready) {
+            let err_msg = format!("Failed to transition worktree to Ready in Control Plane: {e}");
+            Self::fail_task_and_run(
+                &mut cp,
+                self.studio_id,
+                task_id,
+                run_id,
+                agent_id,
+                &err_msg,
+                &self.events_history,
+                &self.events_tx,
+            )
+            .await;
+            return Err(ClientError::OperationFailed(err_msg));
+        }
+
+        if let Err(e) = cp.assign_worktree(wt.id, task_id, agent_id, Some(run_id)) {
+            let err_msg = format!("Failed to assign worktree in Control Plane: {e}");
+            Self::fail_task_and_run(
+                &mut cp,
+                self.studio_id,
+                task_id,
+                run_id,
+                agent_id,
+                &err_msg,
+                &self.events_history,
+                &self.events_tx,
+            )
+            .await;
+            return Err(ClientError::OperationFailed(err_msg));
+        }
+
+        if let Err(e) = cp.transition_worktree_state(wt.id, WorktreeState::InUse) {
+            let err_msg = format!("Failed to transition worktree to InUse in Control Plane: {e}");
+            Self::fail_task_and_run(
+                &mut cp,
+                self.studio_id,
+                task_id,
+                run_id,
+                agent_id,
+                &err_msg,
+                &self.events_history,
+                &self.events_tx,
+            )
+            .await;
+            return Err(ClientError::OperationFailed(err_msg));
+        }
+
+        Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
+            .await;
+
+        let workspace = ExecutionWorkspace::managed(
+            wt.id,
+            managed.root,
+            managed.cwd,
+            managed.source_root,
+            managed.source_cwd,
+            managed.head_sha,
+        );
 
         // 2. Discover runtime instance
         let instances = match self.runtime.discover().await {
@@ -615,17 +745,8 @@ impl AgentStudiosClient for EmbeddedClient {
             instance.instance_id,
         );
 
-        let workspace = ExecutionWorkspace::managed(
-            worktree_id,
-            cwd_path.clone(),
-            cwd_path.clone(),
-            cwd_path.clone(),
-            cwd_path,
-            "HEAD",
-        );
-
         let start_req = RuntimeStartRequest::new(instance_ref, workspace)
-            .with_workspace_access_mode(WorkspaceAccessMode::ReadOnly)
+            .with_workspace_access_mode(access_mode)
             .with_initial_prompt(prompt.to_string())
             .with_correlation(correlation);
 
@@ -958,9 +1079,11 @@ impl AgentStudiosClient for EmbeddedClient {
 
         let (tx, rx) = mpsc::channel(512);
         let history_arc = self.events_history.clone();
+        let (state_tx, state_rx) = tokio::sync::watch::channel(StreamSyncState::Healthy);
 
         tokio::spawn(async move {
             let mut delivered_terminal_events = HashSet::new();
+            let mut sync_state = StreamSyncState::Healthy;
 
             loop {
                 match bcast_rx.recv().await {
@@ -974,6 +1097,9 @@ impl AgentStudiosClient for EmbeddedClient {
 
                         // Monotonic gap recovery: if sequence jumped ahead, catch up from history
                         if env.sequence > last_delivered + 1 {
+                            sync_state = StreamSyncState::Recovering;
+                            state_tx.send_replace(StreamSyncState::Recovering);
+
                             let history = history_arc.read().await;
                             let mut missed: Vec<EventEnvelope> = history
                                 .iter()
@@ -992,6 +1118,8 @@ impl AgentStudiosClient for EmbeddedClient {
                         if !deliver_events_with_continuity_check(
                             candidates,
                             &mut last_delivered,
+                            &mut sync_state,
+                            &state_tx,
                             &mut delivered_terminal_events,
                             &tx,
                         )
@@ -1001,6 +1129,9 @@ impl AgentStudiosClient for EmbeddedClient {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped_count)) => {
+                        sync_state = StreamSyncState::Recovering;
+                        state_tx.send_replace(StreamSyncState::Recovering);
+
                         tracing::warn!(
                             skipped_count = skipped_count,
                             last_delivered = last_delivered,
@@ -1018,6 +1149,8 @@ impl AgentStudiosClient for EmbeddedClient {
                         if !deliver_events_with_continuity_check(
                             missed,
                             &mut last_delivered,
+                            &mut sync_state,
+                            &state_tx,
                             &mut delivered_terminal_events,
                             &tx,
                         )
@@ -1027,6 +1160,9 @@ impl AgentStudiosClient for EmbeddedClient {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
+                        sync_state = StreamSyncState::Closed;
+                        state_tx.send_replace(StreamSyncState::Closed);
+
                         // Final drain on channel close to deliver any pending events recorded in history
                         let history = history_arc.read().await;
                         let mut missed: Vec<EventEnvelope> = history
@@ -1040,6 +1176,8 @@ impl AgentStudiosClient for EmbeddedClient {
                         let _ = deliver_events_with_continuity_check(
                             missed,
                             &mut last_delivered,
+                            &mut sync_state,
+                            &state_tx,
                             &mut delivered_terminal_events,
                             &tx,
                         )
@@ -1054,6 +1192,7 @@ impl AgentStudiosClient for EmbeddedClient {
         Ok(ClientSubscription {
             backfill,
             stream: rx,
+            sync_state: state_rx,
         })
     }
 
@@ -1116,6 +1255,22 @@ impl AgentStudiosClient for EmbeddedClient {
             ))
         })?;
 
+        // Authoritative Control Plane verification before transport delivery
+        {
+            let cp = self.control_plane.lock().await;
+            let approval = cp.get_approval(approval_id).ok_or_else(|| {
+                ClientError::NotFound(format!(
+                    "Control Plane approval record {approval_id} not found"
+                ))
+            })?;
+            if approval.state != ApprovalState::Pending {
+                return Err(ClientError::OperationFailed(format!(
+                    "Approval {approval_id} is already in terminal state {:?}, cannot resolve",
+                    approval.state
+                )));
+            }
+        }
+
         let approved = matches!(
             decision,
             ClientApprovalDecision::Allow | ClientApprovalDecision::AllowForSession
@@ -1142,15 +1297,28 @@ impl AgentStudiosClient for EmbeddedClient {
             ApprovalState::Denied
         };
 
-        if cp.get_approval(approval_id).is_some() {
-            cp.resolve_approval(approval_id, target_state)
-                .map_err(|e| {
-                    ClientError::OperationFailed(format!("Failed to resolve approval: {e}"))
-                })?;
+        let approval = cp.get_approval(approval_id).ok_or_else(|| {
+            ClientError::NotFound(format!(
+                "Control Plane approval record {approval_id} disappeared during resolution"
+            ))
+        })?;
 
-            Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
-                .await;
+        if approval.state != ApprovalState::Pending {
+            return Err(ClientError::OperationFailed(format!(
+                "Approval {approval_id} transitioned to terminal state {:?} during resolution",
+                approval.state
+            )));
         }
+
+        cp.resolve_approval(approval_id, target_state)
+            .map_err(|e| {
+                ClientError::OperationFailed(format!(
+                    "Failed to resolve approval in Control Plane: {e}"
+                ))
+            })?;
+
+        Self::sync_events_internal(&cp, self.studio_id, &self.events_history, &self.events_tx)
+            .await;
 
         // Clean up correlation mapping on successful resolution
         {

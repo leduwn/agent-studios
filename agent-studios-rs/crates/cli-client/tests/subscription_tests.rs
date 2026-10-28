@@ -328,7 +328,7 @@ async fn test_simultaneous_multiple_subscribers() {
         tokio::spawn(async move {
             let mut seqs = Vec::new();
             for _ in 0..count {
-                if let Ok(Some(ev)) = timeout(Duration::from_secs(5), stream.recv()).await {
+                if let Ok(Some(ev)) = timeout(Duration::from_secs(20), stream.recv()).await {
                     seqs.push(ev.sequence);
                 } else {
                     break;

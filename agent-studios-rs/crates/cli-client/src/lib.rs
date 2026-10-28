@@ -5,8 +5,8 @@ pub mod runtime;
 
 pub use client::{
     AgentStudiosClient, ClientApprovalDecision, ClientError, ClientSubscription,
-    DynAgentStudiosClient, ExecutionMode, GoalSubmissionOptions, WorkspaceInfo,
-    WorktreeRecordSummary,
+    DynAgentStudiosClient, ExecutionMode, GoalSubmissionOptions, StreamSyncState,
+    WorkspaceAccessMode, WorkspaceInfo, WorktreeRecordSummary,
 };
 pub use embedded::EmbeddedClient;
 pub use events::{NotificationLevel, UiEvent, translate_control_plane_event};

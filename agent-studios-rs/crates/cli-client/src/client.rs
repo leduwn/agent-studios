@@ -55,6 +55,21 @@ impl fmt::Display for RuntimeMode {
     }
 }
 
+pub use agent_studios_external_runtime::WorkspaceAccessMode;
+
+/// Explicit event stream linearizability and continuity state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StreamSyncState {
+    /// Stream is fully linearizable and synchronized with no gaps.
+    Healthy,
+    /// Stream is actively recovering missed sequence events from authoritative history.
+    Recovering,
+    /// Unrecoverable sequence gap detected: authoritative projection is degraded.
+    GapUnrecoverable { expected: u64, found: u64 },
+    /// Broadcast stream has terminated and was drained.
+    Closed,
+}
+
 /// Options supplied when submitting a developer goal/prompt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoalSubmissionOptions {
@@ -62,6 +77,7 @@ pub struct GoalSubmissionOptions {
     pub model: Option<String>,
     pub runtime: Option<String>,
     pub auto_approve_policy: Option<String>,
+    pub workspace_access_mode: Option<WorkspaceAccessMode>,
 }
 
 /// Approval decision forwarded from the TUI security modal to the client.
@@ -89,10 +105,11 @@ pub struct WorkspaceInfo {
     pub cwd: String,
 }
 
-/// Subscription stream returning historical backfill plus live receiver.
+/// Subscription stream returning historical backfill plus live receiver and continuity state.
 pub struct ClientSubscription {
     pub backfill: Vec<EventEnvelope>,
     pub stream: tokio::sync::mpsc::Receiver<EventEnvelope>,
+    pub sync_state: tokio::sync::watch::Receiver<StreamSyncState>,
 }
 
 /// Errors produced by the Agent Studios client abstraction.
