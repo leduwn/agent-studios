@@ -1,0 +1,28 @@
+[package]
+name = "agent-studios-cli-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Client SDK and IPC abstraction for Agent Studios CLI"
+
+[dependencies]
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-control-plane = { path = "../control-plane" }
+agent-studios-orchestration = { path = "../orchestration" }
+agent-studios-workspace = { path = "../workspace" }
+agent-studios-external-runtime = { path = "../external-runtime" }
+agent-studios-opencode-runtime = { path = "../opencode-runtime" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+

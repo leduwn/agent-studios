@@ -1,0 +1,28 @@
+[package]
+name = "agent-studios-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Terminal User Interface (TUI) for Agent Studios CLI"
+
+[dependencies]
+agent-studios-cli-client = { path = "../cli-client" }
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-external-runtime = { path = "../external-runtime" }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+textwrap = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+agent-studios-orchestration = { path = "../orchestration" }
+agent-studios-workspace = { path = "../workspace" }

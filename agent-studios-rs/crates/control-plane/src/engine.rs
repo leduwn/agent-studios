@@ -741,7 +741,13 @@ impl ControlPlaneState {
                 }
             }
 
-            ControlPlaneEvent::ToolStarted {
+            ControlPlaneEvent::AssistantMessageChunk {
+                agent_id,
+                task_id,
+                run_id,
+                ..
+            }
+            | ControlPlaneEvent::ToolStarted {
                 agent_id,
                 task_id,
                 run_id,
@@ -2387,6 +2393,25 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         kind: ApprovalKind,
         summary: impl Into<String>,
     ) -> Result<ApprovalRequest, ControlPlaneError> {
+        self.record_approval_request(
+            ApprovalId::new(),
+            studio_id,
+            task_id,
+            agent_id,
+            kind,
+            summary,
+        )
+    }
+
+    pub fn record_approval_request(
+        &mut self,
+        approval_id: ApprovalId,
+        studio_id: StudioId,
+        task_id: TaskId,
+        agent_id: AgentId,
+        kind: ApprovalKind,
+        summary: impl Into<String>,
+    ) -> Result<ApprovalRequest, ControlPlaneError> {
         if !self.state.studios.contains_key(&studio_id) {
             return Err(ControlPlaneError::StudioNotFound(studio_id));
         }
@@ -2416,7 +2441,17 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         }
 
         let now = self.clock.now();
-        let approval = ApprovalRequest::new(studio_id, task_id, agent_id, kind, summary, now);
+        let approval = ApprovalRequest {
+            id: approval_id,
+            studio_id,
+            task_id,
+            agent_id,
+            kind,
+            summary: summary.into(),
+            state: ApprovalState::Pending,
+            created_at: now,
+            resolved_at: None,
+        };
         let event = ControlPlaneEvent::ApprovalRequested {
             approval: approval.clone(),
         };
@@ -3391,6 +3426,26 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             thread_id: thread_id.into(),
             parent_agent_id,
             parent_thread_id,
+        };
+        self.commit_transaction(studio_id, vec![event])?;
+        Ok(())
+    }
+
+    pub fn record_assistant_chunk(
+        &mut self,
+        studio_id: StudioId,
+        agent_id: AgentId,
+        task_id: Option<TaskId>,
+        run_id: Option<RunId>,
+        content: impl Into<String>,
+        is_thought: bool,
+    ) -> Result<(), ControlPlaneError> {
+        let event = ControlPlaneEvent::AssistantMessageChunk {
+            agent_id,
+            task_id,
+            run_id,
+            content: content.into(),
+            is_thought,
         };
         self.commit_transaction(studio_id, vec![event])?;
         Ok(())

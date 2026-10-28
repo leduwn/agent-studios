@@ -1,9 +1,11 @@
 use std::time::Duration;
 use url::Url;
 
+#[cfg(windows)]
+use agent_studios_opencode_runtime::JobObjectGuard;
 use agent_studios_opencode_runtime::{
-    JobObjectGuard, OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel,
-    SandboxPolicy, generate_secure_password, spawn_opencode_server, verify_loopback_url,
+    OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel, SandboxPolicy,
+    generate_secure_password, spawn_opencode_server, verify_loopback_url,
 };
 
 #[test]
@@ -20,13 +22,21 @@ fn test_strict_fails_closed_without_filesystem_isolation() {
     );
 
     match containment_res.err().unwrap() {
+        #[cfg(windows)]
         OpenCodeError::SandboxPolicyViolation(msg) => {
             assert!(
                 msg.contains("filesystem isolation"),
                 "Expected violation message mentioning filesystem isolation, got: {msg}"
             );
         }
-        other => panic!("Expected SandboxPolicyViolation, got: {other:?}"),
+        #[cfg(not(windows))]
+        OpenCodeError::UnsupportedPlatform(msg) => {
+            assert!(
+                msg.contains("requires OS-level containment"),
+                "Expected unsupported platform message, got: {msg}"
+            );
+        }
+        other => panic!("Expected platform-appropriate sandbox rejection, got: {other:?}"),
     }
 }
 
@@ -163,11 +173,17 @@ fn test_zero_window_suspended_containment_and_resume() {
 
 #[tokio::test]
 async fn test_spawn_invalid_binary_fails_immediately() {
+    let policy = if cfg!(windows) {
+        SandboxPolicy::default()
+    } else {
+        SandboxPolicy::unconstrained()
+    };
     let config = OpenCodeServerConfig::new(
         "non_existent_opencode_binary_xyz_123.exe",
         std::env::temp_dir(),
     )
-    .with_startup_timeout(Duration::from_millis(500));
+    .with_startup_timeout(Duration::from_millis(500))
+    .with_sandbox_policy(policy);
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;
@@ -195,8 +211,14 @@ async fn test_early_child_crash_detected_without_hanging() {
     #[cfg(not(windows))]
     let binary = "false";
 
+    let policy = if cfg!(windows) {
+        SandboxPolicy::default()
+    } else {
+        SandboxPolicy::unconstrained()
+    };
     let config = OpenCodeServerConfig::new(binary, std::env::temp_dir())
-        .with_startup_timeout(Duration::from_secs(5));
+        .with_startup_timeout(Duration::from_secs(5))
+        .with_sandbox_policy(policy);
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;
@@ -227,7 +249,11 @@ async fn test_early_child_crash_detected_without_hanging() {
 #[tokio::test]
 async fn test_non_existent_working_dir_fails_closed() {
     let non_existent_dir = std::env::temp_dir().join("definitely_non_existent_dir_m11_999");
-    let config = OpenCodeServerConfig::new("cmd.exe", non_existent_dir);
+    #[cfg(windows)]
+    let binary = "cmd.exe";
+    #[cfg(not(windows))]
+    let binary = "sh";
+    let config = OpenCodeServerConfig::new(binary, non_existent_dir);
 
     let res = spawn_opencode_server(config).await;
     assert!(res.is_err(), "Non-existent working_dir must fail closed");
