@@ -799,3 +799,82 @@ async fn test_watchdog_immediate_zero_duration_timeout_no_leak() {
         assert_eq!(authority.pending_count(), 0);
     }
 }
+
+#[tokio::test]
+async fn test_watchdog_timeout_stdin_failure_terminates_process_fail_closed() {
+    let (temp_dir, _ws) = test_managed_workspace();
+    let dummy_bin = if cfg!(windows) {
+        PathBuf::from("cmd.exe")
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+
+    let process_config = ClaudeCodeProcessConfig {
+        binary_path: dummy_bin,
+        working_dir: temp_dir.path().to_path_buf(),
+        session_id: uuid::Uuid::new_v4().to_string(),
+        sandbox_policy: SandboxPolicy::default(),
+        permission_mode: Some("manual".to_string()),
+        max_budget_usd: None,
+        model: None,
+        bare: false,
+        env_vars: Vec::new(),
+    };
+
+    let (process, _stdout) = spawn_claude_process(process_config)
+        .await
+        .expect("Process spawn should succeed");
+    let process = Arc::new(process);
+
+    // Close stdin pipe
+    process.close_stdin().await;
+
+    let authority = Arc::new(ApprovalAuthority::new());
+    let req_id = "req_timeout_stdin_fail";
+    let control_req = ControlRequest {
+        request_id: req_id.to_string(),
+        request: ControlRequestPayload::CanUseTool(ProtocolCanUseToolRequest {
+            tool_name: "Bash".to_string(),
+            input: serde_json::json!({"cmd": "whoami"}),
+            tool_use_id: None,
+            agent_id: None,
+            decision_reason: None,
+            blocked_path: None,
+            default_to_no: None,
+            suggestions: None,
+        }),
+    };
+
+    let approval_id = authority
+        .register_request(&control_req)
+        .expect("Registration must succeed");
+
+    let process_wd = Arc::clone(&process);
+    let (terminated_tx, terminated_rx) = tokio::sync::oneshot::channel();
+
+    authority.spawn_watchdog(
+        approval_id,
+        Duration::from_millis(20),
+        move |deny_resp| async move {
+            let write_res = match serde_json::to_string(&deny_resp) {
+                Ok(json) => process_wd.write_stdin_line(&json).await,
+                Err(e) => Err(ClaudeCodeError::Protocol(e.to_string())),
+            };
+            if write_res.is_err() {
+                let _ = process_wd.terminate().await;
+                let _ = terminated_tx.send(true);
+            }
+        },
+    );
+
+    let terminated = tokio::time::timeout(Duration::from_millis(400), terminated_rx)
+        .await
+        .expect("Timeout handler should run within 400ms")
+        .expect("Terminated signal should be received");
+
+    assert!(terminated, "Process must be terminated fail-closed when timeout stdin delivery fails");
+    assert_eq!(
+        authority.get_approval_state(&approval_id),
+        Some(ApprovalState::TimedOut)
+    );
+}

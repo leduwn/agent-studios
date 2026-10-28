@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use agent_studios_external_runtime::{
     AgentRuntime, DEFAULT_EVENT_RETENTION, DiscoveredRuntimeInstance, RuntimeCapabilities,
@@ -324,8 +324,26 @@ impl AgentRuntime for ClaudeCodeRuntime {
                                         request_id = %request_id,
                                         "Tool approval timed out; failing closed to Deny"
                                     );
-                                    if let Ok(json) = serde_json::to_string(&deny_resp) {
-                                        let _ = process_wd.write_stdin_line(&json).await;
+                                    let write_res = match serde_json::to_string(&deny_resp) {
+                                        Ok(json) => process_wd.write_stdin_line(&json).await,
+                                        Err(e) => Err(crate::error::ClaudeCodeError::Protocol(format!(
+                                            "Failed to serialize timeout deny frame: {e}"
+                                        ))),
+                                    };
+                                    if let Err(ref e) = write_res {
+                                        error!(
+                                            approval_id = %approval_id,
+                                            request_id = %request_id,
+                                            error = %e,
+                                            "Failed to deliver timeout deny frame to child stdin (fail-closed); terminating process"
+                                        );
+                                        let _ = hub_wd.emit(RuntimeEventKind::Diagnostic {
+                                            level: "error".to_string(),
+                                            message: SanitizedRuntimeMessage::new(format!(
+                                                "Timeout deny delivery to stdin failed ({e}); terminating process tree"
+                                            )),
+                                        }).await;
+                                        let _ = process_wd.terminate().await;
                                     }
                                     let timeout_desc = if timeout.as_secs() > 0 {
                                         format!("{}s", timeout.as_secs())
