@@ -26,6 +26,24 @@ pub enum ProtocolError {
     #[error("Unrecoverable sequence gap: expected sequence {expected}, found {found}")]
     SequenceGapUnrecoverable { expected: u64, found: u64 },
 
+    #[error("Recoverable sequence gap: expected sequence {expected}, found {found}")]
+    SequenceGapRecoverable { expected: u64, found: u64 },
+
+    #[error("Frame too large: size {size} exceeds maximum {max}")]
+    FrameTooLarge { size: usize, max: usize },
+
+    #[error("Frame decoding error: {0}")]
+    FrameDecoding(String),
+
+    #[error("Malformed frame: {0}")]
+    MalformedFrame(String),
+
+    #[error("Invalid buffer capacity: {0}")]
+    InvalidCapacity(String),
+
+    #[error("Correlation mismatch: expected {expected}, found {found}")]
+    CorrelationMismatch { expected: String, found: String },
+
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 }

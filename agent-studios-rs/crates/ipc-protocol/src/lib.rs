@@ -21,16 +21,22 @@ pub mod redaction;
 pub mod replay;
 
 pub use approval::{ApprovalAction, ApprovalContract, ApprovalDecision, ApprovalStatus, RiskLevel};
-pub use auth::{HmacAuthHeader, HmacSigner, NonceTracker};
+pub use auth::{
+    AuthBinding, AuthVerificationBinding, AuthVerificationContext, AuthVerificationFlow,
+    HmacAuthHeader, HmacSigner, NonceTracker,
+};
 pub use capabilities::{
     Capability, CapabilityNegotiationRequest, CapabilityNegotiationResponse,
     ServerCapabilityNegotiator,
 };
 pub use envelope::{IpcEnvelope, ProtocolVersion};
 pub use error::ProtocolError;
-pub use framing::{ErrorCode, IpcCommand, IpcErrorResponse, IpcResponse};
+pub use framing::{
+    AccessMode, DEFAULT_MAX_FRAME_SIZE, ErrorCode, FrameCodec, IpcCommand, IpcErrorResponse,
+    IpcResponse, decode_frame, encode_frame,
+};
 pub use id::{ApprovalId, ClientId, CorrelationId, RequestId, SessionId, SubscriptionId};
-pub use redaction::{Redacted, SecretRedactor};
+pub use redaction::{MaskedTelemetry, Redacted, SecretRedactor};
 pub use replay::{IpcEvent, ReplayBuffer};
 
 pub mod prelude {
