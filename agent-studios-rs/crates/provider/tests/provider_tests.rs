@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use agent_studios_provider::{
@@ -910,6 +911,7 @@ fn test_snapshot_atomic_rollback_preserves_catalog_state() {
             )
             .unwrap(),
         ],
+        default_instances: BTreeMap::new(),
     };
 
     let res = catalog.import_snapshot(bad_snapshot);
@@ -927,6 +929,7 @@ fn test_snapshot_unsupported_version_rejected() {
         definitions: vec![],
         instances: vec![],
         models: vec![],
+        default_instances: BTreeMap::new(),
     };
 
     let err = ProviderCatalog::from_snapshot(bad_snapshot).unwrap_err();

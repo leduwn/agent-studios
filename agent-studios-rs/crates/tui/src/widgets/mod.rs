@@ -4,6 +4,7 @@ pub mod composer;
 pub mod diff_viewer;
 pub mod header;
 pub mod onboarding;
+pub mod provider_panel;
 pub mod slash_menu;
 pub mod status_bar;
 pub mod transcript;

@@ -385,11 +385,11 @@ fn test_slash_menu_annotations_and_inventory_buffer_snapshot() {
     let rect = Rect::new(0, 0, 72, 12);
     let mut buf = Buffer::empty(rect);
 
-    // Validate 10 commands in inventory
-    assert_eq!(AVAILABLE_COMMANDS.len(), 10);
+    // Validate 11 commands in inventory
+    assert_eq!(AVAILABLE_COMMANDS.len(), 11);
 
     // Validate Ready annotations
-    for ready_cmd in ["/help", "/clear", "/doctor", "/status", "/cancel", "/quit"] {
+    for ready_cmd in ["/help", "/clear", "/doctor", "/status", "/cancel", "/quit", "/providers"] {
         let item = AVAILABLE_COMMANDS
             .iter()
             .find(|c| c.command == ready_cmd)

@@ -1,4 +1,6 @@
-use agent_studios_provider::{ModelRef, ProviderCatalog, ProviderId};
+use agent_studios_provider::{
+    AuthenticationScheme, ModelRef, ProtocolFamily, ProviderCatalog, ProviderId, SecretBackend,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::OpenCodeError;
@@ -31,32 +33,29 @@ pub fn map_model_ref_to_opencode(
             ))
         })?;
 
-    let provider_name = resolve_opencode_provider_name(&instance.provider_id);
+    let provider_name =
+        resolve_opencode_provider_name(&instance.provider_id, Some(&instance.protocol));
     let model_name = model_ref.model_id.as_str().to_string();
 
     let auth_env_var = match &instance.authentication {
-        agent_studios_provider::AuthenticationScheme::BearerToken { secret }
-        | agent_studios_provider::AuthenticationScheme::ApiKeyHeader { secret, .. } => {
-            if secret.backend == agent_studios_provider::SecretBackend::EnvironmentVariable {
+        AuthenticationScheme::BearerToken { secret }
+        | AuthenticationScheme::ApiKeyHeader { secret, .. }
+        | AuthenticationScheme::QueryParameter { secret, .. }
+        | AuthenticationScheme::OAuthToken { secret } => {
+            if secret.backend == SecretBackend::EnvironmentVariable {
                 Some(secret.locator.clone())
             } else {
-                match provider_name.as_str() {
-                    "anthropic" => Some("ANTHROPIC_API_KEY".to_string()),
-                    "openai" => Some("OPENAI_API_KEY".to_string()),
-                    "google" => Some("GEMINI_API_KEY".to_string()),
-                    "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
-                    _ => None,
-                }
+                None
             }
         }
-        agent_studios_provider::AuthenticationScheme::None => None,
-        _ => match provider_name.as_str() {
-            "anthropic" => Some("ANTHROPIC_API_KEY".to_string()),
-            "openai" => Some("OPENAI_API_KEY".to_string()),
-            "google" => Some("GEMINI_API_KEY".to_string()),
-            "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
-            _ => None,
-        },
+        AuthenticationScheme::AwsSigV4 { credential, .. } => {
+            if credential.backend == SecretBackend::EnvironmentVariable {
+                Some(credential.locator.clone())
+            } else {
+                None
+            }
+        }
+        AuthenticationScheme::None => None,
     };
 
     let base_url = Some(instance.endpoint.base_url.clone());
@@ -70,19 +69,35 @@ pub fn map_model_ref_to_opencode(
 }
 
 /// Maps ProviderId to OpenCode's recognized provider identifiers.
-pub fn resolve_opencode_provider_name(provider_id: &ProviderId) -> String {
-    let id_str = provider_id.as_str().to_lowercase();
-    if id_str.contains("anthropic") || id_str.contains("claude") {
-        "anthropic".to_string()
-    } else if id_str.contains("openai") || id_str.contains("codex") {
-        "openai".to_string()
-    } else if id_str.contains("google") || id_str.contains("gemini") {
-        "google".to_string()
-    } else if id_str.contains("openrouter") {
-        "openrouter".to_string()
-    } else if id_str.contains("ollama") {
-        "ollama".to_string()
-    } else {
-        id_str
+///
+/// Standard known identifiers are matched exactly. Non-standard identifiers
+/// are mapped via their explicit `ProtocolFamily`, or fall back to the exact
+/// sanitized provider id string.
+pub fn resolve_opencode_provider_name(
+    provider_id: &ProviderId,
+    protocol: Option<&ProtocolFamily>,
+) -> String {
+    let id_str = provider_id.as_str().trim().to_lowercase();
+    match id_str.as_str() {
+        "anthropic" => "anthropic".to_string(),
+        "openai" => "openai".to_string(),
+        "google" => "google".to_string(),
+        "openrouter" => "openrouter".to_string(),
+        "ollama" => "ollama".to_string(),
+        "lmstudio" => "lmstudio".to_string(),
+        _ => {
+            if let Some(proto) = protocol {
+                match proto {
+                    ProtocolFamily::AnthropicMessages => "anthropic".to_string(),
+                    ProtocolFamily::OpenAiResponses | ProtocolFamily::OpenAiChatCompletions => {
+                        "openai".to_string()
+                    }
+                    ProtocolFamily::GeminiGenerateContent => "google".to_string(),
+                    _ => id_str,
+                }
+            } else {
+                id_str
+            }
+        }
     }
 }

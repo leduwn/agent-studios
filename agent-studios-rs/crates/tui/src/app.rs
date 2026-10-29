@@ -24,6 +24,7 @@ use crate::widgets::{
     composer::ComposerWidget,
     diff_viewer::DiffViewerWidget,
     header::HeaderWidget,
+    provider_panel::{ProviderPanelState, ProviderPanelWidget},
     slash_menu::{AVAILABLE_COMMANDS, SlashMenuWidget},
     status_bar::StatusBarWidget,
     transcript::{TranscriptItem, TranscriptWidget},
@@ -43,6 +44,7 @@ pub struct AgsApp {
     scroll_offset: usize,
     should_quit: bool,
     last_ctrl_c: Option<std::time::Instant>,
+    pub provider_panel: Option<ProviderPanelState>,
     pub project_name: String,
     pub branch_name: String,
     pub is_dirty: bool,
@@ -205,6 +207,7 @@ impl AgsApp {
             scroll_offset: 0,
             should_quit: false,
             last_ctrl_c: None,
+            provider_panel: None,
             project_name,
             branch_name,
             is_dirty,
@@ -226,6 +229,18 @@ impl AgsApp {
 
     pub fn set_pending_approval(&mut self, approval: Option<PendingApproval>) {
         self.pending_approval = approval;
+    }
+
+    pub fn open_provider_panel(&mut self) {
+        self.provider_panel = Some(ProviderPanelState::load());
+    }
+
+    pub fn close_provider_panel(&mut self) {
+        self.provider_panel = None;
+    }
+
+    pub fn provider_panel(&self) -> Option<&ProviderPanelState> {
+        self.provider_panel.as_ref()
     }
 
     pub fn set_workspace_info(&mut self, project: String, branch: String, is_dirty: bool) {
@@ -413,6 +428,14 @@ impl AgsApp {
         &mut self,
         key: crossterm::event::KeyEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Provider panel interception if active
+        if let Some(panel) = self.provider_panel.as_mut() {
+            if !panel.handle_key(key) {
+                self.provider_panel = None;
+            }
+            return Ok(());
+        }
+
         // Pending approval modal interception
         if let Some(appr) = &self.pending_approval {
             let decision = match key.code {
@@ -735,16 +758,13 @@ impl AgsApp {
                     });
                 }
             }
+            "/providers" | "/model" | "/models" => {
+                self.open_provider_panel();
+            }
             "/diff" => {
                 self.transcript.push(TranscriptItem::SystemNotice {
                     level: "Warning".to_string(),
                     message: "Command '/diff' is planned: Reviewing uncommitted changes in worktree requires external workspace reconciler integration (planned for future milestone).".to_string(),
-                });
-            }
-            "/model" => {
-                self.transcript.push(TranscriptItem::SystemNotice {
-                    level: "Warning".to_string(),
-                    message: "Command '/model' is planned: Inspecting or switching active model requires runtime model manager integration (planned for future milestone).".to_string(),
                 });
             }
             "/worktree" => {
@@ -772,6 +792,12 @@ impl AgsApp {
     }
 
     pub fn render(&self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
+        // Provider & Models Management Panel modal view
+        if let Some(panel) = &self.provider_panel {
+            ProviderPanelWidget::new(&self.theme, panel).render(area, buf);
+            return;
+        }
+
         let layout = MainLayout::compute(area);
 
         // Header
