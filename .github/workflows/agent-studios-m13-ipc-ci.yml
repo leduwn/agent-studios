@@ -58,13 +58,21 @@ jobs:
 
       - name: Check Formatting
         if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt -p agent-studios-ipc-protocol -- --check
+        run: |
+          cargo fmt -p agent-studios-ipc-protocol -- --check
+          cargo fmt -p agent-studios-ipc-transport -- --check
 
       - name: Cargo Check (all targets)
-        run: cargo check -p agent-studios-ipc-protocol --all-targets
+        run: |
+          cargo check -p agent-studios-ipc-protocol --all-targets
+          cargo check -p agent-studios-ipc-transport --all-targets
 
       - name: Cargo Clippy
-        run: cargo clippy -p agent-studios-ipc-protocol --all-targets -- -D warnings
+        run: |
+          cargo clippy -p agent-studios-ipc-protocol --all-targets -- -D warnings
+          cargo clippy -p agent-studios-ipc-transport --all-targets -- -D warnings
 
       - name: Cargo Test
-        run: cargo test -p agent-studios-ipc-protocol
+        run: |
+          cargo test -p agent-studios-ipc-protocol
+          cargo test -p agent-studios-ipc-transport
