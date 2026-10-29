@@ -367,6 +367,13 @@ mod tests {
     #[test]
     fn test_resolve_socket_path_custom() {
         let temp_dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(temp_dir.path()).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(temp_dir.path(), perms).unwrap();
+        }
         let custom_file = temp_dir.path().join("my-custom.sock");
 
         let resolved = resolve_socket_path(Some(&custom_file)).expect("resolve custom path failed");

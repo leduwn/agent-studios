@@ -312,6 +312,12 @@ mod tests {
     #[tokio::test]
     async fn test_unix_socket_listener_lifecycle() {
         let temp_dir = tempfile::tempdir().unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(temp_dir.path()).unwrap().permissions();
+            perms.set_mode(0o700);
+            std::fs::set_permissions(temp_dir.path(), perms).unwrap();
+        }
         let sock_path = temp_dir.path().join("test_lifecycle.sock");
 
         {
