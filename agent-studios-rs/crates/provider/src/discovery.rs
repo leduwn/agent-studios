@@ -60,16 +60,17 @@ pub enum DiscoveryError {
     HttpError { status: u16, message: String },
 }
 
+/// Dynamic model discovery cache mapping an instance ID to its timestamped descriptors.
+pub type ModelDiscoveryCache = Arc<
+    tokio::sync::RwLock<HashMap<ProviderInstanceId, (std::time::Instant, Vec<ModelDescriptor>)>>,
+>;
+
 /// Dynamic model discovery client with authenticated endpoint dispatch and TTL caching.
 #[derive(Clone)]
 pub struct ModelDiscoveryClient {
     secret_store: Arc<dyn SecretStore>,
     config: DiscoveryConfig,
-    cache: Arc<
-        tokio::sync::RwLock<
-            HashMap<ProviderInstanceId, (std::time::Instant, Vec<ModelDescriptor>)>,
-        >,
-    >,
+    cache: ModelDiscoveryCache,
     http_client: reqwest::Client,
 }
 
@@ -95,13 +96,7 @@ impl ModelDiscoveryClient {
     }
 
     /// Returns a reference to the internal TTL cache.
-    pub fn cache(
-        &self,
-    ) -> &Arc<
-        tokio::sync::RwLock<
-            HashMap<ProviderInstanceId, (std::time::Instant, Vec<ModelDescriptor>)>,
-        >,
-    > {
+    pub fn cache(&self) -> &ModelDiscoveryCache {
         &self.cache
     }
 
@@ -142,10 +137,11 @@ impl ModelDiscoveryClient {
     ) -> Result<Vec<ModelDescriptor>, DiscoveryError> {
         if !force_refresh {
             let cache = self.cache.read().await;
-            if let Some((cached_at, models)) = cache.get(&instance.id) {
-                if cached_at.elapsed() < self.config.cache_ttl {
-                    return Ok(models.clone());
-                }
+            if let Some((_, models)) = cache
+                .get(&instance.id)
+                .filter(|(at, _)| at.elapsed() < self.config.cache_ttl)
+            {
+                return Ok(models.clone());
             }
         }
 
@@ -167,8 +163,7 @@ impl ModelDiscoveryClient {
         instance: &ProviderInstance,
     ) -> Result<Vec<ModelDescriptor>, DiscoveryError> {
         let url_str = resolve_endpoint_url(instance)?;
-        let (headers, query_auth) =
-            build_headers_and_auth(instance, self.secret_store.as_ref())?;
+        let (headers, query_auth) = build_headers_and_auth(instance, self.secret_store.as_ref())?;
 
         let mut req = self.http_client.get(&url_str).headers(headers);
 
@@ -299,22 +294,20 @@ fn build_headers_and_auth(
             DiscoveryError::InvalidEndpoint(format!("Invalid static header name '{k}': {e}"))
         })?;
         let header_val = reqwest::header::HeaderValue::from_str(v).map_err(|e| {
-            DiscoveryError::InvalidEndpoint(format!(
-                "Invalid static header value for '{k}': {e}"
-            ))
+            DiscoveryError::InvalidEndpoint(format!("Invalid static header value for '{k}': {e}"))
         })?;
         headers.insert(header_name, header_val);
     }
 
     let provider_id = instance.provider_id.as_str().to_ascii_lowercase();
 
-    if provider_id == "anthropic" || instance.protocol == ProtocolFamily::AnthropicMessages {
-        if !headers.contains_key("anthropic-version") {
-            headers.insert(
-                reqwest::header::HeaderName::from_static("anthropic-version"),
-                reqwest::header::HeaderValue::from_static("2023-06-01"),
-            );
-        }
+    if (provider_id == "anthropic" || instance.protocol == ProtocolFamily::AnthropicMessages)
+        && !headers.contains_key("anthropic-version")
+    {
+        headers.insert(
+            reqwest::header::HeaderName::from_static("anthropic-version"),
+            reqwest::header::HeaderValue::from_static("2023-06-01"),
+        );
     }
 
     match &instance.authentication {
@@ -354,13 +347,12 @@ fn build_headers_and_auth(
                     "Secret value is empty".to_string(),
                 ));
             }
-            let name = reqwest::header::HeaderName::from_bytes(header_name.as_bytes()).map_err(
-                |e| {
+            let name =
+                reqwest::header::HeaderName::from_bytes(header_name.as_bytes()).map_err(|e| {
                     DiscoveryError::SecretResolutionFailed(format!(
                         "Invalid header name '{header_name}': {e}"
                     ))
-                },
-            )?;
+                })?;
             let val = reqwest::header::HeaderValue::from_str(&token).map_err(|e| {
                 DiscoveryError::SecretResolutionFailed(format!("Invalid secret format: {e}"))
             })?;
@@ -368,7 +360,7 @@ fn build_headers_and_auth(
 
             if (provider_id == "anthropic"
                 || instance.protocol == ProtocolFamily::AnthropicMessages)
-                && header_name.to_ascii_lowercase() != "x-api-key"
+                && !header_name.eq_ignore_ascii_case("x-api-key")
             {
                 let x_api_val = reqwest::header::HeaderValue::from_str(&token).map_err(|e| {
                     DiscoveryError::SecretResolutionFailed(format!("Invalid secret format: {e}"))
@@ -421,13 +413,9 @@ fn build_headers_and_auth(
 #[derive(Deserialize, Debug)]
 #[serde(untagged)]
 enum RawDiscoveryPayload {
-    DataList {
-        data: Vec<RawModelEntry>,
-    },
-    OllamaList {
-        models: Vec<RawOllamaEntry>,
-    },
-    DirectList(Vec<RawModelEntry>),
+    Data { data: Vec<RawModelEntry> },
+    Ollama { models: Vec<RawOllamaEntry> },
+    Direct(Vec<RawModelEntry>),
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -463,7 +451,7 @@ fn parse_and_normalize_payload(
     let mut descriptors = Vec::new();
 
     match raw {
-        RawDiscoveryPayload::DataList { data } | RawDiscoveryPayload::DirectList(data) => {
+        RawDiscoveryPayload::Data { data } | RawDiscoveryPayload::Direct(data) => {
             for entry in data {
                 let id_candidate = entry
                     .id
@@ -509,7 +497,7 @@ fn parse_and_normalize_payload(
                 }
             }
         }
-        RawDiscoveryPayload::OllamaList { models } => {
+        RawDiscoveryPayload::Ollama { models } => {
             for entry in models {
                 let id_candidate = entry
                     .name

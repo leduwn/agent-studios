@@ -41,21 +41,23 @@ pub fn load_catalog_from_environment() -> ProviderCatalog {
     let path = if let Ok(h) = std::env::var("AGENT_STUDIOS_HOME") {
         std::path::PathBuf::from(h.trim()).join("providers.json")
     } else if let Ok(u) = std::env::var("USERPROFILE") {
-        std::path::PathBuf::from(u.trim()).join(".agent-studios").join("providers.json")
+        std::path::PathBuf::from(u.trim())
+            .join(".agent-studios")
+            .join("providers.json")
     } else if let Ok(h) = std::env::var("HOME") {
-        std::path::PathBuf::from(h.trim()).join(".agent-studios").join("providers.json")
+        std::path::PathBuf::from(h.trim())
+            .join(".agent-studios")
+            .join("providers.json")
     } else {
         std::path::PathBuf::from(".agent-studios").join("providers.json")
     };
 
-    if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(snap) = serde_json::from_str(&content) {
-                if let Ok(cat) = ProviderCatalog::from_snapshot(snap) {
-                    return cat;
-                }
-            }
-        }
+    if let Some(cat) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .and_then(|snap| ProviderCatalog::from_snapshot(snap).ok())
+    {
+        return cat;
     }
     ProviderCatalog::with_builtin_definitions()
 }
@@ -187,7 +189,10 @@ impl ProviderPanelState {
     /// Handles keyboard events, returning `false` if user requested closing the panel.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         if self.show_help {
-            if key.code == KeyCode::Esc || key.code == KeyCode::Char('?') || key.code == KeyCode::Char('q') {
+            if key.code == KeyCode::Esc
+                || key.code == KeyCode::Char('?')
+                || key.code == KeyCode::Char('q')
+            {
                 self.show_help = false;
             }
             return true;
@@ -258,19 +263,13 @@ impl<'a> Widget for ProviderPanelWidget<'a> {
         // Split vertically: Main Content (top) and Keybinding Footer (bottom)
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Min(4), Constraint::Length(1)])
             .split(inner_area);
 
         // Split main content horizontally: Left pane (Providers list) and Right pane (Models & Inspector)
         let horizontal_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(45),
-                Constraint::Percentage(55),
-            ])
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(main_chunks[0]);
 
         // Render Left Pane: Providers List
@@ -279,10 +278,7 @@ impl<'a> Widget for ProviderPanelWidget<'a> {
         // Split Right Pane vertically: Top (Models List) and Bottom (Model Details Inspector)
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(48),
-                Constraint::Percentage(52),
-            ])
+            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
             .split(horizontal_chunks[1]);
 
         self.render_models_pane(right_chunks[0], buf);
@@ -311,9 +307,17 @@ impl<'a> ProviderPanelWidget<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
             .title(Span::styled(
-                if is_focused { " ▶ Provider Instances " } else { " Provider Instances " },
+                if is_focused {
+                    " ▶ Provider Instances "
+                } else {
+                    " Provider Instances "
+                },
                 Style::default()
-                    .fg(if is_focused { self.theme.accent_sky } else { self.theme.text_secondary })
+                    .fg(if is_focused {
+                        self.theme.accent_sky
+                    } else {
+                        self.theme.text_secondary
+                    })
                     .add_modifier(Modifier::BOLD),
             ));
 
@@ -322,8 +326,10 @@ impl<'a> ProviderPanelWidget<'a> {
 
         let instances = self.state.instances();
         if instances.is_empty() {
-            let empty_text = Paragraph::new("No provider instances configured.\nRun 'ags provider add' to register one.")
-                .style(Style::default().fg(self.theme.text_muted));
+            let empty_text = Paragraph::new(
+                "No provider instances configured.\nRun 'ags provider add' to register one.",
+            )
+            .style(Style::default().fg(self.theme.text_muted));
             empty_text.render(inner, buf);
             return;
         }
@@ -341,7 +347,11 @@ impl<'a> ProviderPanelWidget<'a> {
                     .unwrap_or(false);
 
                 let default_tag = if is_default { " ★" } else { "  " };
-                let model_count = self.state.catalog.models_for_provider_instance(&inst.id).len();
+                let model_count = self
+                    .state
+                    .catalog
+                    .models_for_provider_instance(&inst.id)
+                    .len();
 
                 let style = if is_selected && is_focused {
                     Style::default()
@@ -390,9 +400,17 @@ impl<'a> ProviderPanelWidget<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
             .title(Span::styled(
-                if is_focused { " ▶ Registered Models " } else { " Registered Models " },
+                if is_focused {
+                    " ▶ Registered Models "
+                } else {
+                    " Registered Models "
+                },
                 Style::default()
-                    .fg(if is_focused { self.theme.accent_sky } else { self.theme.text_secondary })
+                    .fg(if is_focused {
+                        self.theme.accent_sky
+                    } else {
+                        self.theme.text_secondary
+                    })
                     .add_modifier(Modifier::BOLD),
             ));
 
@@ -449,8 +467,14 @@ impl<'a> ProviderPanelWidget<'a> {
 
                 let line = Line::from(vec![
                     Span::styled(&m.display_name, style),
-                    Span::styled(format!(" ({})", m.id), Style::default().fg(self.theme.text_muted)),
-                    Span::styled(format!(" - {ctx_tag}"), Style::default().fg(self.theme.accent_emerald)),
+                    Span::styled(
+                        format!(" ({})", m.id),
+                        Style::default().fg(self.theme.text_muted),
+                    ),
+                    Span::styled(
+                        format!(" - {ctx_tag}"),
+                        Style::default().fg(self.theme.accent_emerald),
+                    ),
                     Span::styled(caps_str, Style::default().fg(self.theme.accent_purple)),
                 ]);
 
@@ -474,9 +498,17 @@ impl<'a> ProviderPanelWidget<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_fg))
             .title(Span::styled(
-                if is_focused { " ▶ Model Metadata Inspector " } else { " Model Metadata Inspector " },
+                if is_focused {
+                    " ▶ Model Metadata Inspector "
+                } else {
+                    " Model Metadata Inspector "
+                },
                 Style::default()
-                    .fg(if is_focused { self.theme.accent_sky } else { self.theme.text_secondary })
+                    .fg(if is_focused {
+                        self.theme.accent_sky
+                    } else {
+                        self.theme.text_secondary
+                    })
                     .add_modifier(Modifier::BOLD),
             ));
 
@@ -487,18 +519,38 @@ impl<'a> ProviderPanelWidget<'a> {
             let mut lines = Vec::new();
 
             lines.push(Line::from(vec![
-                Span::styled("Model ID:       ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(m.id.as_str(), Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Model ID:       ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled(
+                    m.id.as_str(),
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
 
             lines.push(Line::from(vec![
-                Span::styled("Display Name:   ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(&m.display_name, Style::default().fg(self.theme.text_primary)),
+                Span::styled(
+                    "Display Name:   ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled(
+                    &m.display_name,
+                    Style::default().fg(self.theme.text_primary),
+                ),
             ]));
 
             lines.push(Line::from(vec![
-                Span::styled("Source:         ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(m.metadata_source.to_string(), Style::default().fg(self.theme.accent_sky)),
+                Span::styled(
+                    "Source:         ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled(
+                    m.metadata_source.to_string(),
+                    Style::default().fg(self.theme.accent_sky),
+                ),
             ]));
 
             let ctx_str = m
@@ -513,40 +565,75 @@ impl<'a> ProviderPanelWidget<'a> {
                 .unwrap_or_else(|| "Unknown".to_string());
 
             lines.push(Line::from(vec![
-                Span::styled("Context Window: ", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    "Context Window: ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
                 Span::styled(ctx_str, Style::default().fg(self.theme.accent_emerald)),
-                Span::styled(" | Max Output: ", Style::default().fg(self.theme.text_muted)),
+                Span::styled(
+                    " | Max Output: ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
                 Span::styled(out_str, Style::default().fg(self.theme.accent_emerald)),
             ]));
 
             lines.push(Line::from(vec![
-                Span::styled("Capabilities:   ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(format!("tools={:?}, vision={:?}, stream={:?}, reasoning={:?}",
-                    m.capabilities.tool_calling,
-                    m.capabilities.vision_input,
-                    m.capabilities.streaming,
-                    m.capabilities.reasoning,
-                ), Style::default().fg(self.theme.accent_purple)),
+                Span::styled(
+                    "Capabilities:   ",
+                    Style::default().fg(self.theme.text_muted),
+                ),
+                Span::styled(
+                    format!(
+                        "tools={:?}, vision={:?}, stream={:?}, reasoning={:?}",
+                        m.capabilities.tool_calling,
+                        m.capabilities.vision_input,
+                        m.capabilities.streaming,
+                        m.capabilities.reasoning,
+                    ),
+                    Style::default().fg(self.theme.accent_purple),
+                ),
             ]));
 
             let paragraph = Paragraph::new(lines);
             paragraph.render(inner, buf);
         } else if let Some(inst) = self.state.selected_instance() {
-            let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                Span::styled("Provider ID:    ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(inst.id.to_string(), Style::default().fg(self.theme.text_primary)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Family:         ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(inst.provider_id.as_str(), Style::default().fg(self.theme.accent_sky)),
-                Span::styled(" | Protocol: ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(inst.protocol.to_string(), Style::default().fg(self.theme.accent_emerald)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Endpoint:       ", Style::default().fg(self.theme.text_muted)),
-                Span::styled(&inst.endpoint.base_url, Style::default().fg(self.theme.text_primary)),
-            ]));
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        "Provider ID:    ",
+                        Style::default().fg(self.theme.text_muted),
+                    ),
+                    Span::styled(
+                        inst.id.to_string(),
+                        Style::default().fg(self.theme.text_primary),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        "Family:         ",
+                        Style::default().fg(self.theme.text_muted),
+                    ),
+                    Span::styled(
+                        inst.provider_id.as_str(),
+                        Style::default().fg(self.theme.accent_sky),
+                    ),
+                    Span::styled(" | Protocol: ", Style::default().fg(self.theme.text_muted)),
+                    Span::styled(
+                        inst.protocol.to_string(),
+                        Style::default().fg(self.theme.accent_emerald),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        "Endpoint:       ",
+                        Style::default().fg(self.theme.text_muted),
+                    ),
+                    Span::styled(
+                        &inst.endpoint.base_url,
+                        Style::default().fg(self.theme.text_primary),
+                    ),
+                ]),
+            ];
             let paragraph = Paragraph::new(lines);
             paragraph.render(inner, buf);
         } else {
@@ -558,7 +645,7 @@ impl<'a> ProviderPanelWidget<'a> {
 
     fn render_footer(&self, area: Rect, buf: &mut Buffer) {
         let status = self.state.status_message.as_deref().unwrap_or(
-            "[Tab] Switch Pane  [j/k] Navigate  [d] Set Default  [?] Help  [Esc/q] Close"
+            "[Tab] Switch Pane  [j/k] Navigate  [d] Set Default  [?] Help  [Esc/q] Close",
         );
 
         let footer_line = Line::from(vec![
@@ -581,19 +668,45 @@ impl<'a> ProviderPanelWidget<'a> {
         let help_block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(self.theme.accent_emerald))
-            .title(Span::styled(" Provider Management Help ", Style::default().fg(self.theme.accent_emerald).add_modifier(Modifier::BOLD)));
+            .title(Span::styled(
+                " Provider Management Help ",
+                Style::default()
+                    .fg(self.theme.accent_emerald)
+                    .add_modifier(Modifier::BOLD),
+            ));
         let inner = help_block.inner(modal_area);
         help_block.render(modal_area, buf);
 
         let help_text = vec![
-            Line::from(Span::styled("Keyboard Navigation Controls:", Style::default().add_modifier(Modifier::UNDERLINED))),
+            Line::from(Span::styled(
+                "Keyboard Navigation Controls:",
+                Style::default().add_modifier(Modifier::UNDERLINED),
+            )),
             Line::from(""),
-            Line::from(vec![Span::styled("  Tab        ", Style::default().fg(self.theme.accent_sky)), Span::raw("Cycle active pane (Providers -> Models -> Inspector)")]),
-            Line::from(vec![Span::styled("  j / Down   ", Style::default().fg(self.theme.accent_sky)), Span::raw("Move cursor down in active pane")]),
-            Line::from(vec![Span::styled("  k / Up     ", Style::default().fg(self.theme.accent_sky)), Span::raw("Move cursor up in active pane")]),
-            Line::from(vec![Span::styled("  d          ", Style::default().fg(self.theme.accent_sky)), Span::raw("Set current instance as default for family")]),
-            Line::from(vec![Span::styled("  Esc / q    ", Style::default().fg(self.theme.accent_sky)), Span::raw("Close provider management panel")]),
-            Line::from(vec![Span::styled("  ? / h      ", Style::default().fg(self.theme.accent_sky)), Span::raw("Toggle this help popup")]),
+            Line::from(vec![
+                Span::styled("  Tab        ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Cycle active pane (Providers -> Models -> Inspector)"),
+            ]),
+            Line::from(vec![
+                Span::styled("  j / Down   ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Move cursor down in active pane"),
+            ]),
+            Line::from(vec![
+                Span::styled("  k / Up     ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Move cursor up in active pane"),
+            ]),
+            Line::from(vec![
+                Span::styled("  d          ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Set current instance as default for family"),
+            ]),
+            Line::from(vec![
+                Span::styled("  Esc / q    ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Close provider management panel"),
+            ]),
+            Line::from(vec![
+                Span::styled("  ? / h      ", Style::default().fg(self.theme.accent_sky)),
+                Span::raw("Toggle this help popup"),
+            ]),
         ];
 
         let p = Paragraph::new(help_text);

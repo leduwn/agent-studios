@@ -78,7 +78,7 @@ pub fn get_system_secret_store() -> CompositeSecretStore {
 }
 
 #[cfg(test)]
-pub static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub static ENV_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(test)]
 mod tests {
@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_custom_agent_studios_home_override() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_TEST_LOCK.blocking_lock();
         let rand_id = agent_studios_provider::id::ProviderInstanceId::new();
         let temp_dir = std::env::temp_dir().join(format!("ags_test_{rand_id}"));
         unsafe {
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_catalog_save_and_load_roundtrip() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_TEST_LOCK.blocking_lock();
         let rand_id = agent_studios_provider::id::ProviderInstanceId::new();
         let temp_dir = std::env::temp_dir().join(format!("ags_test_{rand_id}"));
         unsafe {
@@ -122,9 +122,11 @@ mod tests {
             agent_studios_provider::id::ProviderId::new("openai").unwrap(),
             "CLI Test Instance",
             agent_studios_provider::protocol::ProtocolFamily::OpenAiResponses,
-            agent_studios_provider::endpoint::EndpointProfile::new("https://api.openai.com/v1").unwrap(),
+            agent_studios_provider::endpoint::EndpointProfile::new("https://api.openai.com/v1")
+                .unwrap(),
             agent_studios_provider::auth::AuthenticationScheme::None,
-        ).unwrap();
+        )
+        .unwrap();
 
         catalog.register_provider_instance(instance).unwrap();
         save_catalog(&catalog).expect("should save catalog atomically");

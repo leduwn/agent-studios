@@ -19,9 +19,8 @@ async fn test_discover_openai_models_success() {
     let server = MockServer::start().await;
 
     let secret_ref = SecretReference::env("OPENAI_TEST_KEY").unwrap();
-    let secret_store = Arc::new(
-        InMemorySecretStore::new().with_secret(secret_ref.clone(), "sk-test-token-12345"),
-    );
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "sk-test-token-12345"));
 
     Mock::given(method("GET"))
         .and(path("/v1/models"))
@@ -58,8 +57,11 @@ async fn test_discover_openai_models_success() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let models = client.discover_models(&instance).await.unwrap();
     assert_eq!(models.len(), 2);
@@ -70,18 +72,15 @@ async fn test_discover_openai_models_success() {
     assert_eq!(m1.display_name, "gpt-4o");
     assert_eq!(m1.limits.context_window_tokens, Some(128_000));
     assert_eq!(m1.limits.max_output_tokens, Some(16_384));
-    assert_eq!(m1.capabilities.tool_calling.is_supported(), true);
-    assert_eq!(m1.capabilities.vision_input.is_supported(), true);
-    assert_eq!(m1.capabilities.streaming.is_supported(), true);
-    assert_eq!(
-        m1.metadata_source,
-        ModelMetadataSource::ProviderDiscovery
-    );
+    assert!(m1.capabilities.tool_calling.is_supported());
+    assert!(m1.capabilities.vision_input.is_supported());
+    assert!(m1.capabilities.streaming.is_supported());
+    assert_eq!(m1.metadata_source, ModelMetadataSource::ProviderDiscovery);
 
     let m2 = &models[1];
     assert_eq!(m2.id.as_str(), "gpt-4o-mini");
     assert_eq!(m2.limits.context_window_tokens, Some(128_000));
-    assert_eq!(m2.capabilities.tool_calling.is_supported(), true);
+    assert!(m2.capabilities.tool_calling.is_supported());
 }
 
 #[tokio::test]
@@ -125,8 +124,11 @@ async fn test_discover_anthropic_models_success() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let models = client.discover_models(&instance).await.unwrap();
     assert_eq!(models.len(), 1);
@@ -136,9 +138,9 @@ async fn test_discover_anthropic_models_success() {
     assert_eq!(m.display_name, "Claude 3.5 Sonnet");
     assert_eq!(m.limits.context_window_tokens, Some(200_000));
     assert_eq!(m.limits.max_output_tokens, Some(8_192));
-    assert_eq!(m.capabilities.tool_calling.is_supported(), true);
-    assert_eq!(m.capabilities.vision_input.is_supported(), true);
-    assert_eq!(m.capabilities.streaming.is_supported(), true);
+    assert!(m.capabilities.tool_calling.is_supported());
+    assert!(m.capabilities.vision_input.is_supported());
+    assert!(m.capabilities.streaming.is_supported());
     assert_eq!(m.metadata_source, ModelMetadataSource::ProviderDiscovery);
 }
 
@@ -175,8 +177,11 @@ async fn test_discover_ollama_tags_success() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let models = client.discover_models(&instance).await.unwrap();
     assert_eq!(models.len(), 1);
@@ -185,8 +190,8 @@ async fn test_discover_ollama_tags_success() {
     assert_eq!(m.id.as_str(), "llama3:latest");
     assert_eq!(m.display_name, "llama3:latest");
     assert_eq!(m.limits.context_window_tokens, Some(8_192));
-    assert_eq!(m.capabilities.tool_calling.is_supported(), true);
-    assert_eq!(m.capabilities.streaming.is_supported(), true);
+    assert!(m.capabilities.tool_calling.is_supported());
+    assert!(m.capabilities.streaming.is_supported());
     assert_eq!(m.metadata_source, ModelMetadataSource::ProviderDiscovery);
 }
 
@@ -215,8 +220,11 @@ async fn test_discover_authentication_failure_401() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let err = client.discover_models(&instance).await.unwrap_err();
     match err {
@@ -256,8 +264,11 @@ async fn test_discover_rate_limited_429() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let err = client.discover_models(&instance).await.unwrap_err();
     match err {
@@ -300,8 +311,11 @@ async fn test_discovery_cache_ttl_and_refresh() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     // Call 1: misses cache, executes HTTP request #1
     let models1 = client.discover_models(&instance).await.unwrap();
@@ -337,8 +351,11 @@ async fn test_secret_store_resolution_failure() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let err = client.discover_models(&instance).await.unwrap_err();
     match err {
@@ -386,8 +403,11 @@ async fn test_discover_openrouter_models_with_explicit_context() {
     )
     .unwrap();
 
-    let client =
-        ModelDiscoveryClient::new(secret_store, Duration::from_secs(5), Duration::from_secs(60));
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
 
     let models = client.discover_models(&instance).await.unwrap();
     assert_eq!(models.len(), 1);

@@ -143,15 +143,17 @@ fn handle_list(args: ListModelArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut rows: Vec<ModelRow> = Vec::new();
 
     for instance in catalog.list_provider_instances() {
-        if let Some(ref fi) = filter_instance {
-            if &instance.id != fi {
-                continue;
-            }
+        if filter_instance
+            .as_ref()
+            .is_some_and(|fi| &instance.id != fi)
+        {
+            continue;
         }
-        if let Some(ref fp) = filter_provider {
-            if instance.provider_id.as_str().to_lowercase() != *fp {
-                continue;
-            }
+        if filter_provider
+            .as_ref()
+            .is_some_and(|fp| instance.provider_id.as_str().to_lowercase() != *fp)
+        {
+            continue;
         }
 
         let models = catalog.models_for_provider_instance(&instance.id);
@@ -203,19 +205,27 @@ fn handle_list(args: ListModelArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if rows.is_empty() {
         println!("No models registered in the catalog.");
-        println!("Use 'ags model add --instance-id <id> --model-id <name>' or 'ags provider import <path>' to register models.");
+        println!(
+            "Use 'ags model add --instance-id <id> --model-id <name>' or 'ags provider import <path>' to register models."
+        );
         return Ok(());
     }
 
     println!(
-        "{:<32} {:<24} {:<12} {:<10} {:<10} {:<16} {}",
-        "MODEL ID", "NAME", "PROVIDER", "CONTEXT", "MAX OUT", "CAPS", "INSTANCE ID"
+        "{:<32} {:<24} {:<12} {:<10} {:<10} {:<16} INSTANCE ID",
+        "MODEL ID", "NAME", "PROVIDER", "CONTEXT", "MAX OUT", "CAPS"
     );
     println!("{:-<128}", "");
     for r in &rows {
         println!(
             "{:<32} {:<24} {:<12} {:<10} {:<10} {:<16} {}",
-            r.model_id, r.name, r.provider, r.context_tokens, r.max_output, r.capabilities, r.instance_id
+            r.model_id,
+            r.name,
+            r.provider,
+            r.context_tokens,
+            r.max_output,
+            r.capabilities,
+            r.instance_id
         );
     }
     println!("\nTotal: {} model(s)", rows.len());
@@ -247,7 +257,10 @@ fn handle_get(args: GetModelArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("  Model ID:        {}", model.id);
     println!("  Display Name:    {}", model.display_name);
     println!("  Provider Family: {}", instance.provider_id);
-    println!("  Instance Name:   {} ({})", instance.display_name, instance.id);
+    println!(
+        "  Instance Name:   {} ({})",
+        instance.display_name, instance.id
+    );
     println!("  Metadata Source: {}", model.metadata_source);
     println!(
         "  Context Window:  {}",
@@ -323,7 +336,10 @@ async fn handle_test(args: TestModelArgs) -> Result<(), Box<dyn std::error::Erro
     );
     println!("Endpoint: {}", instance.endpoint.base_url);
     println!("Protocol: {}", instance.protocol);
-    println!("Limits:   context={:?}, max_out={:?}", model.limits.context_window_tokens, model.limits.max_output_tokens);
+    println!(
+        "Limits:   context={:?}, max_out={:?}",
+        model.limits.context_window_tokens, model.limits.max_output_tokens
+    );
 
     println!("✓ Model descriptor verification passed. Provider endpoint reachable.");
     Ok(())
@@ -332,18 +348,23 @@ async fn handle_test(args: TestModelArgs) -> Result<(), Box<dyn std::error::Erro
 fn resolve_model_ref<'a>(
     catalog: &'a agent_studios_provider::catalog::ProviderCatalog,
     input: &str,
-) -> Result<(&'a ModelDescriptor, &'a agent_studios_provider::instance::ProviderInstance), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        &'a ModelDescriptor,
+        &'a agent_studios_provider::instance::ProviderInstance,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let trimmed = input.trim();
-    if let Some((inst_str, model_str)) = trimmed.split_once('/') {
-        if let Ok(inst_id) = ProviderInstanceId::from_str(inst_str) {
-            if let Ok(mid) = ModelId::new(model_str) {
-                if let Some(desc) = catalog.get_model(&inst_id, &mid) {
-                    if let Some(inst) = catalog.get_provider_instance(&inst_id) {
-                        return Ok((desc, inst));
-                    }
-                }
-            }
-        }
+    let resolved = trimmed.split_once('/').and_then(|(inst_str, model_str)| {
+        let inst_id = ProviderInstanceId::from_str(inst_str).ok()?;
+        let mid = ModelId::new(model_str).ok()?;
+        let desc = catalog.get_model(&inst_id, &mid)?;
+        let inst = catalog.get_provider_instance(&inst_id)?;
+        Some((desc, inst))
+    });
+    if let Some(pair) = resolved {
+        return Ok(pair);
     }
 
     // Try finding by model_id across instances
@@ -354,5 +375,8 @@ fn resolve_model_ref<'a>(
         }
     }
 
-    Err(format!("Model '{trimmed}' not found in catalog. Run 'ags model list' to view available models.").into())
+    Err(format!(
+        "Model '{trimmed}' not found in catalog. Run 'ags model list' to view available models."
+    )
+    .into())
 }

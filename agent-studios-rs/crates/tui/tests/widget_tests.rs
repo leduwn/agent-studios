@@ -389,7 +389,15 @@ fn test_slash_menu_annotations_and_inventory_buffer_snapshot() {
     assert_eq!(AVAILABLE_COMMANDS.len(), 11);
 
     // Validate Ready annotations
-    for ready_cmd in ["/help", "/clear", "/doctor", "/status", "/cancel", "/quit", "/providers"] {
+    for ready_cmd in [
+        "/help",
+        "/clear",
+        "/doctor",
+        "/status",
+        "/cancel",
+        "/quit",
+        "/providers",
+    ] {
         let item = AVAILABLE_COMMANDS
             .iter()
             .find(|c| c.command == ready_cmd)

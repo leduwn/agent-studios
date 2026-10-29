@@ -8,8 +8,8 @@ mod tests {
     use std::fs;
 
     use crate::commands::model::{
-        AddModelArgs, GetModelArgs, ListModelArgs, ModelCommands, OutputFormat as ModelOutputFormat,
-        RemoveModelArgs, handle_model_command,
+        AddModelArgs, GetModelArgs, ListModelArgs, ModelCommands,
+        OutputFormat as ModelOutputFormat, RemoveModelArgs, handle_model_command,
     };
     use crate::commands::provider::{
         AddProviderArgs, AuthTypeArg, GetProviderArgs, ImportProviderArgs, ListProviderArgs,
@@ -20,7 +20,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_and_model_cli_commands_lifecycle() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_TEST_LOCK.lock().await;
         let rand_id = agent_studios_provider::id::ProviderInstanceId::new();
         let temp_dir = std::env::temp_dir().join(format!("ags_cli_test_{rand_id}"));
         unsafe {
@@ -109,7 +109,11 @@ mod tests {
         .unwrap();
 
         let after_removal = load_catalog().unwrap();
-        assert!(after_removal.get_provider_instance(&instances[0].id).is_none());
+        assert!(
+            after_removal
+                .get_provider_instance(&instances[0].id)
+                .is_none()
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(&temp_dir);
@@ -120,7 +124,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_provider_import_cli_dry_run_and_commit() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_TEST_LOCK.lock().await;
         let rand_id = agent_studios_provider::id::ProviderInstanceId::new();
         let temp_dir = std::env::temp_dir().join(format!("ags_cli_import_{rand_id}"));
         fs::create_dir_all(&temp_dir).unwrap();

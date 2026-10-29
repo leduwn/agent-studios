@@ -255,8 +255,8 @@ fn handle_list(args: ListProviderArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Print aligned table
     println!(
-        "{:<38} {:<12} {:<20} {:<24} {:<18} {:<6} {}",
-        "INSTANCE ID", "PROVIDER", "NAME", "PROTOCOL", "AUTH", "MODELS", "DEFAULT"
+        "{:<38} {:<12} {:<20} {:<24} {:<18} {:<6} DEFAULT",
+        "INSTANCE ID", "PROVIDER", "NAME", "PROTOCOL", "AUTH", "MODELS"
     );
     println!("{:-<128}", "");
     for r in &rows {
@@ -291,9 +291,9 @@ fn handle_add(args: AddProviderArgs) -> Result<(), Box<dyn std::error::Error>> {
     let authentication = match args.auth_type {
         AuthTypeArg::None => AuthenticationScheme::None,
         AuthTypeArg::Bearer => {
-            let sec_str = args.secret_ref.ok_or_else(|| {
-                "Authentication type 'bearer' requires --secret-ref <ENV_VAR_OR_LOCATOR>"
-            })?;
+            let sec_str = args
+                .secret_ref
+                .ok_or("Authentication type 'bearer' requires --secret-ref <ENV_VAR_OR_LOCATOR>")?;
             let sec = if sec_str.starts_with("os:") || sec_str.contains("agent-studios:") {
                 SecretReference::os_store(&sec_str)?
             } else {
@@ -302,9 +302,9 @@ fn handle_add(args: AddProviderArgs) -> Result<(), Box<dyn std::error::Error>> {
             AuthenticationScheme::BearerToken { secret: sec }
         }
         AuthTypeArg::ApiKey => {
-            let sec_str = args.secret_ref.ok_or_else(|| {
-                "Authentication type 'api-key' requires --secret-ref <ENV_VAR_OR_LOCATOR>"
-            })?;
+            let sec_str = args.secret_ref.ok_or(
+                "Authentication type 'api-key' requires --secret-ref <ENV_VAR_OR_LOCATOR>",
+            )?;
             let sec = if sec_str.starts_with("os:") || sec_str.contains("agent-studios:") {
                 SecretReference::os_store(&sec_str)?
             } else {
@@ -334,9 +334,15 @@ fn handle_add(args: AddProviderArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     save_catalog(&catalog)?;
-    println!("✓ Successfully registered provider instance: {}", instance_id);
+    println!(
+        "✓ Successfully registered provider instance: {}",
+        instance_id
+    );
     if args.default {
-        println!("★ Marked as default instance for provider '{}'", provider_id);
+        println!(
+            "★ Marked as default instance for provider '{}'",
+            provider_id
+        );
     }
     Ok(())
 }
@@ -548,15 +554,15 @@ async fn handle_test(args: TestProviderArgs) -> Result<(), Box<dyn std::error::E
         AuthenticationScheme::ApiKeyHeader {
             header_name,
             secret,
-        } => {
-            test_secret_resolution(&secret_store, secret, &format!("Header '{header_name}'"))
-        }
+        } => test_secret_resolution(&secret_store, secret, &format!("Header '{header_name}'")),
         AuthenticationScheme::QueryParameter {
             parameter_name,
             secret,
-        } => {
-            test_secret_resolution(&secret_store, secret, &format!("Query param '{parameter_name}'"))
-        }
+        } => test_secret_resolution(
+            &secret_store,
+            secret,
+            &format!("Query param '{parameter_name}'"),
+        ),
         AuthenticationScheme::OAuthToken { secret } => {
             test_secret_resolution(&secret_store, secret, "OAuth token")
         }
@@ -578,7 +584,10 @@ fn test_secret_resolution(
     secret: &SecretReference,
     label: &str,
 ) -> bool {
-    print!("Auth: {} via {} ({})... ", label, secret.backend, secret.locator);
+    print!(
+        "Auth: {} via {} ({})... ",
+        label, secret.backend, secret.locator
+    );
     match secret_store.get_secret(secret) {
         Ok(val) => {
             let len = val.len();
