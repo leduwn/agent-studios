@@ -11,7 +11,9 @@ pub mod connection;
 pub mod daemon;
 pub mod server;
 
-pub use client::{ClientConfig, EventSubscriptionStream, HealthResponse, IpcClient, PongResponse};
+pub use client::{
+    ClientConfig, EventSubscriptionStream, HealthResponse, IpcClient, ModelDefinition, PongResponse,
+};
 pub use connection::{
     ConnectionSession, ConnectionState, IpcCommand, IpcResponse, handle_connection,
 };

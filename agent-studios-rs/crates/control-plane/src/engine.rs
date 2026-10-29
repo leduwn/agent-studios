@@ -2451,6 +2451,14 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         Ok(())
     }
 
+    pub fn grant_approval(&mut self, approval_id: ApprovalId) -> Result<(), ControlPlaneError> {
+        self.resolve_approval(approval_id, ApprovalState::Approved)
+    }
+
+    pub fn reject_approval(&mut self, approval_id: ApprovalId) -> Result<(), ControlPlaneError> {
+        self.resolve_approval(approval_id, ApprovalState::Denied)
+    }
+
     pub fn get_approval(&self, id: ApprovalId) -> Option<&ApprovalRequest> {
         self.state.approvals.get(&id)
     }

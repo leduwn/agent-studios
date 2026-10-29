@@ -44,6 +44,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
     let server = IpcServerBuilder::new()
         .with_auth_key(&config.key_id, config.auth_key.clone())
         .with_replay_capacity(config.capacity)
+        .with_control_plane(agent_studios_control_plane::ControlPlane::new_default())
+        .with_provider_catalog(agent_studios_provider::ProviderCatalog::with_builtin_definitions())
         .build()?;
 
     // 3. Setup OS shutdown signal watcher

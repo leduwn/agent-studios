@@ -8,6 +8,12 @@ use agent_studios_ipc_protocol::{
     ApprovalContract, ApprovalDecision, ApprovalId, ApprovalStatus, HmacAuthHeader, HmacSigner,
     IpcEvent, ProtocolError, ProtocolVersion, SessionId,
 };
+use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
+use agent_studios_protocol::id::{RunId, StudioId, TaskId};
+use agent_studios_protocol::run::RunRecord;
+use agent_studios_protocol::studio::Studio;
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord};
+use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstanceId};
 
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
@@ -61,6 +67,45 @@ pub enum IpcCommand {
         approval_id: ApprovalId,
         decision: ApprovalDecision,
     },
+    CreateStudio {
+        name: String,
+    },
+    ListStudios,
+    GetStudio {
+        studio_id: StudioId,
+    },
+    SubmitTask {
+        studio_id: StudioId,
+        task_spec: BatchTaskSpec,
+    },
+    CancelTask {
+        studio_id: StudioId,
+        task_id: TaskId,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    ListTasks {
+        studio_id: StudioId,
+    },
+    GetTask {
+        studio_id: StudioId,
+        task_id: TaskId,
+    },
+    ListRuns {
+        studio_id: StudioId,
+    },
+    GetRun {
+        studio_id: StudioId,
+        run_id: RunId,
+    },
+    ListProviders,
+    GetProvider {
+        provider_id: ProviderInstanceId,
+    },
+    ListModels {
+        #[serde(default)]
+        instance_id: Option<ProviderInstanceId>,
+    },
     Shutdown,
 }
 
@@ -94,6 +139,43 @@ pub enum IpcResponse {
     ApprovalResolved {
         approval_id: ApprovalId,
         status: ApprovalStatus,
+    },
+    StudioCreated {
+        studio: Studio,
+    },
+    Studios {
+        studios: Vec<Studio>,
+    },
+    Studio {
+        studio: Option<Studio>,
+    },
+    TasksSubmitted {
+        task_ids: Vec<TaskId>,
+    },
+    TaskCancelled {
+        #[serde(default)]
+        summary: CancellationSummary,
+    },
+    Tasks {
+        tasks: Vec<TaskRecord>,
+    },
+    Task {
+        task: Option<TaskRecord>,
+    },
+    Runs {
+        runs: Vec<RunRecord>,
+    },
+    Run {
+        run: Option<RunRecord>,
+    },
+    Providers {
+        providers: Vec<ProviderInstance>,
+    },
+    Provider {
+        provider: Option<ProviderInstance>,
+    },
+    Models {
+        models: Vec<ModelDescriptor>,
     },
     ShutdownAcknowledged,
     Error {
@@ -342,24 +424,25 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::SubscribeEvents { from_sequence } => {
-                    let backfill_result = {
+                    let mut broadcast_rx = server_state.broadcast_tx.subscribe();
+                    let (backfill_result, max_buffered_seq) = {
                         let buffer = server_state.replay_buffer.lock().unwrap();
-                        match from_sequence {
+                        let max_seq = buffer.latest_sequence().unwrap_or(0);
+                        let events = match from_sequence {
                             Some(seq) => buffer.replay_from(seq, None),
                             None => Ok(Vec::new()),
-                        }
+                        };
+                        (events, max_seq)
                     };
 
                     match backfill_result {
                         Ok(events) => {
-                            let last_seq = events.last().map(|e| e.sequence);
                             for ev in events {
                                 tx.send(IpcResponse::Event { event: ev })
                                     .await
                                     .map_err(|_| TransportError::ConnectionClosed)?;
                             }
 
-                            let mut broadcast_rx = server_state.broadcast_tx.subscribe();
                             let tx_stream = tx.clone();
                             let shutdown_tok = server_state.shutdown_token.clone();
                             let handle = tokio::spawn(async move {
@@ -369,7 +452,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                         res = broadcast_rx.recv() => {
                                             match res {
                                                 Ok(event) => {
-                                                    if last_seq.is_some_and(|min_seq| event.sequence <= min_seq) {
+                                                    if event.sequence <= max_buffered_seq {
                                                         continue;
                                                     }
                                                     if tx_stream.send(IpcResponse::Event { event }).await.is_err() {
@@ -414,40 +497,219 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     approval_id,
                     decision,
                 } => {
-                    let resolution_result = {
-                        let mut approvals = server_state.approvals.lock().unwrap();
-                        if let Some(contract) = approvals.get_mut(&approval_id) {
-                            match contract.resolve(decision) {
-                                Ok(()) => Ok(contract.status),
-                                Err(e) => Err(e.to_string()),
-                            }
-                        } else {
-                            Err(format!("Approval contract {} not found", approval_id))
-                        }
+                    let parsed_cp_id: Option<agent_studios_protocol::id::ApprovalId> =
+                        std::str::FromStr::from_str(approval_id.as_str()).ok();
+
+                    let is_in_cp = if let Some(aid) = parsed_cp_id {
+                        let cp = server_state.control_plane.read().await;
+                        cp.get_approval(aid).is_some()
+                    } else {
+                        false
                     };
 
-                    match resolution_result {
-                        Ok(status) => {
-                            let next_seq = {
-                                let buf = server_state.replay_buffer.lock().unwrap();
-                                buf.latest_sequence().unwrap_or(0) + 1
+                    if is_in_cp {
+                        let aid = parsed_cp_id.unwrap();
+                        let (res, envelopes) = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let r = match decision {
+                                ApprovalDecision::Approved { .. } => cp.grant_approval(aid),
+                                ApprovalDecision::Rejected { .. } => cp.reject_approval(aid),
                             };
-                            let event = IpcEvent::new(
-                                next_seq,
-                                "approval_resolved",
-                                serde_json::json!({
-                                    "approval_id": approval_id,
-                                    "status": status,
-                                }),
-                            );
-                            let _ = server_state.publish_event(event);
+                            let envs = if r.is_ok() {
+                                cp.drain_committed_events()
+                            } else {
+                                Vec::new()
+                            };
+                            (r, envs)
+                        };
 
-                            tx.send(IpcResponse::ApprovalResolved {
-                                approval_id,
-                                status,
+                        match res {
+                            Ok(()) => {
+                                let _ = server_state.publish_control_plane_events(envelopes);
+                                let status = match decision {
+                                    ApprovalDecision::Approved { .. } => ApprovalStatus::Authorized,
+                                    ApprovalDecision::Rejected { .. } => ApprovalStatus::Rejected,
+                                };
+                                tx.send(IpcResponse::ApprovalResolved {
+                                    approval_id,
+                                    status,
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                            }
+                            Err(e) => {
+                                tx.send(IpcResponse::Error {
+                                    message: e.to_string(),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                            }
+                        }
+                    } else {
+                        let resolution_result = {
+                            let mut approvals = server_state.approvals.lock().unwrap();
+                            if let Some(contract) = approvals.get_mut(&approval_id) {
+                                match contract.resolve(decision) {
+                                    Ok(()) => Ok(contract.status),
+                                    Err(e) => Err(e.to_string()),
+                                }
+                            } else {
+                                Err(format!(
+                                    "Approval {} not found in control plane or transport contracts",
+                                    approval_id
+                                ))
+                            }
+                        };
+
+                        match resolution_result {
+                            Ok(status) => {
+                                let next_seq = {
+                                    let buf = server_state.replay_buffer.lock().unwrap();
+                                    buf.latest_sequence().unwrap_or(0) + 1
+                                };
+                                let event = IpcEvent::new(
+                                    next_seq,
+                                    "approval_resolved",
+                                    serde_json::json!({
+                                        "approval_id": approval_id,
+                                        "status": status,
+                                    }),
+                                );
+                                let _ = server_state.publish_event(event);
+
+                                tx.send(IpcResponse::ApprovalResolved {
+                                    approval_id,
+                                    status,
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                            }
+                            Err(err_msg) => {
+                                tx.send(IpcResponse::Error { message: err_msg })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                            }
+                        }
+                    }
+                }
+                IpcCommand::CreateStudio { name } => {
+                    let (res, envelopes) = {
+                        let mut cp = server_state.control_plane.write().await;
+                        let r = cp.create_studio(name);
+                        let envs = if r.is_ok() {
+                            cp.drain_committed_events()
+                        } else {
+                            Vec::new()
+                        };
+                        (r, envs)
+                    };
+
+                    match res {
+                        Ok(studio) => {
+                            let _ = server_state.publish_control_plane_events(envelopes);
+                            tx.send(IpcResponse::StudioCreated { studio })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(e) => {
+                            tx.send(IpcResponse::Error {
+                                message: e.to_string(),
                             })
                             .await
                             .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::ListStudios => {
+                    let studios = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.all_studios().cloned().collect()
+                    };
+                    tx.send(IpcResponse::Studios { studios })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetStudio { studio_id } => {
+                    let studio = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.get_studio(studio_id).cloned()
+                    };
+                    tx.send(IpcResponse::Studio { studio })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::SubmitTask {
+                    studio_id,
+                    task_spec,
+                } => {
+                    let (res, envelopes) = {
+                        let mut cp = server_state.control_plane.write().await;
+                        let r = cp.create_task_batch(studio_id, vec![task_spec]);
+                        let envs = if r.is_ok() {
+                            cp.drain_committed_events()
+                        } else {
+                            Vec::new()
+                        };
+                        (r, envs)
+                    };
+
+                    match res {
+                        Ok(tasks) => {
+                            let task_ids = tasks.into_iter().map(|t| t.id).collect();
+                            let _ = server_state.publish_control_plane_events(envelopes);
+                            tx.send(IpcResponse::TasksSubmitted { task_ids })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(e) => {
+                            tx.send(IpcResponse::Error {
+                                message: e.to_string(),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::CancelTask {
+                    studio_id,
+                    task_id,
+                    reason,
+                } => {
+                    let (res, envelopes) = {
+                        let mut cp = server_state.control_plane.write().await;
+                        if let Some(task) = cp.get_task(task_id) {
+                            if task.studio_id != studio_id {
+                                (
+                                    Err(format!(
+                                        "Studio mismatch: task {} belongs to studio {}, not {}",
+                                        task_id, task.studio_id, studio_id
+                                    )),
+                                    Vec::new(),
+                                )
+                            } else {
+                                let scope = CancellationScope::Task {
+                                    task_id,
+                                    include_descendants: true,
+                                };
+                                match cp.request_cancellation(scope, reason) {
+                                    Ok(summary) => {
+                                        let envs = cp.drain_committed_events();
+                                        (Ok(summary), envs)
+                                    }
+                                    Err(e) => (Err(e.to_string()), Vec::new()),
+                                }
+                            }
+                        } else {
+                            (Err(format!("Task {} not found", task_id)), Vec::new())
+                        }
+                    };
+
+                    match res {
+                        Ok(summary) => {
+                            let _ = server_state.publish_control_plane_events(envelopes);
+                            tx.send(IpcResponse::TaskCancelled { summary })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
                         }
                         Err(err_msg) => {
                             tx.send(IpcResponse::Error { message: err_msg })
@@ -455,6 +717,94 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                 .map_err(|_| TransportError::ConnectionClosed)?;
                         }
                     }
+                }
+                IpcCommand::ListTasks { studio_id } => {
+                    let tasks = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.all_tasks()
+                            .filter(|t| t.studio_id == studio_id)
+                            .cloned()
+                            .collect()
+                    };
+                    tx.send(IpcResponse::Tasks { tasks })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetTask { studio_id, task_id } => {
+                    let task = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.get_task(task_id)
+                            .filter(|t| t.studio_id == studio_id)
+                            .cloned()
+                    };
+                    tx.send(IpcResponse::Task { task })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::ListRuns { studio_id } => {
+                    let runs = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.all_runs()
+                            .filter(|r| {
+                                cp.get_task(r.task_id).map(|t| t.studio_id) == Some(studio_id)
+                            })
+                            .cloned()
+                            .collect()
+                    };
+                    tx.send(IpcResponse::Runs { runs })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetRun { studio_id, run_id } => {
+                    let run = {
+                        let cp = server_state.control_plane.read().await;
+                        cp.get_run(run_id)
+                            .filter(|r| {
+                                cp.get_task(r.task_id).map(|t| t.studio_id) == Some(studio_id)
+                            })
+                            .cloned()
+                    };
+                    tx.send(IpcResponse::Run { run })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::ListProviders => {
+                    let providers = {
+                        let catalog = server_state.provider_catalog.read().await;
+                        catalog
+                            .list_provider_instances()
+                            .into_iter()
+                            .cloned()
+                            .collect()
+                    };
+                    tx.send(IpcResponse::Providers { providers })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetProvider { provider_id } => {
+                    let provider = {
+                        let catalog = server_state.provider_catalog.read().await;
+                        catalog.get_provider_instance(&provider_id).cloned()
+                    };
+                    tx.send(IpcResponse::Provider { provider })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::ListModels { instance_id } => {
+                    let models = {
+                        let catalog = server_state.provider_catalog.read().await;
+                        match instance_id {
+                            Some(id) => catalog
+                                .models_for_provider_instance(&id)
+                                .into_iter()
+                                .cloned()
+                                .collect(),
+                            None => catalog.list_models().into_iter().cloned().collect(),
+                        }
+                    };
+                    tx.send(IpcResponse::Models { models })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::Shutdown => {
                     let has_privilege = session.negotiated_capabilities.iter().any(|c| {

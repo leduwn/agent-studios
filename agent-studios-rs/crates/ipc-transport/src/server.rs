@@ -1,12 +1,15 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
+use agent_studios_control_plane::ControlPlane;
 use agent_studios_ipc_protocol::{
     ApprovalContract, ApprovalId, HmacSigner, IpcEvent, NonceTracker, ReplayBuffer,
 };
+use agent_studios_protocol::event::EventEnvelope;
+use agent_studios_provider::ProviderCatalog;
 
 use crate::error::TransportError;
 
@@ -21,6 +24,8 @@ pub struct ServerState {
     pub approvals: Arc<Mutex<HashMap<ApprovalId, ApprovalContract>>>,
     pub auth_keys: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub supported_capabilities: Vec<String>,
+    pub control_plane: Arc<tokio::sync::RwLock<ControlPlane>>,
+    pub provider_catalog: Arc<tokio::sync::RwLock<ProviderCatalog>>,
 }
 
 impl ServerState {
@@ -29,12 +34,41 @@ impl ServerState {
         let _ = self.broadcast_tx.send(event);
         Ok(())
     }
+
+    pub fn publish_control_plane_events(
+        &self,
+        envelopes: Vec<EventEnvelope>,
+    ) -> Result<(), TransportError> {
+        let mut replay = self.replay_buffer.lock().unwrap();
+        for envelope in envelopes {
+            let next_seq = replay.latest_sequence().unwrap_or(0) + 1;
+            let kind = serde_json::to_value(&envelope.event)
+                .ok()
+                .and_then(|v| {
+                    v.get("kind")
+                        .and_then(|k| k.as_str().map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| "control_plane_event".to_string());
+            let payload = serde_json::to_value(&envelope).unwrap_or_default();
+            let event = IpcEvent {
+                sequence: next_seq,
+                timestamp: envelope.timestamp,
+                event_type: kind,
+                payload,
+            };
+            replay.push(event.clone())?;
+            let _ = self.broadcast_tx.send(event);
+        }
+        Ok(())
+    }
 }
 
 pub struct IpcServerBuilder {
     auth_keys: HashMap<String, Vec<u8>>,
     replay_capacity: usize,
     supported_capabilities: Vec<String>,
+    control_plane: Option<ControlPlane>,
+    provider_catalog: Option<ProviderCatalog>,
 }
 
 impl Default for IpcServerBuilder {
@@ -60,6 +94,8 @@ impl IpcServerBuilder {
                 "admin".to_string(),
                 "shutdown".to_string(),
             ],
+            control_plane: None,
+            provider_catalog: None,
         }
     }
 
@@ -78,10 +114,28 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_control_plane(mut self, control_plane: ControlPlane) -> Self {
+        self.control_plane = Some(control_plane);
+        self
+    }
+
+    pub fn with_provider_catalog(mut self, provider_catalog: ProviderCatalog) -> Self {
+        self.provider_catalog = Some(provider_catalog);
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
         let nonce_tracker = NonceTracker::new(60_000, 10_000);
+
+        let control_plane = Arc::new(tokio::sync::RwLock::new(
+            self.control_plane.unwrap_or_else(ControlPlane::new_default),
+        ));
+        let provider_catalog = Arc::new(tokio::sync::RwLock::new(
+            self.provider_catalog
+                .unwrap_or_else(ProviderCatalog::with_builtin_definitions),
+        ));
 
         let state = Arc::new(ServerState {
             auth_signer: Arc::new(HmacSigner),
@@ -94,6 +148,8 @@ impl IpcServerBuilder {
             approvals: Arc::new(Mutex::new(HashMap::new())),
             auth_keys: Arc::new(Mutex::new(self.auth_keys)),
             supported_capabilities: self.supported_capabilities,
+            control_plane,
+            provider_catalog,
         });
 
         Ok(IpcServer { state })
@@ -112,6 +168,14 @@ impl IpcServer {
 
     pub fn state(&self) -> Arc<ServerState> {
         self.state.clone()
+    }
+
+    pub fn control_plane(&self) -> Arc<tokio::sync::RwLock<ControlPlane>> {
+        self.state.control_plane.clone()
+    }
+
+    pub fn provider_catalog(&self) -> Arc<tokio::sync::RwLock<ProviderCatalog>> {
+        self.state.provider_catalog.clone()
     }
 
     pub fn shutdown_token(&self) -> CancellationToken {
