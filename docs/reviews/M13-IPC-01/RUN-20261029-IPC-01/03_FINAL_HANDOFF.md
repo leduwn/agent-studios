@@ -34,7 +34,7 @@
 - [x] Clippy clean across all targets with zero warnings under `-D warnings`.
 - [x] Rustfmt clean across all crates.
 - [x] Smoke verified: `cargo run --bin agsd -- --help` exits code 0.
-- [x] Remote CI passing across matrix: Ubuntu (`ubuntu-latest`) & Windows (`windows-latest`) for PR #18 (Run ID `40912363071`).
+- [x] Remote CI passing across matrix: Ubuntu (`ubuntu-latest`) & Windows (`windows-latest`) for PR #18 (Run ID `40912774873`).
 - [x] Draft PR #18 opened against `main` (`https://github.com/leduwn/agent-studios/pull/18`).
 - [x] Subtree `codex-rs/` 100% untouched.
 - [x] Zero bearer secrets placed in git repositories or fixtures.
