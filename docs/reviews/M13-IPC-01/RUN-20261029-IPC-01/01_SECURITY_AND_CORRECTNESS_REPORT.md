@@ -4,7 +4,7 @@
 - **Execution Run**: `RUN-20261029-IPC-01`
 - **Date**: `2026-10-29T11:00:00+07:00`
 - **Branch**: `feat/m13-ipc-native-transport`
-- **Target**: `Open Draft PR against main`
+- **Target**: `Draft PR #18 (https://github.com/leduwn/agent-studios/pull/18) against main`
 - **Status**: **VERIFIED SECURE & PRODUCTION READY (100% PASSING / ZERO WARNINGS)**
 
 ---

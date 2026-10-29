@@ -53,3 +53,24 @@ test test_e2e_windows_named_pipe_full_lifecycle ... ok
 
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
 ```
+
+---
+
+## 4. Remote GitHub Actions CI Evidence
+
+- **Workflow**: `Agent Studios M13 IPC CI` (`.github/workflows/agent-studios-m13-ipc-ci.yml`)
+- **PR #18 Run ID**: `40912363071` ([View Run](https://github.com/leduwn/agent-studios/actions/runs/40912363071))
+- **Push Run ID**: `40912353581` ([View Run](https://github.com/leduwn/agent-studios/actions/runs/40912353581))
+- **Target Commit**: `556e09f22d28ad97fd5987727da3cfc40a23d9e4` (`feat/m13-ipc-native-transport`)
+- **Pull Request**: [#18](https://github.com/leduwn/agent-studios/pull/18) (`feat/m13-ipc-native-transport` -> `main`)
+
+| Matrix Target | Step | Result |
+|---|---|:---:|
+| **Ubuntu (`ubuntu-latest`)** | Rustfmt (`cargo fmt --check`) | **PASS** |
+| **Ubuntu (`ubuntu-latest`)** | Cargo Check (`cargo check --all-targets`) | **PASS** |
+| **Ubuntu (`ubuntu-latest`)** | Clippy (`cargo clippy --all-targets -- -D warnings`) | **PASS** |
+| **Ubuntu (`ubuntu-latest`)** | Cargo Test (`cargo test`) | **PASS** |
+| **Windows (`windows-latest`)** | Cargo Check (`cargo check --all-targets`) | **PASS** |
+| **Windows (`windows-latest`)** | Clippy (`cargo clippy --all-targets -- -D warnings`) | **PASS** |
+| **Windows (`windows-latest`)** | Cargo Test (`cargo test`) | **PASS** |
+
