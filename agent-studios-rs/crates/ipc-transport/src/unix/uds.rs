@@ -21,10 +21,10 @@ impl UnixSocketListener {
     /// Validates directory permissions, cleans stale socket if needed, binds, and enforces 0600 permissions.
     pub fn bind(path: impl AsRef<Path>) -> Result<Self, TransportError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                validate_directory_permissions(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && parent.exists()
+        {
+            validate_directory_permissions(parent)?;
         }
 
         cleanup_stale_socket(path)?;
@@ -101,14 +101,14 @@ impl UnixSocketStream {
         // 4. On Linux, check peer credentials if supported
         #[cfg(target_os = "linux")]
         {
-            if let Ok(ucred) = stream.peer_cred() {
-                if ucred.uid() != current_uid {
-                    return Err(TransportError::PermissionDenied(format!(
-                        "Peer UID {} does not match current UID {}",
-                        ucred.uid(),
-                        current_uid
-                    )));
-                }
+            if let Ok(ucred) = stream.peer_cred()
+                && ucred.uid() != current_uid
+            {
+                return Err(TransportError::PermissionDenied(format!(
+                    "Peer UID {} does not match current UID {}",
+                    ucred.uid(),
+                    current_uid
+                )));
             }
         }
 
