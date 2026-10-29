@@ -549,3 +549,128 @@ async fn test_ipc_linearizable_replay_and_reconnect() {
         "All events 1..=10 must be delivered with zero loss and zero duplicates"
     );
 }
+
+#[tokio::test]
+async fn test_ipc_approval_cannot_resolve_for_terminal_task() {
+    let key_id = "test-key-approval-terminal";
+    let secret = b"secret-approval-term-123".to_vec();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .build()
+        .expect("Server failed to build");
+
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+
+    let config = ClientConfig::new(key_id, secret);
+    let mut client = IpcClient::connect_stream(client_stream, config)
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client
+        .create_studio("Approval Terminal Task Studio")
+        .await
+        .expect("Create studio failed");
+
+    let cp_lock = server.control_plane();
+    let (_agent_id, task_id, approval_id) = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "worker-agent-term", AgentKind::Internal, None)
+            .expect("Register agent failed");
+        let task = cp
+            .create_task(
+                studio.id,
+                "Execute terminal task",
+                "Description",
+                None,
+                Some(agent.id),
+                Vec::new(),
+            )
+            .expect("Create task failed");
+        let approval = cp
+            .request_approval(
+                studio.id,
+                task.id,
+                agent.id,
+                ApprovalKind::CommandExecution,
+                "Operation requiring approval",
+            )
+            .expect("Request approval failed");
+        (agent.id, task.id, approval.id)
+    };
+
+    // Transition task to Running then Succeeded directly
+    {
+        let mut cp = cp_lock.write().await;
+        cp.transition_task_state(task_id, TaskState::Running)
+            .unwrap();
+        cp.transition_task_state(task_id, TaskState::Succeeded)
+            .unwrap();
+        // Verify that pending approval was auto-cancelled on terminal state transition
+        let app = cp.get_approval(approval_id).unwrap();
+        assert_eq!(app.state, ApprovalState::Cancelled);
+    }
+
+    // Resolving approval for the terminal task must fail
+    let err = client
+        .resolve_approval(
+            approval_id.to_string(),
+            ApprovalDecision::Approved {
+                modified_details: None,
+                user_note: None,
+            },
+        )
+        .await;
+    assert!(
+        err.is_err(),
+        "Expected resolve_approval to fail for terminal task"
+    );
+}
+
+#[tokio::test]
+async fn test_ipc_multiple_subscriptions_no_duplicate_events() {
+    let key_id = "test-key-multi-sub";
+    let secret = b"secret-multi-sub-123".to_vec();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .build()
+        .expect("Server failed to build");
+
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+
+    let config = ClientConfig::new(key_id, secret);
+    let mut client = IpcClient::connect_stream(client_stream, config)
+        .await
+        .expect("Client handshake failed");
+
+    // Client subscribes first time
+    let _sub1 = client.subscribe_events(1).await.expect("Sub 1 failed");
+    // Ensure server processed sub1
+    let _ = client.ping("sync1").await.expect("Ping 1 failed");
+
+    // Client subscribes second time on same connection (should replace first subscription)
+    let mut sub2 = client.subscribe_events(1).await.expect("Sub 2 failed");
+    // Ensure server processed sub2 and aborted sub1 task
+    let _ = client.ping("sync2").await.expect("Ping 2 failed");
+
+    // Emit live event 1
+    let event = IpcEvent::new(1, "live_event", serde_json::json!({ "v": 1 }));
+    server.publish_event(event).unwrap();
+
+    let ev = timeout(TEST_TIMEOUT, sub2.next_event())
+        .await
+        .expect("Timeout waiting for event")
+        .expect("Error receiving event");
+    assert_eq!(ev.sequence, 1);
+
+    // Ensure no duplicate event is waiting on the stream
+    let no_dup = timeout(Duration::from_millis(100), sub2.next_event()).await;
+    assert!(
+        no_dup.is_err(),
+        "Expected timeout: no duplicate event should arrive"
+    );
+}

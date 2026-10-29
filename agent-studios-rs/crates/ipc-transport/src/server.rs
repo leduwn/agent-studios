@@ -35,6 +35,19 @@ impl ServerState {
         Ok(())
     }
 
+    pub fn emit_event(
+        &self,
+        event_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Result<IpcEvent, TransportError> {
+        let mut replay = self.replay_buffer.lock().unwrap();
+        let next_seq = replay.latest_sequence().unwrap_or(0) + 1;
+        let event = IpcEvent::new(next_seq, event_type, payload);
+        replay.push(event.clone())?;
+        let _ = self.broadcast_tx.send(event.clone());
+        Ok(event)
+    }
+
     pub fn publish_control_plane_events(
         &self,
         envelopes: Vec<EventEnvelope>,
@@ -199,12 +212,7 @@ impl IpcServer {
 
     #[cfg(windows)]
     pub async fn run_named_pipe(&self, pipe_name: &str) -> Result<(), TransportError> {
-        use tokio::net::windows::named_pipe::ServerOptions;
-
-        let mut server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(pipe_name)?;
-
+        let mut listener = crate::windows::NamedPipeListener::bind(pipe_name)?;
         tracing::info!("IpcServer listening on Windows named pipe: {}", pipe_name);
 
         loop {
@@ -213,14 +221,9 @@ impl IpcServer {
                     tracing::info!("Shutdown token cancelled; closing accept loop");
                     break;
                 }
-                res = server.connect() => {
+                res = listener.accept() => {
                     match res {
-                        Ok(()) => {
-                            let client = server;
-                            server = ServerOptions::new()
-                                .first_pipe_instance(false)
-                                .create(pipe_name)?;
-
+                        Ok(client) => {
                             let state = self.state.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = crate::connection::handle_connection(client, state).await {
@@ -230,9 +233,6 @@ impl IpcServer {
                         }
                         Err(e) => {
                             tracing::warn!("Named pipe accept error: {:?}", e);
-                            server = ServerOptions::new()
-                                .first_pipe_instance(false)
-                                .create(pipe_name)?;
                         }
                     }
                 }
@@ -243,9 +243,7 @@ impl IpcServer {
 
     #[cfg(unix)]
     pub async fn run_uds(&self, socket_path: &std::path::Path) -> Result<(), TransportError> {
-        use tokio::net::UnixListener;
-
-        let listener = UnixListener::bind(socket_path)?;
+        let listener = crate::unix::UnixSocketListener::bind(socket_path)?;
         tracing::info!("IpcServer listening on Unix socket: {:?}", socket_path);
 
         loop {
@@ -256,7 +254,7 @@ impl IpcServer {
                 }
                 res = listener.accept() => {
                     match res {
-                        Ok((stream, _)) => {
+                        Ok(stream) => {
                             let state = self.state.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = crate::connection::handle_connection(stream, state).await {

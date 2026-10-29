@@ -2088,6 +2088,19 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             new_state,
         }];
 
+        // If transitioning to terminal state, auto-cancel pending approvals for this task
+        if new_state.is_terminal() {
+            for approval in self.state.approvals.values() {
+                if approval.task_id == task_id && approval.state == ApprovalState::Pending {
+                    candidate_events.push(ControlPlaneEvent::ApprovalResolved {
+                        approval_id: approval.id,
+                        previous_state: ApprovalState::Pending,
+                        new_state: ApprovalState::Cancelled,
+                    });
+                }
+            }
+        }
+
         // If transitioning to Succeeded, unblock dependents whose prerequisites are now all satisfied
         if new_state == TaskState::Succeeded
             && let Ok(dependents) = self.state.task_graph.dependents_of(task_id)
@@ -2437,6 +2450,18 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .ok_or(ControlPlaneError::ApprovalNotFound(approval_id))?;
 
         approval.state.validate_transition_to(new_state)?;
+
+        if let Some(task) = self
+            .state
+            .task_graph
+            .get_task(approval.task_id)
+            .filter(|t| t.state.is_terminal())
+        {
+            return Err(ControlPlaneError::InvalidOperation(format!(
+                "Cannot resolve approval {} because associated task {} is in terminal state {:?}",
+                approval_id, approval.task_id, task.state
+            )));
+        }
 
         let previous_state = approval.state;
         let studio_id = approval.studio_id;
@@ -3730,6 +3755,14 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                     && !run.state.is_terminal()
                 {
                     runs.push(*run_id);
+                    for approval in self.state.approvals.values() {
+                        if approval.task_id == run.task_id
+                            && approval.agent_id == run.agent_id
+                            && approval.state == ApprovalState::Pending
+                        {
+                            approvals.push(approval.id);
+                        }
+                    }
                 }
             }
         }

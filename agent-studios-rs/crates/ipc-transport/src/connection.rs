@@ -424,6 +424,10 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::SubscribeEvents { from_sequence } => {
+                    for handle in subscription_handles.drain(..) {
+                        handle.abort();
+                    }
+
                     let mut broadcast_rx = server_state.broadcast_tx.subscribe();
                     let (backfill_result, max_buffered_seq) = {
                         let buffer = server_state.replay_buffer.lock().unwrap();
@@ -563,19 +567,13 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                         match resolution_result {
                             Ok(status) => {
-                                let next_seq = {
-                                    let buf = server_state.replay_buffer.lock().unwrap();
-                                    buf.latest_sequence().unwrap_or(0) + 1
-                                };
-                                let event = IpcEvent::new(
-                                    next_seq,
+                                let _ = server_state.emit_event(
                                     "approval_resolved",
                                     serde_json::json!({
                                         "approval_id": approval_id,
                                         "status": status,
                                     }),
                                 );
-                                let _ = server_state.publish_event(event);
 
                                 tx.send(IpcResponse::ApprovalResolved {
                                     approval_id,
