@@ -329,7 +329,10 @@ impl AgentRuntime for DeterministicLocalRuntime {
 pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>, ClientError> {
     match mode {
         RuntimeMode::Production => {
-            if let Ok(opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+            if let Ok(mut opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+                if let Some(catalog) = crate::embedded::load_catalog_snapshot_safe() {
+                    opencode = opencode.with_catalog(Arc::new(catalog));
+                }
                 let instances = opencode.discover().await.unwrap_or_default();
                 if instances
                     .iter()
@@ -358,7 +361,10 @@ pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>,
 #[allow(clippy::collapsible_if)]
 pub async fn discover_available_runtimes() -> Vec<DiscoveredRuntimeInstance> {
     let mut instances = Vec::new();
-    if let Ok(opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+    if let Ok(mut opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+        if let Some(catalog) = crate::embedded::load_catalog_snapshot_safe() {
+            opencode = opencode.with_catalog(Arc::new(catalog));
+        }
         if let Ok(found) = opencode.discover().await {
             instances.extend(found);
         }

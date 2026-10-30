@@ -29,27 +29,36 @@ fn test_loopback_url_verification() {
 #[test]
 fn test_provider_name_resolution() {
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("anthropic").unwrap()),
+        resolve_opencode_provider_name(&ProviderId::new("anthropic").unwrap(), None),
         "anthropic"
     );
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("claude-api").unwrap()),
+        resolve_opencode_provider_name(
+            &ProviderId::new("claude-api").unwrap(),
+            Some(&agent_studios_provider::ProtocolFamily::AnthropicMessages)
+        ),
         "anthropic"
     );
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("openai-global").unwrap()),
+        resolve_opencode_provider_name(
+            &ProviderId::new("openai-global").unwrap(),
+            Some(&agent_studios_provider::ProtocolFamily::OpenAiResponses)
+        ),
         "openai"
     );
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("google-gemini").unwrap()),
+        resolve_opencode_provider_name(
+            &ProviderId::new("google-gemini").unwrap(),
+            Some(&agent_studios_provider::ProtocolFamily::GeminiGenerateContent)
+        ),
         "google"
     );
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("openrouter-proxy").unwrap()),
+        resolve_opencode_provider_name(&ProviderId::new("openrouter").unwrap(), None),
         "openrouter"
     );
     assert_eq!(
-        resolve_opencode_provider_name(&ProviderId::new("ollama-local").unwrap()),
+        resolve_opencode_provider_name(&ProviderId::new("ollama").unwrap(), None),
         "ollama"
     );
 }

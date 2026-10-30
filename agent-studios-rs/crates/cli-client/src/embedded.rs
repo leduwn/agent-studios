@@ -317,6 +317,111 @@ impl EmbeddedClient {
     }
 }
 
+pub(crate) fn resolve_model_ref_from_options(
+    options: &GoalSubmissionOptions,
+) -> Option<agent_studios_provider::ModelRef> {
+    let catalog = load_catalog_snapshot_safe()?;
+
+    if let Some(ref model_input) = options.model {
+        let trimmed = model_input.trim();
+        if let Some((inst_str, model_str)) = trimmed.split_once('/') {
+            if let Ok(inst_id) = std::str::FromStr::from_str(inst_str)
+                && let Ok(mid) = agent_studios_provider::ModelId::new(model_str)
+                && catalog.get_model(&inst_id, &mid).is_some()
+            {
+                return Some(agent_studios_provider::ModelRef::new(inst_id, mid));
+            }
+
+            if let Ok(pid) = agent_studios_provider::ProviderId::new(inst_str.to_lowercase())
+                && let Ok(mid) = agent_studios_provider::ModelId::new(model_str)
+            {
+                if let Some(def_id) = catalog.get_default_instance_id_for_provider(&pid)
+                    && catalog.get_model(def_id, &mid).is_some()
+                {
+                    return Some(agent_studios_provider::ModelRef::new(*def_id, mid));
+                }
+                for inst in catalog.list_provider_instances() {
+                    if inst.provider_id == pid && catalog.get_model(&inst.id, &mid).is_some() {
+                        return Some(agent_studios_provider::ModelRef::new(inst.id, mid));
+                    }
+                }
+                if let Some(def_id) = catalog.get_default_instance_id_for_provider(&pid) {
+                    return Some(agent_studios_provider::ModelRef::new(*def_id, mid));
+                }
+                for inst in catalog.list_provider_instances() {
+                    if inst.provider_id == pid {
+                        return Some(agent_studios_provider::ModelRef::new(inst.id, mid));
+                    }
+                }
+            }
+        }
+
+        let provider_filter = options.provider.as_deref().map(|p| p.trim().to_lowercase());
+        if let Ok(mid) = agent_studios_provider::ModelId::new(trimmed) {
+            for inst in catalog.list_provider_instances() {
+                if let Some(ref pf) = provider_filter
+                    && inst.provider_id.as_str().to_lowercase() != *pf
+                {
+                    continue;
+                }
+                if catalog.get_model(&inst.id, &mid).is_some() {
+                    return Some(agent_studios_provider::ModelRef::new(inst.id, mid));
+                }
+            }
+        }
+    } else if let Some(ref prov_input) = options.provider {
+        let trimmed_lower = prov_input.trim().to_lowercase();
+        if let Ok(pid) = agent_studios_provider::ProviderId::new(trimmed_lower) {
+            let target_inst_id = catalog
+                .get_default_instance_id_for_provider(&pid)
+                .copied()
+                .or_else(|| {
+                    catalog
+                        .list_provider_instances()
+                        .into_iter()
+                        .find(|i| i.provider_id == pid)
+                        .map(|i| i.id)
+                });
+            if let Some(inst_id) = target_inst_id {
+                let models = catalog.models_for_provider_instance(&inst_id);
+                if let Some(first) = models.first() {
+                    return Some(agent_studios_provider::ModelRef::new(
+                        inst_id,
+                        first.id.clone(),
+                    ));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub(crate) fn load_catalog_snapshot_safe() -> Option<agent_studios_provider::ProviderCatalog> {
+    let path = if let Ok(h) = std::env::var("AGENT_STUDIOS_HOME") {
+        std::path::PathBuf::from(h.trim()).join("providers.json")
+    } else if let Ok(u) = std::env::var("USERPROFILE") {
+        std::path::PathBuf::from(u.trim())
+            .join(".agent-studios")
+            .join("providers.json")
+    } else if let Ok(h) = std::env::var("HOME") {
+        std::path::PathBuf::from(h.trim())
+            .join(".agent-studios")
+            .join("providers.json")
+    } else {
+        std::path::PathBuf::from(".agent-studios").join("providers.json")
+    };
+
+    if let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(snap) =
+            serde_json::from_str::<agent_studios_provider::ProviderCatalogSnapshot>(&content)
+        && let Ok(cat) = agent_studios_provider::ProviderCatalog::from_snapshot(snap)
+    {
+        return Some(cat);
+    }
+    Some(agent_studios_provider::ProviderCatalog::with_builtin_definitions())
+}
+
 fn is_terminal_event(event: &ControlPlaneEvent) -> bool {
     match event {
         ControlPlaneEvent::TaskStateChanged { new_state, .. } => new_state.is_terminal(),
@@ -756,10 +861,16 @@ impl AgentStudiosClient for EmbeddedClient {
             instance.instance_id,
         );
 
-        let start_req = RuntimeStartRequest::new(instance_ref, workspace)
+        let model_ref = resolve_model_ref_from_options(&options);
+
+        let mut start_req = RuntimeStartRequest::new(instance_ref, workspace)
             .with_workspace_access_mode(access_mode)
             .with_initial_prompt(prompt.to_string())
             .with_correlation(correlation);
+
+        if let Some(m_ref) = model_ref {
+            start_req = start_req.with_model_ref(m_ref);
+        }
 
         let handle = match self.runtime.start(start_req).await {
             Ok(h) => h,

@@ -44,6 +44,10 @@ pub const AVAILABLE_COMMANDS: &[SlashCommandItem] = &[
         description: "[Ready] Exit Agent Studios CLI",
     },
     SlashCommandItem {
+        command: "/providers",
+        description: "[Ready] Open Provider & Models management panel",
+    },
+    SlashCommandItem {
         command: "/diff",
         description: "[Planned] Review uncommitted changes in worktree",
     },

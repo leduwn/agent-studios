@@ -13,8 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 agent-studios-cli-client = { path = "../cli-client" }
+agent-studios-provider = { path = "../provider" }
 agent-studios-tui = { path = "../tui" }
 agent-studios-protocol = { path = "../protocol" }
+dirs = "6.0"
 clap = { workspace = true }
 crossterm = { workspace = true }
 unicode-segmentation = { workspace = true }

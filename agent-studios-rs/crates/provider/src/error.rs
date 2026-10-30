@@ -1,5 +1,6 @@
 use crate::id::{ModelId, ProviderId, ProviderInstanceId};
 use crate::protocol::ProtocolFamily;
+use crate::secret::SecretBackend;
 use thiserror::Error;
 
 /// Root error type for provider metadata, registry, and configuration operations.
@@ -76,4 +77,22 @@ pub enum ProviderError {
 
     #[error("Unsupported catalog schema version: {version} (supported: {supported})")]
     UnsupportedSchemaVersion { version: u32, supported: u32 },
+
+    #[error("Secret not found for locator: {0}")]
+    SecretNotFound(String),
+
+    #[error("Secret storage error: {0}")]
+    SecretStoreError(String),
+
+    #[error("Unsupported secret backend: {0}")]
+    UnsupportedSecretBackend(SecretBackend),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfiguration(String),
+
+    #[error("Import parse error: {0}")]
+    ImportParseError(String),
+
+    #[error("Import conflict: {0}")]
+    ImportConflict(String),
 }

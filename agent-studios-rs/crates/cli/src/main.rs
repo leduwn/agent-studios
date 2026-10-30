@@ -6,6 +6,8 @@
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 
+mod commands;
+mod config;
 mod doctor;
 use doctor::AgsDoctor;
 
@@ -43,6 +45,18 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage model provider families, instances, endpoints, and credentials
+    Provider {
+        #[command(subcommand)]
+        command: commands::provider::ProviderCommands,
+    },
+
+    /// Manage and inspect registered model catalog
+    Model {
+        #[command(subcommand)]
+        command: commands::model::ModelCommands,
+    },
 }
 
 #[tokio::main]
@@ -66,6 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     AgsDoctor::print_human_report(&report);
                 }
+                return Ok(());
+            }
+            Commands::Provider { command } => {
+                commands::provider::handle_provider_command(command).await?;
+                return Ok(());
+            }
+            Commands::Model { command } => {
+                commands::model::handle_model_command(command).await?;
                 return Ok(());
             }
         }

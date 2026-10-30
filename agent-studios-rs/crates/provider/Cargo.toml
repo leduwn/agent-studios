@@ -9,8 +9,23 @@ repository.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 thiserror = { workspace = true }
 url = { workspace = true }
+toml = "0.8"
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1.40", features = ["sync"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["linux-native-async-persistent"] }
 
 [dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1.40", features = ["full"] }
