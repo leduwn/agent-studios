@@ -96,7 +96,14 @@ describe('Real Rust Daemon (agsd) E2E Test Suite', function () {
     const uuid = crypto.randomUUID();
     pipeOrSocketPath = isWindows
       ? `\\\\.\\pipe\\ags-e2e-${uuid}`
-      : `/tmp/ags-e2e-${uuid}.sock`;
+      : path.join(tempDir, `ags-e2e-${uuid}.sock`);
+    if (!isWindows) {
+      try {
+        await fs.promises.chmod(tempDir, 0o700);
+      } catch {
+        // Ignore on platforms without chmod support
+      }
+    }
   });
 
   after(async () => {

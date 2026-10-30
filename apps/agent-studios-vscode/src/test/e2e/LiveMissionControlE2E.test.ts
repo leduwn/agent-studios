@@ -75,7 +75,14 @@ describe('Live Mission Control Data Projection E2E', () => {
     const uuid = crypto.randomUUID();
     pipeOrSocketPath = isWindows
       ? `\\\\.\\pipe\\ags-mc-e2e-${uuid}`
-      : `/tmp/ags-mc-e2e-${uuid}.sock`;
+      : path.join(tempDir, `ags-mc-e2e-${uuid}.sock`);
+    if (!isWindows) {
+      try {
+        await fs.promises.chmod(tempDir, 0o700);
+      } catch {
+        // Ignore
+      }
+    }
 
     const daemonScript = path.resolve(__dirname, 'StandaloneMockDaemon.js');
     assert.ok(fs.existsSync(daemonScript), `Mock daemon script must exist at ${daemonScript}`);
@@ -536,7 +543,14 @@ describe('Live Mission Control Data Projection E2E', () => {
     const realAdminRuntimePath = path.join(realTempDir, 'agsd-admin.json');
     const realPipeOrSocket = isWindows
       ? `\\\\.\\pipe\\ags-real-mc-${crypto.randomUUID()}`
-      : `/tmp/ags-real-mc-${crypto.randomUUID()}.sock`;
+      : path.join(realTempDir, `ags-real-mc-${crypto.randomUUID()}.sock`);
+    if (!isWindows) {
+      try {
+        await fs.promises.chmod(realTempDir, 0o700);
+      } catch {
+        // Ignore
+      }
+    }
 
     const realDaemon = childProcess.spawn(
       agsdBin,
