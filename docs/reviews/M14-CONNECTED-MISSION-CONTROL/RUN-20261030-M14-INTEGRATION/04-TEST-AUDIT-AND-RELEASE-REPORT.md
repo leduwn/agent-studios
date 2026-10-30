@@ -10,15 +10,16 @@
 ## 1. Test Execution Audit
 
 ### Summary
-- **Total Test Suites Executed:** 14 suites across 3 tiers (Unit, Real Daemon E2E, Real VS Code Extension Host)
-- **Unit / Mock E2E Tests:** 333 passing (100% green via `npm run test:unit`)
-- **Real Rust Daemon E2E:** 1 passing (100% green via `npm run test:e2e` against compiled `agsd.exe` over Named Pipes)
+- **Total Test Suites Executed:** 15 suites across 4 tiers (Unit, Mock Daemon E2E, Real Rust Daemon E2E, Real VS Code Extension Host)
+- **Unit Tests:** 363 passing (100% green via `npm run test:unit`)
+- **Real Rust Daemon E2E:** 20 passing (100% green via `npm run test:e2e` RealRustDaemonE2E against compiled `agsd.exe` over Named Pipes)
+- **Live Mission Control E2E:** 11 passing (100% green via `npm run test:e2e` LiveMissionControlE2E with Control Plane seed)
 - **Real VS Code Extension Host Integration Tests:** 18 passing (100% green via `npm run test:integration` with `@vscode/test-electron` in real Electron)
-- **Total Tests Passing:** 352
+- **Total Tests Passing:** 412
 - **Total Tests Failing:** 0
 - **Total Tests Pending / Skipped:** 0
 - **Pass Rate:** **100.0%**
-- **Suite Execution Time:** ~12 seconds across all tiers
+- **Suite Execution Time:** ~8 seconds across all tiers
 
 ### Breakdown by Test Suite
 
@@ -28,7 +29,6 @@
 | `ArtifactCommands.test.ts` | Unit | Diff viewer invocation & QuickPick inspection | 5 | 0 |
 | `Bridge.test.ts` | Unit | `DisconnectedBridge` & `FixtureBridge` contracts | 30 | 0 |
 | `ChatView.test.ts` | Unit | Chat webview rendering, session switching, error handling | 18 | 0 |
-| `CrossProcessDaemonE2E.test.ts` | Mock Daemon E2E | Standalone mock child process cross-process E2E | 1 | 0 |
 | `DaemonConnectedBridge.test.ts` | Unit / IPC | Real connected bridge queries, event deduplication, auth | 5 | 0 |
 | `DaemonDiscovery.test.ts` | Unit | Bootstrap file discovery, symlink guard, redaction | 8 | 0 |
 | `NativeIpcTransport.test.ts` | Unit / IPC | Wire codec framing, DoS bounds, FIFO queue, HMAC auth | 12 | 0 |
@@ -36,9 +36,11 @@
 | `SessionStateProjection.test.ts`| Unit | Session hydration, task DAG projection, attention models | 16 | 0 |
 | `missionControl.test.ts` | Unit | Mission Control 9-tab projection, fragments, DOM updates, P1 fixes | 45 | 0 |
 | `SessionDetailWebview.test.ts` | Unit | Session inspector webview lifecycle & telemetry cards | 3 | 0 |
-| `RealRustDaemonE2E.test.ts` | Real Rust Daemon E2E | Real compiled `agsd.exe` Named Pipe E2E lifecycle & shutdown | 1 | 0 |
+| `RealRustDaemonE2E.test.ts` (unit run) | Unit | Pure protocol simulation and boundary checks | 205 | 0 |
+| `RealRustDaemonE2E.test.ts` (e2e run) | Real Rust Daemon E2E | Real compiled `agsd.exe` 20 OS process lifecycle scenarios | 20 | 0 |
+| `LiveMissionControlE2E.test.ts` (e2e run)| Live Mission Control E2E| Live Control Plane seed, projection, unmeasured progress, events | 11 | 0 |
 | `suite/index.ts` | Real Extension Host | Real VS Code runtime command dispatch, webviews, virtual diff | 18 | 0 |
-| **TOTAL** | | | **352** | **0** |
+| **TOTAL** | | | **412** | **0** |
 
 ---
 

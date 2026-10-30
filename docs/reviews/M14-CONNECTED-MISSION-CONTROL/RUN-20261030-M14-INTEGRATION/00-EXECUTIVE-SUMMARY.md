@@ -28,8 +28,9 @@ The **Milestone M14 Integration Quality Gate** executes the authoritative end-to
 
 | Verification Dimension | Pre-Integration Baseline | M14 Integrated Delivery | Quality Gate Status |
 | :--- | :--- | :--- | :--- |
-| **Total Automated Tests** | 308 tests passing | **352 tests passing (100% green)** | **PASS (+44 tests)** |
-| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd.exe` E2E (Named Pipe)** | **PASS** |
+| **Total Automated Tests** | 308 tests passing | **412 tests passing (100% green)** | **PASS (+104 tests)** |
+| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd.exe` E2E (20 scenarios)** | **PASS** |
+| **Live Mission Control E2E** | None | **Live Control Plane projection (11 tests)** | **PASS** |
 | **Real VS Code Extension Host** | None | **18 Extension Host tests (Real Electron)** | **PASS** |
 | **P1 Fabricated Task Progress** | Hardcoded 50% on running tasks | **Eliminated (Explicit Indeterminate / 100%)** | **PASS** |
 | **P1 Fabricated Fleet Runtimes** | Fabricated 'codex-rs', fake models | **Truthful 'unspecified' fallback** | **PASS** |

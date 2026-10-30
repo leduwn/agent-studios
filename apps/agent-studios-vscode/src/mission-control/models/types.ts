@@ -3,7 +3,7 @@
  * Milestone M14 Mission Control Workbench
  */
 
-import { ConnectionState } from '../../bridge/types';
+import { ConnectionState, SessionInfo } from '../../bridge/types';
 
 export type MissionControlTabId =
   | 'overview'
@@ -200,6 +200,7 @@ export interface MissionControlState {
   isPreview: boolean;
   activeTab: MissionControlTabId;
   activeStudio: StudioSummary | null;
+  currentSession?: SessionInfo | null;
   overview: OverviewProjection;
   fleet: AgentFleetMember[];
   tasks: TaskLifecycleModel[];

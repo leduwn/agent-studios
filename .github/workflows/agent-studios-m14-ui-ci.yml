@@ -37,6 +37,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout pinned Rust backend (M13 IPC agsd)
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          git fetch --depth=1 --force origin 946643d90fa11c9361c04394eaff7f57f970ebcc:backend-pin || git fetch --depth=1 --force origin feat/m13-ipc-02-control-plane:backend-pin
+          rm -rf agent-studios-rs
+          git checkout backend-pin -- agent-studios-rs/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-studios-rs
+          key: 946643d90fa11c9361c04394eaff7f57f970ebcc
+
+      - name: Build agsd native daemon
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          cargo build --manifest-path agent-studios-rs/Cargo.toml --bin agsd -p agent-studios-ipc-transport
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            test -f "agent-studios-rs/target/debug/agsd.exe" || { echo "::error::agsd.exe not found"; exit 1; }
+            echo "AGSD_BIN_PATH=${{ github.workspace }}\\agent-studios-rs\\target\\debug\\agsd.exe" >> "$GITHUB_ENV"
+          else
+            test -f "agent-studios-rs/target/debug/agsd" || { echo "::error::agsd not found"; exit 1; }
+            chmod +x "agent-studios-rs/target/debug/agsd"
+            echo "AGSD_BIN_PATH=${{ github.workspace }}/agent-studios-rs/target/debug/agsd" >> "$GITHUB_ENV"
+          fi
+
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -58,6 +89,18 @@ jobs:
 
       - name: Run pure unit test suite
         run: npm run test:unit
+
+      - name: Run real daemon E2E tests (Linux)
+        if: runner.os == 'Linux'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}/agent-studios-rs/target/debug/agsd
+        run: npm run test:e2e
+
+      - name: Run real daemon E2E tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}\agent-studios-rs\target\debug\agsd.exe
+        run: npm run test:e2e
 
       - name: Run VS Code extension host integration tests (Linux)
         if: runner.os == 'Linux'

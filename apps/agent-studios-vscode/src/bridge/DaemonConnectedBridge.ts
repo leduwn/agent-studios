@@ -312,6 +312,13 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
+   * Returns tracked timeline events from daemon event stream.
+   */
+  public listTimelineEvents(): TimelineEvent[] {
+    return [...this._eventBuffer];
+  }
+
+  /**
    * Lists providers and their model descriptors from daemon.
    * Strips all internal secrets or credentials before returning.
    */

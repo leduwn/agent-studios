@@ -29,6 +29,7 @@ import {
   ProviderUsageSummary,
   AttentionItem,
   QueryErrors,
+  TimelineEventRecord,
 } from '../models/types';
 import { createPreviewMissionControlState } from '../fixtures/missionControlFixtures';
 
@@ -41,6 +42,7 @@ export class MissionControlProjection implements vscode.Disposable {
   private _selectedAgentId?: string;
   private _selectedTaskId?: string;
   private _selectedRunId?: string;
+  private readonly _timelineEvents: TimelineEventRecord[] = [];
 
   private _disposables: vscode.Disposable[] = [];
   private _bridgeSubscriptions: vscode.Disposable[] = [];
@@ -115,6 +117,28 @@ export class MissionControlProjection implements vscode.Disposable {
     }
 
     const isConnectedBridge = bridge instanceof DaemonConnectedBridge;
+
+    if (bridge && typeof (bridge as unknown as { listTimelineEvents?: () => TimelineEvent[] }).listTimelineEvents === 'function') {
+      try {
+        const bridgeEvents = (bridge as unknown as { listTimelineEvents: () => TimelineEvent[] }).listTimelineEvents();
+        for (const ev of bridgeEvents) {
+          const rec: TimelineEventRecord = {
+            sequence: ev.sequenceNumber,
+            timestamp: new Date(ev.timestamp).toISOString(),
+            type: ev.type,
+            taskId: ev.taskId,
+            agentId: ev.agentName,
+            summary: ev.summary,
+            details: ev.details,
+          };
+          if (!this._timelineEvents.some((e) => e.sequence === rec.sequence && rec.sequence > 0)) {
+            this._timelineEvents.push(rec);
+          }
+        }
+      } catch {
+        // Safe ignore
+      }
+    }
 
     try {
       const [
@@ -206,6 +230,7 @@ export class MissionControlProjection implements vscode.Disposable {
       isPreview: false,
       activeTab: this._activeTab,
       activeStudio: null,
+      currentSession: null,
       overview: {
         activeAgentCount: 0,
         totalAgentsCount: 0,
@@ -231,13 +256,13 @@ export class MissionControlProjection implements vscode.Disposable {
             timestamp: Date.now(),
           },
         ],
-        recentEvents: [],
+        recentEvents: [...this._timelineEvents].slice(-10).reverse(),
         activeRunCount: 0,
       },
       fleet: [],
       tasks: [],
       runs: [],
-      timeline: [],
+      timeline: [...this._timelineEvents],
       artifacts: [],
       approvals: [],
       providers: [],
@@ -301,7 +326,12 @@ export class MissionControlProjection implements vscode.Disposable {
         assignedAgentName: t.assignedAgentName,
         createdAt: new Date(t.createdAt || Date.now()).toISOString(),
         updatedAt: new Date(t.updatedAt || Date.now()).toISOString(),
-        progress: t.progress,
+        progress:
+          state === 'succeeded'
+            ? (t.progress !== undefined ? t.progress : 100)
+            : state === 'running'
+            ? undefined
+            : t.progress,
         error: t.error,
       };
     });
@@ -410,6 +440,53 @@ export class MissionControlProjection implements vscode.Disposable {
       });
     }
 
+    // Event subscription updates attention queue when events warrant attention
+    for (const evt of this._timelineEvents) {
+      if (evt.type === 'task_failed') {
+        const id = `att-evt-task-failed-${evt.sequence}`;
+        if (!attentionItems.some((a) => a.id === id || (evt.taskId && a.targetId === evt.taskId))) {
+          attentionItems.push({
+            id,
+            severity: 'error',
+            title: `Task Failed Alert: ${evt.summary}`,
+            description: (evt.details?.error as string) || evt.summary,
+            targetTab: 'tasks',
+            targetId: evt.taskId,
+            timestamp: new Date(evt.timestamp).getTime() || Date.now(),
+          });
+        }
+      } else if (evt.type === 'approval_requested') {
+        const id = `att-evt-appr-${evt.sequence}`;
+        if (!attentionItems.some((a) => a.id === id)) {
+          attentionItems.push({
+            id,
+            severity: 'warning',
+            title: `Approval Required: ${evt.summary}`,
+            description: (evt.details?.description as string) || evt.summary,
+            targetTab: 'approvals',
+            timestamp: new Date(evt.timestamp).getTime() || Date.now(),
+          });
+        }
+      } else if (
+        evt.details &&
+        (evt.details.severity === 'warning' ||
+          evt.details.severity === 'error' ||
+          evt.details.severity === 'critical')
+      ) {
+        const id = `att-evt-${evt.sequence}`;
+        if (!attentionItems.some((a) => a.id === id)) {
+          attentionItems.push({
+            id,
+            severity: evt.details.severity as AttentionItem['severity'],
+            title: (evt.details.title as string) || evt.summary,
+            description: (evt.details.description as string) || evt.summary,
+            targetTab: (evt.details.targetTab as MissionControlTabId) || 'overview',
+            timestamp: new Date(evt.timestamp).getTime() || Date.now(),
+          });
+        }
+      }
+    }
+
     // Read real diagnostic telemetry from bridge/transport/health
     const bridge = this._bridgeManager.bridge;
     let endpoint = 'ipc://agent-studios.sock';
@@ -447,18 +524,19 @@ export class MissionControlProjection implements vscode.Disposable {
             runStatus: session.status === 'running' ? 'running' : 'idle',
           }
         : null,
+      currentSession: session,
       overview: {
         activeAgentCount: fleet.filter((a) => a.status === 'running').length,
         totalAgentsCount: fleet.length,
         taskCounts,
         attentionItems,
-        recentEvents: [],
+        recentEvents: [...this._timelineEvents].slice(-10).reverse(),
         activeRunCount: mappedTasks.filter((t) => t.state === 'running').length,
       },
       fleet,
       tasks: mappedTasks,
       runs: [],
-      timeline: [],
+      timeline: [...this._timelineEvents],
       artifacts: mappedArtifacts,
       approvals: mappedApprovals,
       providers: mappedProviders,
@@ -510,8 +588,8 @@ export class MissionControlProjection implements vscode.Disposable {
     const bridge = this._bridgeManager.bridge;
 
     try {
-      const eventDisp = bridge.onEvent((_event: TimelineEvent) => {
-        this.refresh();
+      const eventDisp = bridge.onEvent((event: TimelineEvent) => {
+        this.handleIncomingTimelineEvent(event);
       });
       if (eventDisp && typeof eventDisp.dispose === 'function') {
         this._bridgeSubscriptions.push(eventDisp);
@@ -530,6 +608,25 @@ export class MissionControlProjection implements vscode.Disposable {
     } catch {
       // Safe ignore
     }
+  }
+
+  private handleIncomingTimelineEvent(event: TimelineEvent): void {
+    const record: TimelineEventRecord = {
+      sequence: event.sequenceNumber,
+      timestamp: new Date(event.timestamp).toISOString(),
+      type: event.type,
+      taskId: event.taskId,
+      agentId: event.agentName,
+      summary: event.summary,
+      details: event.details,
+    };
+    if (!this._timelineEvents.some((e) => e.sequence === record.sequence && record.sequence > 0)) {
+      this._timelineEvents.push(record);
+      if (this._timelineEvents.length > 500) {
+        this._timelineEvents.shift();
+      }
+    }
+    this.refresh();
   }
 
   public dispose(): void {
