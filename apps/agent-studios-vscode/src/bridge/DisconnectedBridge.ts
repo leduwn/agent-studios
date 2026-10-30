@@ -9,11 +9,15 @@ import {
   ApprovalDecisionResult,
   ApprovalRequest,
   Artifact,
+  ChatMessage,
+  ChatSendRequest,
+  ChatStreamChunk,
   ConnectionState,
   EditorActionRequest,
   EditorActionResult,
   ProviderSummary,
   SessionInfo,
+  SessionSummary,
   TaskGraph,
   TaskNode,
   TimelineEvent,
@@ -81,6 +85,35 @@ export class DisconnectedBridge implements AgentStudiosBridge {
   public async submitEditorAction(_action: EditorActionRequest): Promise<EditorActionResult> {
     throw new BridgeDisconnectedError(
       'Cannot submit editor action: Agent Studios daemon bridge is disconnected.'
+    );
+  }
+
+  public async sendMessage(
+    _request: ChatSendRequest,
+    _onChunk: (chunk: ChatStreamChunk) => void
+  ): Promise<ChatMessage> {
+    throw new BridgeDisconnectedError(
+      'Cannot send chat message: Agent Studios daemon bridge is disconnected.'
+    );
+  }
+
+  public async cancelCurrentRun(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public async listSessions(): Promise<SessionSummary[]> {
+    return [];
+  }
+
+  public async createSession(_goal?: string): Promise<SessionInfo> {
+    throw new BridgeDisconnectedError(
+      'Cannot create session: Agent Studios daemon bridge is disconnected.'
+    );
+  }
+
+  public async switchSession(_sessionId: string): Promise<SessionInfo> {
+    throw new BridgeDisconnectedError(
+      'Cannot switch session: Agent Studios daemon bridge is disconnected.'
     );
   }
 

@@ -4,6 +4,11 @@
   "description": "Code-OSS native AI Agents Workbench extension for Agent Studios",
   "version": "0.1.0",
   "publisher": "agent-studios",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leduwn/agent-studios.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -14,6 +19,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onView:agent-studios.chat",
     "onView:agent-studios.session",
     "onView:agent-studios.tasks",
     "onView:agent-studios.approvals",
@@ -33,6 +39,11 @@
     },
     "views": {
       "agent-studios-activitybar": [
+        {
+          "type": "webview",
+          "id": "agent-studios.chat",
+          "name": "Chat & Assistant"
+        },
         {
           "id": "agent-studios.session",
           "name": "Current Session"
@@ -229,7 +240,8 @@
     "typecheck": "tsc --noEmit -p ./",
     "lint": "eslint src --ext ts",
     "test": "node out/test/unit/runner.js",
-    "test:unit": "node out/test/unit/runner.js"
+    "test:unit": "node out/test/unit/runner.js",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.7",
@@ -237,6 +249,7 @@
     "@types/vscode": "^1.90.0",
     "@typescript-eslint/eslint-plugin": "^7.15.0",
     "@typescript-eslint/parser": "^7.15.0",
+    "@vscode/vsce": "^4.1.0",
     "eslint": "^8.57.0",
     "mocha": "^10.7.3",
     "typescript": "^5.5.3"

@@ -110,6 +110,7 @@ export enum MockViewColumn {
 export class MockWebview {
   public cspSource = 'https://*.vscode-cdn.net';
   public html = '';
+  public options: Record<string, unknown> = {};
   public readonly _messageEmitter = new MockEventEmitter<unknown>();
   public readonly _sentMessages: unknown[] = [];
 
@@ -118,6 +119,35 @@ export class MockWebview {
   public async postMessage(message: unknown): Promise<boolean> {
     this._sentMessages.push(message);
     return true;
+  }
+}
+
+export class MockWebviewView {
+  public readonly webview = new MockWebview();
+  public visible = true;
+  public title?: string;
+  public description?: string;
+  public badge?: unknown;
+  private readonly _visibilityEmitter = new MockEventEmitter<void>();
+  public readonly onDidChangeVisibility = this._visibilityEmitter.event;
+  private readonly _disposeEmitter = new MockEventEmitter<void>();
+  public readonly onDidDispose = this._disposeEmitter.event;
+
+  constructor(public readonly viewType: string) {}
+
+  public show(_preserveFocus?: boolean): void {
+    this.visible = true;
+    this._visibilityEmitter.fire();
+  }
+
+  public setVisible(visible: boolean): void {
+    this.visible = visible;
+    this._visibilityEmitter.fire();
+  }
+
+  public dispose(): void {
+    this.visible = false;
+    this._disposeEmitter.fire();
   }
 }
 
@@ -219,7 +249,68 @@ export interface RegisteredCommand {
 }
 
 export const registeredCommands = new Map<string, (...args: unknown[]) => unknown>();
+export const registeredWebviewViewProviders = new Map<string, unknown>();
 export const executedCommands: Array<{ command: string; args: unknown[] }> = [];
+
+export enum MockDiagnosticSeverity {
+  Error = 0,
+  Warning = 1,
+  Information = 2,
+  Hint = 3,
+}
+
+export class MockPosition {
+  constructor(public readonly line: number, public readonly character: number) {}
+}
+
+export class MockRange {
+  public readonly start: MockPosition;
+  public readonly end: MockPosition;
+
+  constructor(startLine: number, startChar: number, endLine: number, endChar: number);
+  constructor(start: MockPosition, end: MockPosition);
+  constructor(
+    startOrLine: number | MockPosition,
+    startCharOrEnd: number | MockPosition,
+    endLine?: number,
+    endChar?: number
+  ) {
+    if (typeof startOrLine === 'number') {
+      this.start = new MockPosition(startOrLine, startCharOrEnd as number);
+      this.end = new MockPosition(endLine ?? startOrLine, endChar ?? (startCharOrEnd as number));
+    } else {
+      this.start = startOrLine;
+      this.end = startCharOrEnd as MockPosition;
+    }
+  }
+
+  public get isEmpty(): boolean {
+    return this.start.line === this.end.line && this.start.character === this.end.character;
+  }
+}
+
+export class MockSelection extends MockRange {
+  public readonly anchor: MockPosition;
+  public readonly active: MockPosition;
+
+  constructor(anchorLine: number, anchorChar: number, activeLine: number, activeChar: number) {
+    super(anchorLine, anchorChar, activeLine, activeChar);
+    this.anchor = this.start;
+    this.active = this.end;
+  }
+}
+
+export class MockDiagnostic {
+  constructor(
+    public range: MockRange,
+    public message: string,
+    public severity: MockDiagnosticSeverity = MockDiagnosticSeverity.Error,
+    public source?: string
+  ) {}
+}
+
+export const mockWorkspaceFindFilesResult: MockUri[] = [];
+export const mockDiagnosticsList: MockDiagnostic[] = [];
 
 export const mockWindowMessages = {
   info: [] as string[],
@@ -227,16 +318,22 @@ export const mockWindowMessages = {
   error: [] as string[],
   modalWarningResponse: undefined as string | undefined,
   quickPickSelection: undefined as unknown,
+  openDialogResult: undefined as MockUri[] | undefined,
 };
 
 export function resetMockState(): void {
   registeredCommands.clear();
+  registeredWebviewViewProviders.clear();
   executedCommands.length = 0;
   mockWindowMessages.info.length = 0;
   mockWindowMessages.warning.length = 0;
   mockWindowMessages.error.length = 0;
   mockWindowMessages.modalWarningResponse = undefined;
   mockWindowMessages.quickPickSelection = undefined;
+  mockWindowMessages.openDialogResult = undefined;
+  mockWorkspaceFindFilesResult.length = 0;
+  mockDiagnosticsList.length = 0;
+  vscodeMock.window.activeTextEditor = undefined;
 }
 
 export const vscodeMock = {
@@ -249,6 +346,16 @@ export const vscodeMock = {
   FileType: MockFileType,
   ViewColumn: MockViewColumn,
   Uri: MockUri,
+  Position: MockPosition,
+  Range: MockRange,
+  Selection: MockSelection,
+  Diagnostic: MockDiagnostic,
+  DiagnosticSeverity: MockDiagnosticSeverity,
+  languages: {
+    getDiagnostics: (_uri?: unknown): MockDiagnostic[] => {
+      return [...mockDiagnosticsList];
+    },
+  },
   commands: {
     registerCommand: (command: string, callback: (...args: unknown[]) => unknown): MockDisposable => {
       registeredCommands.set(command, callback);
@@ -266,6 +373,7 @@ export const vscodeMock = {
     },
   },
   window: {
+    activeTextEditor: undefined as unknown,
     showInformationMessage: async (message: string): Promise<string | undefined> => {
       mockWindowMessages.info.push(message);
       return message;
@@ -297,6 +405,19 @@ export const vscodeMock = {
     showTextDocument: async (doc: unknown): Promise<unknown> => {
       return { document: doc };
     },
+    showOpenDialog: async (_options?: unknown): Promise<MockUri[] | undefined> => {
+      return mockWindowMessages.openDialogResult;
+    },
+    registerWebviewViewProvider: (
+      viewId: string,
+      provider: unknown,
+      _options?: unknown
+    ): MockDisposable => {
+      registeredWebviewViewProviders.set(viewId, provider);
+      return new MockDisposable(() => {
+        registeredWebviewViewProviders.delete(viewId);
+      });
+    },
     createWebviewPanel: (
       viewType: string,
       title: string,
@@ -308,6 +429,22 @@ export const vscodeMock = {
   },
   workspace: {
     workspaceFolders: [] as Array<{ uri: MockUri; name: string }>,
+    asRelativePath: (pathOrUri: string | MockUri, _includeWorkspaceFolder?: boolean): string => {
+      const p = typeof pathOrUri === 'string' ? pathOrUri : (pathOrUri.fsPath || pathOrUri.path);
+      const normalized = p.replace(/\\/g, '/');
+      const match = normalized.match(/(?:apps\/agent-studios-vscode\/|workspace\/)(.*)$/);
+      if (match) {
+        return match[1];
+      }
+      return normalized.replace(/^\/+/, '');
+    },
+    findFiles: async (
+      _include: unknown,
+      _exclude?: unknown,
+      _maxResults?: number
+    ): Promise<MockUri[]> => {
+      return [...mockWorkspaceFindFilesResult];
+    },
     fs: {
       stat: async (_uri: MockUri): Promise<{ type: MockFileType; size: number }> => {
         return { type: MockFileType.File, size: 100 };

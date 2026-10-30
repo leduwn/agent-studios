@@ -259,4 +259,90 @@ describe('SessionStateProjection Pure Unit Tests', () => {
     assert.strictEqual(approvedItem?.status, 'approved');
     assert.strictEqual(projection.pendingApprovals.length, 0);
   });
+
+  it('manages chat messages and fires chat message events', () => {
+    const addedMessages: string[] = [];
+    const updatedMessages: string[] = [];
+
+    const sub1 = projection.onChatMessageAdded((m) => addedMessages.push(m.id));
+    const sub2 = projection.onChatMessageUpdated((m) => updatedMessages.push(m.id));
+
+    projection.addChatMessage({
+      id: 'msg-1',
+      role: 'user',
+      content: 'Fix the bug',
+      timestamp: Date.now(),
+      mode: 'agent',
+    });
+
+    assert.strictEqual(projection.chatMessages.length, 1);
+    assert.strictEqual(projection.chatMessages[0].content, 'Fix the bug');
+    assert.strictEqual(addedMessages.length, 1);
+    assert.strictEqual(addedMessages[0], 'msg-1');
+
+    projection.updateChatMessage('msg-1', { content: 'Fix the bug now', isStreaming: true });
+    assert.strictEqual(projection.chatMessages[0].content, 'Fix the bug now');
+    assert.strictEqual(projection.chatMessages[0].isStreaming, true);
+    assert.strictEqual(updatedMessages.length, 1);
+    assert.strictEqual(updatedMessages[0], 'msg-1');
+
+    projection.setChatMessages([
+      { id: 'm-a', role: 'user', content: 'A', timestamp: 1 },
+      { id: 'm-b', role: 'assistant', content: 'B', timestamp: 2 },
+    ]);
+    assert.strictEqual(projection.chatMessages.length, 2);
+
+    projection.clearChatMessages();
+    assert.strictEqual(projection.chatMessages.length, 0);
+
+    sub1.dispose();
+    sub2.dispose();
+  });
+
+  it('tracks active session and fires onSessionSwitched and onSessionChanged', async () => {
+    await projection.initializeFromBridge();
+    assert.strictEqual(projection.activeSessionId, 'session-m14-fixture');
+
+    const switchedSessions: (string | undefined)[] = [];
+    const changedSessions: (string | undefined)[] = [];
+
+    const sub1 = projection.onSessionSwitched((s) => switchedSessions.push(s?.id));
+    const sub2 = projection.onSessionChanged((s) => changedSessions.push(s?.id));
+
+    const newMockSession = {
+      id: 'session-switched-test',
+      workspacePath: '/test',
+      goalSummary: 'Test goal',
+      status: 'idle' as const,
+      activeAgentCount: 0,
+      totalAgentCount: 0,
+      completedTasksCount: 0,
+      totalTasksCount: 0,
+      startedAt: Date.now(),
+      elapsedMs: 0,
+    };
+
+    projection.switchSession(newMockSession);
+
+    assert.strictEqual(projection.activeSessionId, 'session-switched-test');
+    assert.strictEqual(projection.session?.id, 'session-switched-test');
+    assert.strictEqual(switchedSessions.length, 1);
+    assert.strictEqual(switchedSessions[0], 'session-switched-test');
+    assert.strictEqual(changedSessions.length, 1);
+    assert.strictEqual(changedSessions[0], 'session-switched-test');
+
+    sub1.dispose();
+    sub2.dispose();
+  });
+
+  it('cleans up chat messages and activeSessionId on disposal', async () => {
+    await projection.initializeFromBridge();
+    assert.ok(projection.activeSessionId !== null);
+    assert.ok(projection.chatMessages.length > 0);
+
+    projection.dispose();
+
+    assert.strictEqual(projection.activeSessionId, null);
+    assert.strictEqual(projection.chatMessages.length, 0);
+  });
 });

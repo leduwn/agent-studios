@@ -190,3 +190,100 @@ export interface EditorActionResult {
   taskId?: TaskId;
   message: string;
 }
+
+export type AgentMode = 'ask' | 'plan' | 'agent';
+
+export interface ContextAttachment {
+  type: 'file' | 'selection' | 'diagnostic';
+  uri: string;
+  relativePath: string;
+  selectionRange?: {
+    startLine: number;
+    endLine: number;
+  };
+  contentSnippet?: string;
+  languageId?: string;
+}
+
+export type ChatMessageRole = 'user' | 'assistant' | 'system';
+
+export interface ToolCallInfo {
+  id: string;
+  name: string;
+  status: 'running' | 'completed' | 'failed';
+  target?: string;
+  inputSummary?: string;
+  outputSummary?: string;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatMessageRole;
+  content: string;
+  timestamp: number;
+  mode?: AgentMode;
+  attachments?: ContextAttachment[];
+  toolCalls?: ToolCallInfo[];
+  approvalId?: string;
+  isStreaming?: boolean;
+}
+
+export interface ChatSendRequest {
+  message: string;
+  mode: AgentMode;
+  providerInstanceId?: string;
+  modelId?: string;
+  attachments?: ContextAttachment[];
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  updatedAt: number;
+  isPreview?: boolean;
+}
+
+import type { AgentStudiosBridge } from './AgentStudiosBridge';
+
+export interface ChatStreamChunk {
+  type: 'text_delta' | 'tool_call' | 'approval_required' | 'task_progress' | 'done' | 'error';
+  text?: string;
+  toolCall?: ToolCallInfo;
+  approval?: ApprovalRequest;
+  taskSummary?: string;
+  error?: string;
+}
+
+export interface SlashCommandContext {
+  bridge: AgentStudiosBridge;
+  clearHistory?: () => Promise<void> | void;
+  setMode?: (mode: AgentMode) => void;
+  activeEditorContext?: ContextAttachment | null;
+  captureActiveEditorContext?: () => Promise<ContextAttachment | null>;
+  switchSession?: (sessionId: string) => Promise<void>;
+  currentSessionId?: string;
+  workspaceRoot?: string;
+}
+
+export interface SlashCommandResult {
+  success: boolean;
+  message?: string;
+  markdown?: string;
+  mode?: AgentMode;
+  formattedPrompt?: string;
+  unsupported?: boolean;
+  actionTaken?: string;
+  data?: unknown;
+}
+
+export interface SlashCommandDescriptor {
+  name: string;
+  description: string;
+  execute: (args: string, context: SlashCommandContext) => Promise<SlashCommandResult>;
+}
+
+export type SlashCommand = SlashCommandDescriptor;
+

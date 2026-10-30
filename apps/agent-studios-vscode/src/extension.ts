@@ -25,6 +25,7 @@ import {
 } from './views';
 import { SessionDetailWebview } from './webviews/SessionDetailWebview';
 import { TaskGraphWebview } from './webviews/TaskGraphWebview';
+import { ChatWebviewViewProvider } from './chat/ChatWebviewViewProvider';
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -61,6 +62,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.registerTreeDataProvider('agent-studios.artifacts', artifactsView),
     vscode.window.registerTreeDataProvider('agent-studios.timeline', timelineView),
     vscode.window.registerTreeDataProvider('agent-studios.providers', providersView)
+  );
+
+  // 2b. Register Chat & Assistant WebviewView provider
+  const chatProvider = new ChatWebviewViewProvider(context.extensionUri, bridgeManager);
+  context.subscriptions.push(
+    chatProvider,
+    vscode.window.registerWebviewViewProvider(ChatWebviewViewProvider.viewType, chatProvider)
   );
 
   const views: ViewProviders = {
@@ -117,6 +125,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     getArtifactDiff: (id: string) => bridgeManager.bridge.getArtifactDiff(id),
     listProviderSummaries: () => bridgeManager.bridge.listProviderSummaries(),
     submitEditorAction: (action) => bridgeManager.bridge.submitEditorAction(action),
+    sendMessage: (request, onChunk) => bridgeManager.bridge.sendMessage(request, onChunk),
+    cancelCurrentRun: () => bridgeManager.bridge.cancelCurrentRun(),
+    listSessions: () => bridgeManager.bridge.listSessions(),
+    createSession: (goal) => bridgeManager.bridge.createSession(goal),
+    switchSession: (sessionId) => bridgeManager.bridge.switchSession(sessionId),
     dispose: () => {},
   };
 

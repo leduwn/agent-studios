@@ -58,3 +58,6 @@ jobs:
 
       - name: Run pure unit test suite
         run: npm test
+
+      - name: Validate VSIX packaging
+        run: npx vsce package --no-dependencies

@@ -9,14 +9,19 @@ import {
   ApprovalDecisionResult,
   ApprovalRequest,
   Artifact,
+  ChatMessage,
+  ChatSendRequest,
+  ChatStreamChunk,
   ConnectionState,
   EditorActionRequest,
   EditorActionResult,
   ProviderSummary,
   SessionInfo,
+  SessionSummary,
   TaskGraph,
   TaskNode,
   TimelineEvent,
+  ToolCallInfo,
 } from './types';
 
 /**
@@ -33,21 +38,65 @@ export class FixtureBridge implements AgentStudiosBridge {
   private readonly _onEvent = new vscode.EventEmitter<TimelineEvent>();
   public readonly onEvent: vscode.Event<TimelineEvent> = this._onEvent.event;
 
-  private _session: SessionInfo = {
-    id: 'session-m14-fixture',
-    workspacePath: 'd:/Projects/agent-studios-ide-ui/apps/agent-studios-vscode',
-    goalSummary: 'Implement Code-OSS native agents workbench UI with progressive disclosure',
-    status: 'running',
-    activeRunId: 'run-m14-001',
-    activeAgentCount: 2,
-    totalAgentCount: 2,
-    completedTasksCount: 3,
-    totalTasksCount: 5,
-    providerSummary: 'Anthropic Claude 3.5 Sonnet',
-    startedAt: 1716000000000,
-    elapsedMs: 360000,
-    isPreview: true,
-  };
+  private _sessions: SessionInfo[] = [
+    {
+      id: 'session-m14-fixture',
+      workspacePath: 'd:/Projects/agent-studios-ide-ui/apps/agent-studios-vscode',
+      goalSummary: 'Implement Code-OSS native agents workbench UI with progressive disclosure',
+      status: 'running',
+      activeRunId: 'run-m14-001',
+      activeAgentCount: 2,
+      totalAgentCount: 2,
+      completedTasksCount: 3,
+      totalTasksCount: 5,
+      providerSummary: 'Anthropic Claude 3.5 Sonnet',
+      startedAt: 1716000000000,
+      elapsedMs: 360000,
+      isPreview: true,
+    },
+    {
+      id: 'session-m13-refactor',
+      workspacePath: 'd:/Projects/agent-studios-ide-ui/apps/agent-studios-vscode',
+      goalSummary: 'Refactor bridge interfaces and add state projection unit tests',
+      status: 'completed',
+      activeAgentCount: 0,
+      totalAgentCount: 1,
+      completedTasksCount: 4,
+      totalTasksCount: 4,
+      providerSummary: 'Anthropic Claude 3.5 Sonnet',
+      startedAt: 1715900000000,
+      elapsedMs: 720000,
+      isPreview: true,
+    },
+    {
+      id: 'session-m12-dag-layout',
+      workspacePath: 'd:/Projects/agent-studios-ide-ui/apps/agent-studios-vscode',
+      goalSummary: 'Implement DAG cycle detection and topological layout algorithms',
+      status: 'completed',
+      activeAgentCount: 0,
+      totalAgentCount: 1,
+      completedTasksCount: 6,
+      totalTasksCount: 6,
+      providerSummary: 'OpenAI GPT-4o',
+      startedAt: 1715800000000,
+      elapsedMs: 540000,
+      isPreview: true,
+    },
+  ];
+
+  private _session: SessionInfo = this._sessions[0];
+
+  private _chatMessages: ChatMessage[] = [
+    {
+      id: 'msg-preview-001',
+      role: 'assistant',
+      content: 'Welcome to Agent Studios! I am your AI coding assistant in developer preview mode.',
+      timestamp: 1716000000000,
+      mode: 'ask',
+    },
+  ];
+
+  private _isCancelled: boolean = false;
 
   private _tasks: TaskNode[] = [
     {
@@ -472,6 +521,277 @@ export class FixtureBridge implements AgentStudiosBridge {
       taskId: newTaskId,
       message: `Editor action '${action.action}' accepted and scheduled as ${newTaskId}.`,
     };
+  }
+
+  public get chatMessages(): ChatMessage[] {
+    return this._chatMessages.map(m => ({ ...m }));
+  }
+
+  public async sendMessage(
+    request: ChatSendRequest,
+    onChunk: (chunk: ChatStreamChunk) => void
+  ): Promise<ChatMessage> {
+    this._isCancelled = false;
+
+    // 1. Record user message
+    const userMsg: ChatMessage = {
+      id: `msg-user-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      role: 'user',
+      content: request.message,
+      timestamp: Date.now(),
+      mode: request.mode,
+      attachments: request.attachments ? [...request.attachments] : undefined,
+    };
+    this._chatMessages.push(userMsg);
+
+    const asstMsgId = `msg-asst-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const toolCalls: ToolCallInfo[] = [];
+    let fullContent = '';
+    let approvalId: string | undefined;
+
+    const emitDelta = async (text: string): Promise<boolean> => {
+      if (this._isCancelled) {
+        return false;
+      }
+      fullContent += text;
+      onChunk({ type: 'text_delta', text });
+      await Promise.resolve();
+      return true;
+    };
+
+    const emitToolCall = async (toolCall: ToolCallInfo): Promise<boolean> => {
+      if (this._isCancelled) {
+        return false;
+      }
+      const existingIdx = toolCalls.findIndex(t => t.id === toolCall.id);
+      if (existingIdx >= 0) {
+        toolCalls[existingIdx] = { ...toolCall };
+      } else {
+        toolCalls.push({ ...toolCall });
+      }
+      onChunk({ type: 'tool_call', toolCall: { ...toolCall } });
+      await Promise.resolve();
+      return true;
+    };
+
+    const emitTaskProgress = async (taskSummary: string): Promise<boolean> => {
+      if (this._isCancelled) {
+        return false;
+      }
+      onChunk({ type: 'task_progress', taskSummary });
+      await Promise.resolve();
+      return true;
+    };
+
+    if (request.mode === 'ask') {
+      const tool1: ToolCallInfo = {
+        id: `call-read-${Date.now()}`,
+        name: 'read_file',
+        status: 'running',
+        target: request.attachments?.[0]?.relativePath ?? 'src/bridge/types.ts',
+        inputSummary: `Reading file ${request.attachments?.[0]?.relativePath ?? 'src/bridge/types.ts'}`,
+      };
+      if (await emitToolCall(tool1)) {
+        tool1.status = 'completed';
+        tool1.durationMs = 45;
+        tool1.outputSummary = 'Read 220 lines';
+        await emitToolCall(tool1);
+      }
+
+      await emitDelta('I have analyzed your request and codebase context.\n\n');
+      await emitDelta('Here is an overview of the architecture:\n');
+      await emitDelta('- The bridge pattern decouples UI views from background agent execution.\n');
+      await emitDelta('- `SessionStateProjection` enforces monotonic event ordering and gap detection.\n');
+      await emitDelta('- Preview mode uses `FixtureBridge` for deterministic testing.');
+    } else if (request.mode === 'plan') {
+      await emitTaskProgress('Analyzing workspace structure and requirements');
+
+      const tool1: ToolCallInfo = {
+        id: `call-read-${Date.now()}`,
+        name: 'read_file',
+        status: 'running',
+        target: 'package.json',
+        inputSummary: 'Inspecting package manifests and script targets',
+      };
+      if (await emitToolCall(tool1)) {
+        tool1.status = 'completed';
+        tool1.durationMs = 30;
+        tool1.outputSummary = 'Found scripts: compile, test, typecheck';
+        await emitToolCall(tool1);
+      }
+
+      await emitDelta('### Proposed Execution Plan\n\n');
+      await emitDelta('1. **Context & Types**: Define domain models for chat sessions and streaming chunks.\n');
+      await emitDelta('2. **Bridge Interfaces**: Extend `AgentStudiosBridge` with streaming and session management.\n');
+      await emitDelta('3. **State Projection**: Project chat messages and fire reactive change events.\n');
+      await emitDelta('4. **Verification**: Execute test suite to confirm backward compatibility.');
+    } else {
+      // mode === 'agent'
+      await emitTaskProgress('Starting automated agent workflow');
+
+      const tool1: ToolCallInfo = {
+        id: `call-read-${Date.now()}`,
+        name: 'read_file',
+        status: 'completed',
+        target: 'src/bridge/types.ts',
+        inputSummary: 'Reading type definitions',
+        outputSummary: 'Loaded types',
+        durationMs: 25,
+      };
+      await emitToolCall(tool1);
+
+      const isHighRisk = /delete|destroy|critical|remove/i.test(request.message);
+      const riskLevel = isHighRisk ? 'high' : 'medium';
+      const command = 'npm run build';
+
+      const tool2: ToolCallInfo = {
+        id: `call-exec-${Date.now()}`,
+        name: 'exec_command',
+        status: 'running',
+        target: command,
+        inputSummary: `Executing: ${command}`,
+      };
+      await emitToolCall(tool2);
+
+      approvalId = `approval-chat-${Date.now()}`;
+      const approval: ApprovalRequest = {
+        id: approvalId,
+        sessionId: this._session.id,
+        actionType: 'exec_command',
+        commandOrTarget: command,
+        riskLevel,
+        requestedPermissions: ['shell:exec'],
+        status: 'pending',
+        createdAt: Date.now(),
+      };
+      this._approvals.push(approval);
+
+      this._nextSequenceNumber++;
+      const approvalEvent: TimelineEvent = {
+        sequenceNumber: this._nextSequenceNumber,
+        id: `evt-${this._nextSequenceNumber}`,
+        timestamp: Date.now(),
+        type: 'approval_requested',
+        summary: `Approval required for command: ${command}`,
+        agentName: 'Coder Agent',
+        details: {
+          approvalId,
+          command,
+          risk: riskLevel,
+        },
+      };
+      this._timeline.push(approvalEvent);
+      this._onEvent.fire(approvalEvent);
+
+      onChunk({ type: 'approval_required', approval });
+      await Promise.resolve();
+
+      tool2.status = 'completed';
+      tool2.durationMs = 120;
+      tool2.outputSummary = 'Command succeeded with exit code 0';
+      await emitToolCall(tool2);
+
+      const tool3: ToolCallInfo = {
+        id: `call-patch-${Date.now()}`,
+        name: 'apply_patch',
+        status: 'completed',
+        target: 'src/bridge/types.ts',
+        inputSummary: 'Applying type changes',
+        outputSummary: 'Patch applied successfully',
+        durationMs: 40,
+      };
+      await emitToolCall(tool3);
+
+      await emitDelta('Task executed successfully.\n');
+      await emitDelta('All tool calls completed and artifacts were generated.');
+    }
+
+    if (this._isCancelled) {
+      onChunk({ type: 'error', error: 'Execution cancelled by user' });
+      const cancelledMsg: ChatMessage = {
+        id: asstMsgId,
+        role: 'assistant',
+        content: fullContent + '\n\n[Execution cancelled by user]',
+        timestamp: Date.now(),
+        mode: request.mode,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        approvalId,
+        isStreaming: false,
+      };
+      this._chatMessages.push(cancelledMsg);
+      return cancelledMsg;
+    }
+
+    onChunk({ type: 'done' });
+
+    const assistantMsg: ChatMessage = {
+      id: asstMsgId,
+      role: 'assistant',
+      content: fullContent,
+      timestamp: Date.now(),
+      mode: request.mode,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      approvalId,
+      isStreaming: false,
+    };
+    this._chatMessages.push(assistantMsg);
+    return assistantMsg;
+  }
+
+  public async cancelCurrentRun(): Promise<void> {
+    this._isCancelled = true;
+  }
+
+  public async listSessions(): Promise<SessionSummary[]> {
+    return this._sessions.map(s => ({
+      id: s.id,
+      title: s.goalSummary,
+      status: s.status,
+      updatedAt: s.startedAt + s.elapsedMs,
+      isPreview: s.isPreview,
+    }));
+  }
+
+  public async createSession(goal?: string): Promise<SessionInfo> {
+    const newSession: SessionInfo = {
+      id: `session-preview-${Date.now()}`,
+      workspacePath: this._session.workspacePath,
+      goalSummary: goal || 'New Preview Session',
+      status: 'idle',
+      activeAgentCount: 0,
+      totalAgentCount: 0,
+      completedTasksCount: 0,
+      totalTasksCount: 0,
+      providerSummary: 'Anthropic Claude 3.5 Sonnet',
+      startedAt: Date.now(),
+      elapsedMs: 0,
+      isPreview: true,
+    };
+
+    this._sessions.unshift(newSession);
+    this._session = newSession;
+
+    this._nextSequenceNumber++;
+    const event: TimelineEvent = {
+      sequenceNumber: this._nextSequenceNumber,
+      id: `evt-${this._nextSequenceNumber}`,
+      timestamp: Date.now(),
+      type: 'session_started',
+      summary: `Session "${newSession.goalSummary}" started`,
+    };
+    this._timeline.push(event);
+    this._onEvent.fire(event);
+
+    return { ...this._session };
+  }
+
+  public async switchSession(sessionId: string): Promise<SessionInfo> {
+    const target = this._sessions.find(s => s.id === sessionId);
+    if (!target) {
+      throw new Error(`Session '${sessionId}' not found.`);
+    }
+    this._session = target;
+    return { ...this._session };
   }
 
   public dispose(): void {

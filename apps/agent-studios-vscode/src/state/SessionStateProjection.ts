@@ -9,6 +9,7 @@ import {
   ApprovalRequest,
   ApprovalStatus,
   Artifact,
+  ChatMessage,
   SessionInfo,
   TaskNode,
   TimelineEvent,
@@ -32,10 +33,12 @@ export class SessionStateProjection implements vscode.Disposable {
   public static readonly maxEventBufferSize = 1000;
 
   private _session: SessionInfo | null = null;
+  private _activeSessionId: string | null = null;
   private _tasks: TaskNode[] = [];
   private _approvals: ApprovalRequest[] = [];
   private _artifacts: Artifact[] = [];
   private _timeline: TimelineEvent[] = [];
+  private _chatMessages: ChatMessage[] = [];
 
   private _lastProcessedSequence: number = 0;
   private _healthState: ProjectionHealthState = 'nominal';
@@ -47,6 +50,9 @@ export class SessionStateProjection implements vscode.Disposable {
   // Exposed EventEmitters
   private readonly _onSessionChanged = new vscode.EventEmitter<SessionInfo | null>();
   public readonly onSessionChanged: vscode.Event<SessionInfo | null> = this._onSessionChanged.event;
+
+  private readonly _onSessionSwitched = new vscode.EventEmitter<SessionInfo | null>();
+  public readonly onSessionSwitched: vscode.Event<SessionInfo | null> = this._onSessionSwitched.event;
 
   private readonly _onTasksChanged = new vscode.EventEmitter<TaskNode[]>();
   public readonly onTasksChanged: vscode.Event<TaskNode[]> = this._onTasksChanged.event;
@@ -60,16 +66,25 @@ export class SessionStateProjection implements vscode.Disposable {
   private readonly _onTimelineChanged = new vscode.EventEmitter<TimelineEvent[]>();
   public readonly onTimelineChanged: vscode.Event<TimelineEvent[]> = this._onTimelineChanged.event;
 
+  private readonly _onChatMessageAdded = new vscode.EventEmitter<ChatMessage>();
+  public readonly onChatMessageAdded: vscode.Event<ChatMessage> = this._onChatMessageAdded.event;
+
+  private readonly _onChatMessageUpdated = new vscode.EventEmitter<ChatMessage>();
+  public readonly onChatMessageUpdated: vscode.Event<ChatMessage> = this._onChatMessageUpdated.event;
+
   private readonly _onStateDegraded = new vscode.EventEmitter<SequenceGapDetails>();
   public readonly onStateDegraded: vscode.Event<SequenceGapDetails> = this._onStateDegraded.event;
 
   constructor(bridge?: AgentStudiosBridge) {
     this._disposables.push(
       this._onSessionChanged,
+      this._onSessionSwitched,
       this._onTasksChanged,
       this._onApprovalsChanged,
       this._onArtifactsChanged,
       this._onTimelineChanged,
+      this._onChatMessageAdded,
+      this._onChatMessageUpdated,
       this._onStateDegraded
     );
 
@@ -81,6 +96,10 @@ export class SessionStateProjection implements vscode.Disposable {
   // State accessors
   public get session(): SessionInfo | null {
     return this._session ? { ...this._session } : null;
+  }
+
+  public get activeSessionId(): string | null {
+    return this._activeSessionId ?? this._session?.id ?? null;
   }
 
   public get tasks(): TaskNode[] {
@@ -103,6 +122,10 @@ export class SessionStateProjection implements vscode.Disposable {
 
   public get timeline(): TimelineEvent[] {
     return this._timeline.map(e => ({ ...e }));
+  }
+
+  public get chatMessages(): ChatMessage[] {
+    return this._chatMessages.map(m => ({ ...m }));
   }
 
   public get lastProcessedSequence(): number {
@@ -159,9 +182,17 @@ export class SessionStateProjection implements vscode.Disposable {
     ]);
 
     this._session = session;
+    this._activeSessionId = session?.id ?? null;
     this._tasks = [...tasks];
     this._approvals = [...approvals];
     this._artifacts = [...artifacts];
+
+    if (
+      'chatMessages' in this._bridge &&
+      Array.isArray((this._bridge as unknown as { chatMessages: ChatMessage[] }).chatMessages)
+    ) {
+      this._chatMessages = (this._bridge as unknown as { chatMessages: ChatMessage[] }).chatMessages.map(m => ({ ...m }));
+    }
 
     if (
       'timeline' in this._bridge &&
@@ -261,6 +292,7 @@ export class SessionStateProjection implements vscode.Disposable {
       case 'session_started': {
         if (this._session) {
           this._session.status = 'running';
+          this._activeSessionId = this._session.id;
           this._onSessionChanged.fire(this.session);
         }
         break;
@@ -399,6 +431,34 @@ export class SessionStateProjection implements vscode.Disposable {
     }
   }
 
+  public addChatMessage(message: ChatMessage): void {
+    this._chatMessages.push({ ...message });
+    this._onChatMessageAdded.fire({ ...message });
+  }
+
+  public updateChatMessage(id: string, update: Partial<ChatMessage>): void {
+    const msg = this._chatMessages.find(m => m.id === id);
+    if (msg) {
+      Object.assign(msg, update);
+      this._onChatMessageUpdated.fire({ ...msg });
+    }
+  }
+
+  public setChatMessages(messages: ChatMessage[]): void {
+    this._chatMessages = messages.map(m => ({ ...m }));
+  }
+
+  public clearChatMessages(): void {
+    this._chatMessages = [];
+  }
+
+  public switchSession(session: SessionInfo | null): void {
+    this._session = session ? { ...session } : null;
+    this._activeSessionId = session?.id ?? null;
+    this._onSessionSwitched.fire(this.session);
+    this._onSessionChanged.fire(this.session);
+  }
+
   public dispose(): void {
     this.unbindBridge();
     while (this._disposables.length > 0) {
@@ -409,6 +469,8 @@ export class SessionStateProjection implements vscode.Disposable {
     this._tasks = [];
     this._approvals = [];
     this._artifacts = [];
+    this._chatMessages = [];
+    this._activeSessionId = null;
     this._session = null;
   }
 }

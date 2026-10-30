@@ -8,11 +8,15 @@ import {
   ApprovalDecisionResult,
   ApprovalRequest,
   Artifact,
+  ChatMessage,
+  ChatSendRequest,
+  ChatStreamChunk,
   ConnectionState,
   EditorActionRequest,
   EditorActionResult,
   ProviderSummary,
   SessionInfo,
+  SessionSummary,
   TaskGraph,
   TaskNode,
   TimelineEvent,
@@ -53,6 +57,15 @@ export interface AgentStudiosBridge extends vscode.Disposable {
   getArtifactDiff(artifactId: string): Promise<string | null>;
   listProviderSummaries(): Promise<ProviderSummary[]>;
   submitEditorAction(action: EditorActionRequest): Promise<EditorActionResult>;
+
+  sendMessage(
+    request: ChatSendRequest,
+    onChunk: (chunk: ChatStreamChunk) => void
+  ): Promise<ChatMessage>;
+  cancelCurrentRun(): Promise<void>;
+  listSessions(): Promise<SessionSummary[]>;
+  createSession(goal?: string): Promise<SessionInfo>;
+  switchSession(sessionId: string): Promise<SessionInfo>;
 
   dispose(): void;
 }
