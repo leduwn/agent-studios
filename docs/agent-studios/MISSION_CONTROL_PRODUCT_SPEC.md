@@ -6,103 +6,76 @@
 
 ---
 
-## 1. Executive Summary & Purpose
+## 1. Product Intent & 7 Core Inquiries
 
-Agent Studios Mission Control is a dedicated observability, monitoring, and review workbench rendered as a VS Code `WebviewPanel` inside the main editor area. 
+Agent Studios is not merely an AI chat sidebar. Mission Control adds a distinct, editor-level observability, review, and monitoring surface answering 7 core inquiries:
 
-### Core Product Philosophy
-- **Complement, Not Replace:** Mission Control works in tandem with the primary Chat & Assistant sidebar (`agent-studios.chat`). While Chat provides conversational interaction, prompt composition, and inline streaming, Mission Control provides an expansive multi-column view for orchestrating concurrent coding agents, tracking task DAGs, inspecting execution runs, auditing changed files, and overseeing system health.
-- **Observability First:** Truthful reflection of runtime state. Every metric, status pill, and timeline entry is tied to an authoritative data model. No fabricated progress percentages or synthetic task states.
-- **Fail-Closed Operations:** Destructive mutations, unvetted approvals, and raw shell executions are disabled or strictly guarded until end-to-end sandbox security gates pass.
-- **Native VS Code Integration:** Uses standard VS Code CSS tokens, native diff editor launches, command palette registrations, and keyboard navigation.
+1. **What projects, studios, sessions, and runs exist, and which are active?**
+2. **Which agents are working, on which tasks, and in which isolated worktrees?**
+3. **Which tasks are blocked, in progress, ready for review, or completed?**
+4. **What tools ran, what changed, what did tests report, and what is waiting for approval?**
+5. **How do worktrees, branches, PRs, CI status, and review findings relate to this run?**
+6. **Which provider/model/runtime was actually used; is cost/usage data truly available?**
+7. **What should the human do next, and what evidence supports a completion claim?**
 
----
-
-## 2. Information Architecture & Navigation
-
-Mission Control is launched via the command:
-`Agent Studios: Open Mission Control` (`agent-studios.openMissionControl`)
-or deep-linked via an action button in the Chat sidebar header.
-
-The workbench operates with a persistent top navigation bar hosting tabs:
-1. **Overview:** High-level dashboard, fleet health, lifecycle summaries, and Attention Queue.
-2. **Agents:** Fleet list, status grid, active runs, and deep Agent Inspector drawer.
-3. **Tasks:** Three complementary projections: Searchable List, Kanban Board, and interactive DAG Graph.
-4. **Runs:** Execution run records, tool invocations, workspace/worktree assignments, and terminal outcome evidence.
-5. **Timeline:** Chronological event stream, filtering by agent/task/category, replay watermark tracking.
-6. **Review & Artifacts:** Changed files, diff viewer trigger (`vscode.diff`), artifact inspector, and test results.
-7. **Approvals:** Pending permission and tool requests with risk levels (read-only / guarded).
-8. **Providers:** Configured provider instances, active model parameters, and token/latency telemetry.
-9. **Diagnostics:** IPC daemon connectivity, watermark tracking, projection freshness, and error logs.
+### Operational Boundary
+- **Sidebar Chat (`agent-studios.chat`):** Used for conversational instruction, prompt composition, and streaming responses.
+- **Editor Mission Control (`agent-studios.missionControl`):** Used for observability, review, DAG navigation, and system diagnostics.
+- **Shared State Synchronization:** Selected studio/session/task synchronizes bi-directionally across both surfaces. Mission Control never creates its own competing state engine.
 
 ---
 
-## 3. Detailed View Specifications
+## 2. Information Hierarchy & Scope
 
-### 3.1 Overview Dashboard
-- **Active Studio / Session:** Title, workspace path, creation timestamp, and run status.
-- **Connection Badge:** Explicit status pills (`Connected`, `Connecting`, `Disconnected`, `Degraded`, `Preview`).
-- **Fleet Summary:** Number of active, idle, blocked, and failed agents.
-- **Task Lifecycle Distribution:** Metric chips for Pending, Ready, Running, Succeeded, Failed, and Cancelled.
-- **Attention Queue:** Elevated section highlighting pending approvals, failed tasks, degraded providers, or disconnection alerts.
-- **Recent Activity Ticker:** The 5 most recent timeline events with clickable deep links to the respective task or run.
+The data model maintains strict ontological separation across hierarchy tiers:
+```
+Workspace / Project ──► Studio ──► Logical Session ──► Run ──► Task ──► Tool Call / Event / Artifact
+```
+*Rule:* Never conflate Rust `StudioId`, `SessionId`, `RunId`, or `TaskId`.
 
-### 3.2 Agents Fleet View & Agent Inspector
-- **Fleet Grid / Table:**
-  - `agent_id`: Stable unique identifier.
-  - `name`: Human-readable persona or role (e.g., "Architect", "Rust Engineer", "Security Reviewer").
-  - `status`: `idle` | `busy` | `blocked` | `failed`.
-  - `assigned_task`: Linked task title and ID.
-  - `active_run`: Current execution run ID.
-  - `runtime`: e.g., `codex-v2`, `claude-code-cli`, `opencode`.
-  - `provider_model`: e.g., `anthropic:claude-3-7-sonnet`.
-  - `last_activity`: Relative timestamp with millisecond hover tooltip.
-- **Agent Inspector Drawer:**
-  - Slide-out panel or split view displaying assigned tasks history, tool invocation stream, associated git worktree path, terminal exit codes, and generated artifacts.
-
-### 3.3 Task Management
-- **Searchable List:** Dense table with instant substring filtering on title, description, and ID.
-- **Kanban Board:**
-  - Columns strictly derived from verified backend states:
-    - *Pending*: Not yet scheduled.
-    - *Ready*: Dependencies satisfied, awaiting execution slot.
-    - *Running*: Actively being processed by an agent.
-    - *Blocked*: Waiting on approval, dependency, or external resource.
-    - *Review*: Derived state indicating task finished code generation and awaits user verification.
-    - *Completed*: Succeeded and verified.
-    - *Failed / Cancelled*: Errored out or aborted.
-  - Drag-and-drop between columns is disabled unless an authorized backend state transition command exists.
-- **DAG Graph Viewer:**
-  - SVG/Canvas rendering of dependency nodes and directed edges.
-  - Pan, zoom (wheel and control buttons), fit-to-view.
-  - Interactive node selection opening task details in side panel.
-  - Cycle detection and orphan node indicators.
-  - Semantic theme coloring: Blue (running), Green (succeeded), Red (failed), Yellow (blocked/pending).
-
-### 3.4 Run Inspector
-- Details of individual execution attempts (`RunRecord`).
-- Captures: Run ID, parent task, runtime adapter, start/end timestamps, workspace directory, assigned git worktree, tool call transcript, stdout/stderr snippets, and outcome classification (Success, Interrupted, Disconnected, Failed).
-
-### 3.5 Activity Timeline
-- Chronological stream of all `TimelineEvent` records.
-- Filtering by event type (`tool_call`, `task_lifecycle`, `approval`, `file_change`, `diagnostic`).
-- Real-time handling of monotonic sequence watermarks and replay deduplication.
-
-### 3.6 Review & Artifacts
-- List of modified, added, and deleted files across agent runs.
-- Action button "Open Diff" executing native VS Code command `vscode.diff(originalUri, modifiedUri)`.
-- Test execution summary: Passed, failed, skipped tests from agent runs.
-- Git metadata: Active branch, worktree directory, and commit reference.
-
-### 3.7 Approval Center & Providers
-- Read-only presentation of approval requests with risk ratings (Low, Medium, High).
-- Visibly disabled action buttons if connected in read-only slice.
-- Model provider overview listing configured backends without exposing private keys.
+### Truthful Status Semantics & Constraints
+1. **Succeeded State:** Attributed only when supported by true terminal runtime evidence (exit code 0, verified test suite completion).
+2. **Progress Percentage:** Rendered only when a stable, meaningful task denominator exists. Otherwise, display `X / Y known tasks` or count badges. If tasks can be added dynamically, progress is labeled as *current plan coverage*, never a speculative remaining-work estimate.
+3. **Token & Cost Metrics:** Rendered only when observed and attributed from actual backend telemetry; never fabricated or simulated. Display explicit "Not available" when telemetry is absent.
+4. **GitHub & CI Checks:** Displayed only from authenticated, authorized sources; never inferred or guessed from branch names.
 
 ---
 
-## 4. State & Synchronization Guarantees
+## 3. 9-Tab Multi-Tab Workbench Overview
 
-1. **Bi-Directional Synchronization:** Selecting a session or task in the Chat view immediately updates Mission Control, and selecting an item in Mission Control focuses it in the sidebar.
-2. **Stable Identity:** All objects are tracked via immutable UUIDs (`studio_id`, `task_id`, `agent_id`, `run_id`, `sequence`).
-3. **No State Loss:** Switching workbench tabs or collapsing panels retains scroll position, active filters, and inspector selections.
+| Tab ID | Tab Name | Core Responsibilities |
+| :--- | :--- | :--- |
+| `overview` | **Overview Dashboard** | Attention-first summary (pending approvals, failed runs, event gaps), studio scope, KPI status cards, recent events. |
+| `fleet` | **Agents Fleet** | Coordinator/workers table, runtime adapter (`codex-rs`, `opencode`), model, assigned task, elapsed time, and slide-out Agent Inspector drawer. |
+| `tasks` | **Tasks & DAG** | Searchable task list, 7-state Kanban board, and zero-dependency SVG DAG dependency graph with topological rank layout. |
+| `runs` | **Run Inspector** | Active execution run inspector, execution progress meter, telemetry stream, stdout/stderr terminal box with ANSI rendering. |
+| `timeline` | **Activity Timeline** | Chronological event stream with monotonically ordered sequence numbers, actor badges, event icons, and JSON payload inspector. |
+| `review` | **Review View** | Workspace change review, modified file list with additions/deletions, one-click launch of native `vscode.diff` via `DiffReviewManager`. |
+| `approvals` | **Approvals Center** | Pending human-in-the-loop approvals with risk classification badges (Low, Medium, High, Critical), diff preview, and fail-closed security banner. |
+| `providers` | **Providers & Usage** | Configured LLM provider instances, context window indicators, latency metrics, and secret scrubbing verification banner. |
+| `diagnostics` | **Diagnostics** | IPC socket connection status, agreed protocol capabilities, sequence watermarks, active clients, and connection troubleshooting. |
+
+---
+
+## 4. UI Read Model Schema (Conceptual Projection)
+
+The UI projects state exclusively from validated read models:
+- **`MissionScope`:** `workspaceUri`, `studioId`, `sessionId?`, `lastSyncAt`, `source`.
+- **`MissionSummary`:** Status counts, `totalKnownTasks`, `finishedTaskCount`, `needsAttention` list, `activeRunIds`, `dataQuality`.
+- **`AgentProjection`:** `agentId`, `runId`, `taskId`, `role`, `runtimeId`, `modelRef`, `status`, `lastEventAt`.
+- **`TaskProjection`:** `taskId`, `dependencies`, `state`, `assignedAgentId?`, `blockedReason?`, `runId?`, `artifactIds?`.
+- **`RunProjection`:** `runId`, `taskId`, `lifecycle`, `startedAt?`, `completedAt?`, `runtimeEvidence?`, `workspaceRef?`.
+- **`TimelineEvent`:** `sequence`, `sourceTimestamp`, `type`, scope IDs, redacted summary, replay status.
+- **`ApprovalProjection`:** `approvalId`, correlation IDs, `expiry`, `risk`, `status`, `authCapability`, delivery status.
+- **`ArtifactProjection`:** `id`, `path`, safe file URI, change type, verification status.
+- **`QualityStatus`:** `LIVE`, `RECOVERING`, `DEGRADED`, `STALE`, `UNSUPPORTED`, `PREVIEW`.
+
+---
+
+## 5. Delivery Outcome Classifications
+
+All delivery milestones report outcomes across 4 distinct dimensions:
+1. **`UI_COMPLETE`:** All 9 tabs, responsive styles, high-contrast themes, SVG DAG layout, and native diff launches fully implemented and verified via automated unit and integration tests.
+2. **`READ_ONLY_LIVE_CONNECTED`:** Read-only state projections bound to live daemon queries (conditional upon IPC-03 wire alignment).
+3. **`MUTATION_READY`:** State-changing approval and execution commands guarded by strict fail-closed security boundaries.
+4. **`NOT_TESTED`:** Features deferred or unverified (e.g., drag-and-drop task reassignment, autonomous PR merge).

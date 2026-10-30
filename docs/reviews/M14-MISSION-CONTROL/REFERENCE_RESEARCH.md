@@ -5,40 +5,28 @@
 
 ---
 
-## 1. Industry Precedents & Multi-Agent Visualization
+## 1. Verified Open-Source Reference Inventory
 
-Modern AI multi-agent software engineering systems present complex observability challenges: coordinating dozens of autonomous subagents across git worktrees, tracking asynchronous task dependency graphs, auditing file diffs, and managing human approvals.
+These paths were inspected as directory entries in the referenced public GitHub repositories on 2026-10-30. Explicit upstream commits must be tracked before copying or adapting code.
 
-We investigated several leading open-source and proprietary architectures:
+| Source (License) | Code to Study | Main Lesson | Usage Decision |
+| :--- | :--- | :--- | :--- |
+| **Orchestrator.inc**<br>*(Apache-2.0)* | `frontend/src/renderer/components/SessionsBoard.tsx`, `SessionInspector.tsx`, `SessionView.tsx`, `WorkspaceDiffView.tsx`, `PRSummaryDisplay.tsx` | Fleet overview, needs-attention ordering, agent/branch/PR/CI linkage, per-session inspector, diff review | **Highest-priority reference**; adapt concepts and individual components only after license/dependency audit. |
+| **Vibe Kanban**<br>*(Apache-2.0)* | `packages/web-core/src/features/kanban/ui`, `packages/web-core/src/pages/workspaces` | Task columns, board filters, workspace-per-task, review stages | Reference for Kanban and review flow; note upstream sunset announcement. |
+| **OpenHands**<br>*(MIT)* | `src/routes/conversation.tsx`, `src/routes/planner-tab.tsx`, `src/routes/task-list-tab.tsx`, `src/routes/usage-tab.tsx`, `src/components/conversation-events/chat` | Conversation-to-task navigation, tool events, files, terminal, usage | Study presentation and event grouping, no duplicate backend. |
+| **Cline**<br>*(Apache-2.0)* | `apps/vscode/src/core/webview`, `apps/vscode/webview-ui/src/components` | VS Code host ↔ webview patterns, approval, step-oriented tool cards, checkpoints and diff review | Adapt safe extension-host patterns; keep original branding separate. |
+| **Continue**<br>*(Apache-2.0)* | `gui/src/components/History`, `gui/src/components/modelSelection`, `gui/src/components/AcceptRejectDiffButtons.tsx` | History, provider/model selection, diff decisions | Prefer ideas/isolated widgets; backend must remain source of provider/model truth. |
+| **OpenCode**<br>*(MIT)* | `packages/app/src/session`, `packages/app/src/session/timeline`, `packages/app/src/providers` | Session details, event timeline, provider choice, streaming presentation | Study UX; do not copy runtime architecture over AGS Control Plane. |
+| **Kilo Code**<br>*(MIT)* | `packages/kilo-vscode/webview-ui/src/components` | Webview UX patterns, modes, compact agent controls | Reference only unless component dependencies fit existing extension. |
+| **XYFlow / React Flow**<br>*(MIT)* | `examples/react/src/examples/CustomNode`, `Layouting`, `Stress` | Zoom/pan DAG, custom nodes, layout, scaling | Candidate direct dependency if React-based graph panel is justified; otherwise create lightweight SVG read-only graph. |
+| **VS Code extension samples**<br>*(MIT)* | `webview-sample`, `webview-view-sample`, `tree-view-sample`, `virtual-document-sample` | Native IDE integration, WebviewPanel lifecycle, CSP, virtual documents | First-party reference for VS Code APIs. |
+| **Roo Code**<br>*(Apache-2.0; archived)* | `webview-ui/src/components` | Agent modes and earlier chat/workflow UX | Historical design reference only; repository archived May 2026. |
 
-### 1.1 VS Code Native WebviewPanels (GitLens, Copilot, Test Explorer)
-- **Key Insight:** VS Code WebviewPanels provide a rich HTML/CSS/JS runtime in the editor area, but come with strict constraints:
-  - Sandboxed `vscode-webview://` protocol.
-  - Strict Content Security Policy (CSP) forbidding unvetted remote scripts and inline eval.
-  - Heavy DOM structures cause high memory usage if not carefully virtualized.
-  - Background panels can be discarded unless `retainContextWhenHidden: true` is configured or state is cleanly restored via `getState()` / `setState()`.
-- **Adopted Pattern:** We utilize `retainContextWhenHidden: true` for responsive tab switching while preserving a serialized state snapshot for clean reconstruction across VS Code restarts.
-
-### 1.2 OrchestratorInc/agent-orchestrator
-- **Inspected Components:**
-  - `WorkspaceDiffView.tsx`: Displays unified git status (staged/unstaged/modified/added) with quick launch to IDE diff editors.
-  - `SessionArtifactsView.tsx`: Groups generated artifacts (patches, documentation, schemas) by task and run.
-  - `PRSummaryDisplay.tsx`: Summarizes multi-agent work into a clean checklist for GitHub pull requests.
-- **Adopted Pattern:** Clean separation between modified file lists and actual diff inspection. Rather than reinventing a custom diff viewer inside the webview, we trigger the native VS Code `vscode.diff` editor via extension host messages, providing users with the familiar side-by-side editing experience with syntax highlighting and merge controls.
-
-### 1.3 xyflow / React Flow (`xyflow/xyflow`)
-- **Key Insight:** Interactive DAG graphs require smooth panning, zooming, node selection, and dependency routing.
-- **Architectural Trade-Off:** Bundling heavy React libraries (such as full React Flow + React DOM) into the VS Code extension webview adds ~400 KB of minified JS and incurs a ~250ms cold-start penalty.
-- **Agent Studios Design Choice:** We implement a high-performance, lightweight SVG-based DAG graph engine tailored to VS Code CSS tokens. It supports:
-  - Infinite pan and zoom with mouse wheel and drag.
-  - Directed cubic Bezier curves (`M x1 y1 C cx1 cy1, cx2 cy2, x2 y2`).
-  - Automatic topological rank layout (Sugiyama-style layer assignment).
-  - Native VS Code theme colors for node states.
-  - Initial render time of <15ms with zero external runtime dependencies.
-
-### 1.4 Claude Code Multi-Agent Observability
-- **Key Insight:** Claude Code surfaces subagent actions through hierarchical progress lines and phase blocks.
-- **Adopted Pattern:** We adapt this into the **Attention Queue** and **Activity Timeline**, highlighting blocked agents, tool calls, and pending human approvals at the top of the workbench.
+### License Compliance & Governance Rules
+- Inspect exact upstream `LICENSE`, `NOTICE`, copyright headers, and transitive dependency licenses before copying.
+- Preserve attribution, track upstream commit, identify modified portions, and never copy logos or trademarks.
+- Prioritize clean-room adaptation of architectural patterns.
+- Do not copy GPL/AGPL source code into this extension without explicit legal and compatibility review.
 
 ---
 
@@ -47,8 +35,25 @@ We investigated several leading open-source and proprietary architectures:
 | Concern | Typical Antipattern | Agent Studios Architectural Solution |
 | :--- | :--- | :--- |
 | **Styling** | Hardcoded hex colors / custom themes | Pure VS Code CSS variables (`var(--vscode-editor-background)`, etc.) |
-| **Diff Viewing**| Primitive text diff in webview | Invokes native `vscode.diff(original, modified)` in editor group |
-| **DAG Graph** | Massive 500KB JS graph bundle | Pure SVG DAG with topological layering & interactive pan/zoom |
+| **Diff Viewing**| Primitive text diff in webview | Invokes native `vscode.diff(original, modified)` via `DiffReviewManager` |
+| **DAG Graph** | Massive 500KB JS graph bundle | Zero-dependency pure SVG DAG with topological layering & interactive pan/zoom |
 | **State Sync** | Competing webview-internal state | Unidirectional data flow from Extension Host via `postMessage` |
 | **Security** | Permissive CSP with `'unsafe-inline'` | Strict CSP with cryptographic nonce and explicit resource origins |
 | **Performance**| Unbounded DOM event appending | Bounded timeline projection (last 2000 events) with filtering |
+| **Credentials** | Storing API keys in webview state | Extension Host secret scrubbing filter stripping `apiKey` and `secret` |
+| **Fail-Closed** | Executing approvals on unverified bridge | Mutations disabled; modal warnings displayed in read-only slice |
+
+---
+
+## 3. Source Validation and Citation URLs
+
+- Orchestrator source and product docs: `https://github.com/OrchestratorInc/agent-orchestrator` ; `https://docs.orchestrator.inc/`
+- Vibe Kanban source: `https://github.com/BloopAI/vibe-kanban` (upstream README announces sunset; maintenance evaluated)
+- OpenHands source: `https://github.com/OpenHands/OpenHands`
+- Cline source: `https://github.com/cline/cline`
+- Continue source: `https://github.com/continuedev/continue`
+- OpenCode source: `https://github.com/anomalyco/opencode`
+- Kilo source: `https://github.com/Kilo-Org/kilocode`
+- React Flow/XYFlow: `https://github.com/xyflow/xyflow`
+- Official VS Code extension examples: `https://github.com/microsoft/vscode-extension-samples`
+- Roo historical reference: `https://github.com/RooCodeInc/Roo-Code` (archived May 2026)
