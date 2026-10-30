@@ -6,25 +6,29 @@ use agent_studios_ipc_transport::daemon::{DaemonConfig, run_daemon};
 #[derive(Parser, Debug)]
 #[command(name = "agsd", about = "Agent Studios Native IPC Transport Daemon")]
 struct Cli {
-    #[arg(long, default_value = r"\\.\pipe\agent-studios-default")]
+    #[arg(
+        long,
+        default_value = r"\\.\pipe\agent-studios-default",
+        alias = "pipe_name"
+    )]
     pipe_name: String,
 
-    #[arg(long)]
+    #[arg(long, alias = "socket_path")]
     socket_path: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, alias = "runtime_info_path")]
     runtime_info_path: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, alias = "admin_runtime_info_path")]
     admin_runtime_info_path: Option<PathBuf>,
 
-    #[arg(long, default_value = "ags-client")]
+    #[arg(long, default_value = "ags-client", alias = "key_id")]
     key_id: String,
 
     #[arg(long, default_value_t = 1000)]
     capacity: usize,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, alias = "auto_execute")]
     auto_execute: bool,
 }
 

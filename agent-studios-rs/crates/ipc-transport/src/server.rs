@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -67,6 +67,10 @@ pub struct ServerState {
             HashMap<agent_studios_protocol::id::ApprovalId, PendingRuntimeApproval>,
         >,
     >,
+    pub default_model_ref: Option<agent_studios_provider::model::ModelRef>,
+    pub configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
+    pub in_flight_approvals: Arc<Mutex<HashSet<agent_studios_protocol::id::ApprovalId>>>,
+    pub in_flight_cancellations: Arc<Mutex<HashSet<agent_studios_protocol::id::TaskId>>>,
 }
 
 impl ServerState {
@@ -152,6 +156,8 @@ pub struct IpcServerBuilder {
     runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
     workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
     default_repo_path: Option<std::path::PathBuf>,
+    default_model_ref: Option<agent_studios_provider::model::ModelRef>,
+    configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
 }
 
 impl Default for IpcServerBuilder {
@@ -182,6 +188,8 @@ impl IpcServerBuilder {
             runtime: None,
             workspace_orchestrator: None,
             default_repo_path: None,
+            default_model_ref: None,
+            configured_instance_id: None,
         }
     }
 
@@ -257,6 +265,22 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_default_model_ref(
+        mut self,
+        model_ref: agent_studios_provider::model::ModelRef,
+    ) -> Self {
+        self.default_model_ref = Some(model_ref);
+        self
+    }
+
+    pub fn with_configured_instance_id(
+        mut self,
+        instance_id: agent_studios_external_runtime::id::RuntimeInstanceId,
+    ) -> Self {
+        self.configured_instance_id = Some(instance_id);
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -271,6 +295,20 @@ impl IpcServerBuilder {
                 .unwrap_or_else(ProviderCatalog::with_builtin_definitions),
         );
         let provider_catalog = Arc::new(tokio::sync::RwLock::new((*catalog_arc).clone()));
+
+        let default_model_ref = self.default_model_ref.or_else(|| {
+            if let Ok(model_str) = std::env::var("AGENT_STUDIOS_DEFAULT_MODEL")
+                && let Some((p_str, m_str)) = model_str.split_once('/')
+                && let (Ok(inst_id), Ok(m_id)) = (
+                    p_str.parse::<agent_studios_provider::id::ProviderInstanceId>(),
+                    agent_studios_provider::id::ModelId::new(m_str),
+                )
+            {
+                Some(agent_studios_provider::model::ModelRef::new(inst_id, m_id))
+            } else {
+                None
+            }
+        });
 
         let runtime = self.runtime.or_else(|| {
             agent_studios_opencode_runtime::OpenCodeRuntime::new()
@@ -310,6 +348,10 @@ impl IpcServerBuilder {
             default_repo_path: self.default_repo_path,
             active_runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             pending_runtime_approvals: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            default_model_ref,
+            configured_instance_id: self.configured_instance_id,
+            in_flight_approvals: Arc::new(Mutex::new(HashSet::new())),
+            in_flight_cancellations: Arc::new(Mutex::new(HashSet::new())),
         });
 
         Ok(IpcServer { state })

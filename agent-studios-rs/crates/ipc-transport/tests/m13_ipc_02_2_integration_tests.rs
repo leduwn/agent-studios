@@ -28,6 +28,11 @@ use agent_studios_ipc_transport::{
 use agent_studios_protocol::agent::AgentKind;
 use agent_studios_protocol::approval::{ApprovalKind, ApprovalState};
 use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy, TaskState};
+use agent_studios_provider::{
+    AuthenticationScheme, EndpointProfile, ModelCapabilities, ModelDescriptor, ModelId,
+    ModelLimits, ModelRef, ProtocolFamily, ProviderCatalog, ProviderId, ProviderInstance,
+    ProviderInstanceId,
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1260,5 +1265,934 @@ async fn test_approval_runtime_delivery_failure_fails_closed_without_modifying_c
         let cp = cp_lock.read().await;
         let app = cp.get_approval(cp_approval_id).unwrap();
         assert_eq!(app.state, ApprovalState::Approved);
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_task_missing_origin_fails_closed_for_standard_allowed_for_admin() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let standard_key = "standard-client-origin";
+    let standard_secret = b"standard-secret-origin-123".to_vec();
+    let admin_key = "admin-client-origin";
+    let admin_secret = b"admin-secret-origin-456".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let server = IpcServer::builder()
+        .with_auth_key(standard_key, standard_secret.clone())
+        .with_admin_auth_key(admin_key, admin_secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (std_c_stream, std_s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(std_s_stream);
+    let mut std_client = IpcClient::connect_stream(
+        std_c_stream,
+        ClientConfig::new(standard_key, standard_secret),
+    )
+    .await
+    .expect("Standard client handshake failed");
+
+    let (adm_c_stream, adm_s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(adm_s_stream);
+    let mut adm_client =
+        IpcClient::connect_stream(adm_c_stream, ClientConfig::new(admin_key, admin_secret))
+            .await
+            .expect("Admin client handshake failed");
+
+    let studio = std_client.create_studio("Origin Studio").await.unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Origin Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-missing-origin".to_string(),
+        title: "Missing Origin Task".to_string(),
+        description: "Task with stripped origin".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = std_client.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait until runtime session is registered in active_runtime_sessions
+    let state = server.state();
+    let mut session_active = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = state.active_runtime_sessions.read().await;
+        if sessions.contains_key(&task_id) {
+            session_active = true;
+            break;
+        }
+    }
+    assert!(session_active, "Session must be active");
+
+    // Clear task origin from server state to simulate untracked/missing origin
+    {
+        let mut origins = state.task_origins.lock().unwrap();
+        origins.remove(&task_id);
+    }
+
+    // Standard client attempt must FAIL CLOSED
+    let cancel_res = std_client
+        .cancel_task(
+            studio.id,
+            task_id,
+            "Standard client cancelling untracked task",
+        )
+        .await;
+    assert!(
+        cancel_res.is_err(),
+        "Untracked task cancellation must fail closed for standard client"
+    );
+    let err_str = format!("{:?}", cancel_res);
+    assert!(
+        err_str.contains("cross-session cancellation requires admin role"),
+        "Expected admin requirement error, got: {err_str}"
+    );
+
+    // Runtime was not stopped by failed standard cancellation
+    assert!(mock_runtime.stopped_sessions().is_empty());
+
+    // Admin client attempt on untracked origin must SUCCEED
+    let adm_cancel_res = adm_client
+        .cancel_task(studio.id, task_id, "Admin emergency cancellation")
+        .await;
+    assert!(
+        adm_cancel_res.is_ok(),
+        "Untracked task cancellation must succeed for admin client"
+    );
+
+    // Verify task is cancelled and runtime stopped
+    let stopped = mock_runtime.stopped_sessions();
+    assert_eq!(
+        stopped.len(),
+        1,
+        "Runtime session should be stopped by admin"
+    );
+    {
+        let cp = cp_lock.read().await;
+        let task = cp.get_task(task_id).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_task_reconnected_owner_session_rebinding_succeeds() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let owner_key = "reconnecting-owner-key";
+    let owner_secret = b"reconnecting-secret-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let server = IpcServer::builder()
+        .with_auth_key(owner_key, owner_secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c1_stream, s1_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s1_stream);
+    let mut client1 = IpcClient::connect_stream(
+        c1_stream,
+        ClientConfig::new(owner_key, owner_secret.clone()),
+    )
+    .await
+    .expect("Client 1 handshake failed");
+
+    let studio = client1.create_studio("Rebind Studio").await.unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Rebind Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-rebind".to_string(),
+        title: "Rebinding Task".to_string(),
+        description: "Task submitted by initial session".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait until runtime session is registered in active_runtime_sessions
+    let state = server.state();
+    let mut session_active = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = state.active_runtime_sessions.read().await;
+        if sessions.contains_key(&task_id) {
+            session_active = true;
+            break;
+        }
+    }
+    assert!(session_active, "Session must be active");
+
+    let initial_session_id = {
+        let origins = state.task_origins.lock().unwrap();
+        let (s_id, k_id) = origins.get(&task_id).unwrap();
+        assert_eq!(k_id, owner_key);
+        s_id.clone()
+    };
+
+    // Client 1 disconnects / terminates
+    drop(client1);
+
+    // Reconnect as Client 2 with SAME key_id but new ephemeral connection/session
+    let (c2_stream, s2_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s2_stream);
+    let mut client2 =
+        IpcClient::connect_stream(c2_stream, ClientConfig::new(owner_key, owner_secret))
+            .await
+            .expect("Client 2 handshake failed");
+
+    // Client 2 cancels the task
+    let cancel_res = client2
+        .cancel_task(studio.id, task_id, "Reconnected owner cancellation")
+        .await;
+
+    assert!(
+        cancel_res.is_ok(),
+        "Cancellation from reconnected owner with same key_id must succeed"
+    );
+
+    // Verify origin session was rebound
+    {
+        let origins = state.task_origins.lock().unwrap();
+        let (new_s_id, k_id) = origins.get(&task_id).unwrap();
+        assert_eq!(k_id, owner_key);
+        assert_ne!(
+            new_s_id, &initial_session_id,
+            "Session ID must be rebound to new connection"
+        );
+    }
+
+    // Verify runtime was stopped
+    let stopped = mock_runtime.stopped_sessions();
+    assert_eq!(stopped.len(), 1, "Runtime session should be stopped");
+
+    // Verify task state in Control Plane
+    {
+        let cp = cp_lock.read().await;
+        let task = cp.get_task(task_id).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_task_duplicate_on_terminal_state_rejected() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let key_id = "test-dup-cancel";
+    let secret = b"secret-dup-cancel-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client.create_studio("Dup Cancel Studio").await.unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Dup Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-dup".to_string(),
+        title: "Duplicate Cancel Task".to_string(),
+        description: "Task to test duplicate cancellation".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait until runtime session is registered in active_runtime_sessions
+    let state = server.state();
+    let mut session_active = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = state.active_runtime_sessions.read().await;
+        if sessions.contains_key(&task_id) {
+            session_active = true;
+            break;
+        }
+    }
+    assert!(session_active, "Session must be active");
+
+    // First cancellation succeeds
+    let first_cancel = client
+        .cancel_task(studio.id, task_id, "First cancellation")
+        .await;
+    assert!(first_cancel.is_ok(), "First cancellation should succeed");
+
+    assert_eq!(mock_runtime.stopped_sessions().len(), 1);
+
+    // Second cancellation on terminal state must be rejected
+    let second_cancel = client
+        .cancel_task(studio.id, task_id, "Second cancellation")
+        .await;
+    assert!(
+        second_cancel.is_err(),
+        "Duplicate cancellation on terminal state must fail"
+    );
+    let err_str = format!("{:?}", second_cancel);
+    assert!(
+        err_str.contains("already in terminal state Cancelled")
+            || err_str.contains("Cannot cancel task in terminal state"),
+        "Expected terminal state error, got: {err_str}"
+    );
+
+    // Stop session not called again
+    assert_eq!(mock_runtime.stopped_sessions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_concurrent_cancellation_serialized_and_deduplicated() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let key_id = "test-concurrent-cancel";
+    let secret = b"secret-concurrent-cancel-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c1_stream, s1_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s1_stream);
+    let mut client1 =
+        IpcClient::connect_stream(c1_stream, ClientConfig::new(key_id, secret.clone()))
+            .await
+            .expect("Client 1 handshake failed");
+
+    let (c2_stream, s2_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s2_stream);
+    let mut client2 = IpcClient::connect_stream(c2_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client 2 handshake failed");
+
+    let studio = client1
+        .create_studio("Concurrent Cancel Studio")
+        .await
+        .unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Concurrent Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-concurrent".to_string(),
+        title: "Concurrent Task".to_string(),
+        description: "Task for concurrent cancellation".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait until runtime session is registered in active_runtime_sessions
+    let state = server.state();
+    let mut session_active = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = state.active_runtime_sessions.read().await;
+        if sessions.contains_key(&task_id) {
+            session_active = true;
+            break;
+        }
+    }
+    assert!(session_active, "Session must be active");
+
+    let studio_id = studio.id;
+    let h1 = tokio::spawn(async move {
+        client1
+            .cancel_task(studio_id, task_id, "Concurrent cancel 1")
+            .await
+    });
+    let h2 = tokio::spawn(async move {
+        client2
+            .cancel_task(studio_id, task_id, "Concurrent cancel 2")
+            .await
+    });
+
+    let (res1, res2) = tokio::join!(h1, h2);
+    let r1 = res1.unwrap();
+    let r2 = res2.unwrap();
+
+    let success_count = (r1.is_ok() as usize) + (r2.is_ok() as usize);
+    assert_eq!(
+        success_count, 1,
+        "Exactly one concurrent cancellation must succeed; r1: {:?}, r2: {:?}",
+        r1, r2
+    );
+
+    let err_str = if r1.is_err() {
+        format!("{:?}", r1)
+    } else {
+        format!("{:?}", r2)
+    };
+    assert!(
+        err_str.contains("Cancellation already in progress")
+            || err_str.contains("already in terminal state")
+            || err_str.contains("Cannot cancel task in terminal state"),
+        "Losing concurrent cancel must fail closed with clean serialization error: {err_str}"
+    );
+
+    // Verify task is terminal Cancelled and runtime was stopped
+    assert_eq!(mock_runtime.stopped_sessions().len(), 1);
+    {
+        let cp = cp_lock.read().await;
+        let task = cp.get_task(task_id).unwrap();
+        assert_eq!(task.state, TaskState::Cancelled);
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_approval_resolution_serialized_and_deduplicated() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(true)); // emit approval on start
+    let key_id = "test-concurrent-approval";
+    let secret = b"secret-concurrent-approval-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c1_stream, s1_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s1_stream);
+    let mut client1 =
+        IpcClient::connect_stream(c1_stream, ClientConfig::new(key_id, secret.clone()))
+            .await
+            .expect("Client 1 handshake failed");
+
+    let (c2_stream, s2_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s2_stream);
+    let mut client2 = IpcClient::connect_stream(c2_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client 2 handshake failed");
+
+    let studio = client1
+        .create_studio("Concurrent Approval Studio")
+        .await
+        .unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Approval Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-approval-concurrent".to_string(),
+        title: "Concurrent Approval Task".to_string(),
+        description: "Task for concurrent approval".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
+    let _task_id = task_ids[0];
+
+    // Wait until pending_runtime_approvals has the mapping
+    let state = server.state();
+    let mut cp_approval_id_opt = None;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let pending = state.pending_runtime_approvals.read().await;
+        if let Some((&aid, _)) = pending.iter().next() {
+            cp_approval_id_opt = Some(aid);
+            break;
+        }
+    }
+    let cp_approval_id =
+        cp_approval_id_opt.expect("Approval should be registered in pending runtime approvals");
+
+    let app_id_str1 = cp_approval_id.to_string();
+    let app_id_str2 = cp_approval_id.to_string();
+
+    let h1 = tokio::spawn(async move {
+        client1
+            .resolve_approval(
+                app_id_str1,
+                ApprovalDecision::Approved {
+                    modified_details: None,
+                    user_note: Some("Concurrent approval 1".into()),
+                },
+            )
+            .await
+    });
+    let h2 = tokio::spawn(async move {
+        client2
+            .resolve_approval(
+                app_id_str2,
+                ApprovalDecision::Approved {
+                    modified_details: None,
+                    user_note: Some("Concurrent approval 2".into()),
+                },
+            )
+            .await
+    });
+
+    let (res1, res2) = tokio::join!(h1, h2);
+    let r1 = res1.unwrap();
+    let r2 = res2.unwrap();
+
+    let success_count = (r1.is_ok() as usize) + (r2.is_ok() as usize);
+    assert_eq!(
+        success_count, 1,
+        "Exactly one concurrent approval resolution must succeed; r1: {:?}, r2: {:?}",
+        r1, r2
+    );
+
+    let err_str = if r1.is_err() {
+        format!("{:?}", r1)
+    } else {
+        format!("{:?}", r2)
+    };
+    assert!(
+        err_str.contains("Approval resolution already in progress")
+            || err_str.contains("already in terminal state")
+            || err_str.contains("Approval already resolved"),
+        "Losing concurrent approval must fail closed with clean serialization error: {err_str}"
+    );
+
+    // Verify Control Plane state is Approved
+    {
+        let cp = cp_lock.read().await;
+        let app = cp.get_approval(cp_approval_id).unwrap();
+        assert_eq!(app.state, ApprovalState::Approved);
+    }
+}
+
+#[tokio::test]
+async fn test_deterministic_model_routing_multi_model_unconfigured_fails_closed() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let key_id = "test-model-routing-multi";
+    let secret = b"secret-model-routing-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    // Create catalog with 2 models
+    let mut catalog = ProviderCatalog::with_builtin_definitions();
+    let inst_id = ProviderInstanceId::new();
+    let inst = ProviderInstance::new(
+        inst_id,
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Instance",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new("https://api.openai.com/v1").unwrap(),
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+    catalog.register_provider_instance(inst).unwrap();
+
+    let m1 = ModelDescriptor::new(
+        inst_id,
+        ModelId::new("gpt-4o").unwrap(),
+        "GPT-4o",
+        ModelCapabilities::unknown(),
+        ModelLimits::default(),
+    )
+    .unwrap();
+    catalog.register_model(m1).unwrap();
+
+    let m2 = ModelDescriptor::new(
+        inst_id,
+        ModelId::new("gpt-4o-mini").unwrap(),
+        "GPT-4o Mini",
+        ModelCapabilities::unknown(),
+        ModelLimits::default(),
+    )
+    .unwrap();
+    catalog.register_model(m2).unwrap();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_provider_catalog(catalog)
+        .with_auto_execute(true)
+        // default_model_ref is intentionally NOT configured!
+        .build()
+        .expect("Server failed to build");
+
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client.create_studio("Multi Model Studio").await.unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Routing Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-multi-model".to_string(),
+        title: "Multi Model Task".to_string(),
+        description: "Task under ambiguous catalog".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait for task to transition to Failed
+    let mut failed = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cp = cp_lock.read().await;
+        if let Some(task) = cp.get_task(task_id)
+            && task.state == TaskState::Failed
+        {
+            failed = true;
+            break;
+        }
+    }
+    assert!(
+        failed,
+        "Task must fail closed when catalog has multiple models without route"
+    );
+
+    // Verify run outcome has explicit routing error
+    {
+        let cp = cp_lock.read().await;
+        let run = cp
+            .all_runs()
+            .find(|r| r.task_id == task_id)
+            .expect("Run must be created");
+        assert_eq!(run.state, agent_studios_protocol::run::RunState::Failed);
+    }
+    let events = server
+        .state()
+        .replay_buffer
+        .lock()
+        .unwrap()
+        .replay_from(1, None)
+        .unwrap_or_default();
+    let found_error = events.iter().any(|ev| {
+        ev.payload.to_string().contains(
+            "Multiple models available (2) in catalog but no explicit model route configured",
+        )
+    });
+    assert!(
+        found_error,
+        "Expected multi-model routing error in replay buffer events"
+    );
+}
+
+#[tokio::test]
+async fn test_deterministic_model_routing_missing_model_fails_closed() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let key_id = "test-model-routing-missing";
+    let secret = b"secret-model-missing-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let mut catalog = ProviderCatalog::with_builtin_definitions();
+    let inst_id = ProviderInstanceId::new();
+    let inst = ProviderInstance::new(
+        inst_id,
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Instance",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new("https://api.openai.com/v1").unwrap(),
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+    catalog.register_provider_instance(inst).unwrap();
+
+    // Configure a model ref that does NOT exist in catalog
+    let missing_model_ref = ModelRef::new(inst_id, ModelId::new("claude-non-existent").unwrap());
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_provider_catalog(catalog)
+        .with_default_model_ref(missing_model_ref)
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client.create_studio("Missing Model Studio").await.unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Routing Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-missing-model".to_string(),
+        title: "Missing Model Task".to_string(),
+        description: "Task with missing model ref".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait for task to transition to Failed
+    let mut failed = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cp = cp_lock.read().await;
+        if let Some(task) = cp.get_task(task_id)
+            && task.state == TaskState::Failed
+        {
+            failed = true;
+            break;
+        }
+    }
+    assert!(
+        failed,
+        "Task must fail closed when configured model is not found in catalog"
+    );
+
+    // Verify run outcome has explicit missing model error
+    {
+        let cp = cp_lock.read().await;
+        let run = cp
+            .all_runs()
+            .find(|r| r.task_id == task_id)
+            .expect("Run must be created");
+        assert_eq!(run.state, agent_studios_protocol::run::RunState::Failed);
+    }
+    let events = server
+        .state()
+        .replay_buffer
+        .lock()
+        .unwrap()
+        .replay_from(1, None)
+        .unwrap_or_default();
+    let found_error = events.iter().any(|ev| {
+        ev.payload
+            .to_string()
+            .contains("not found in provider catalog")
+    });
+    assert!(
+        found_error,
+        "Expected missing model error in replay buffer events"
+    );
+}
+
+#[tokio::test]
+async fn test_deterministic_model_routing_configured_model_succeeds() {
+    let mock_runtime = Arc::new(TestMockRuntime::new(false));
+    let key_id = "test-model-routing-success";
+    let secret = b"secret-model-success-123".to_vec();
+
+    let test_repo = IsolatedTestRepo::new();
+    let orchestrator = test_repo.create_orchestrator();
+
+    let mut catalog = ProviderCatalog::with_builtin_definitions();
+    let inst_id = ProviderInstanceId::new();
+    let inst = ProviderInstance::new(
+        inst_id,
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Instance",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new("https://api.openai.com/v1").unwrap(),
+        AuthenticationScheme::None,
+    )
+    .unwrap();
+    catalog.register_provider_instance(inst).unwrap();
+
+    let m1 = ModelDescriptor::new(
+        inst_id,
+        ModelId::new("gpt-4o").unwrap(),
+        "GPT-4o",
+        ModelCapabilities::unknown(),
+        ModelLimits::default(),
+    )
+    .unwrap();
+    catalog.register_model(m1.clone()).unwrap();
+
+    let m2 = ModelDescriptor::new(
+        inst_id,
+        ModelId::new("gpt-4o-mini").unwrap(),
+        "GPT-4o Mini",
+        ModelCapabilities::unknown(),
+        ModelLimits::default(),
+    )
+    .unwrap();
+    catalog.register_model(m2).unwrap();
+
+    let configured_model_ref = m1.model_ref();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
+        .with_provider_catalog(catalog)
+        .with_default_model_ref(configured_model_ref)
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret))
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client
+        .create_studio("Configured Model Studio")
+        .await
+        .unwrap();
+    let cp_lock = server.control_plane();
+    let agent_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "Routing Agent", AgentKind::External, None)
+            .unwrap();
+        agent.id
+    };
+
+    let spec = BatchTaskSpec {
+        key: "task-configured-model".to_string(),
+        title: "Configured Model Task".to_string(),
+        description: "Task with explicit model route".to_string(),
+        assigned_agent_id: Some(agent_id),
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client.submit_task(studio.id, spec).await.unwrap();
+    let task_id = task_ids[0];
+
+    // Wait until runtime session is registered in active_runtime_sessions
+    let state = server.state();
+    let mut session_active = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let sessions = state.active_runtime_sessions.read().await;
+        if sessions.contains_key(&task_id) {
+            session_active = true;
+            break;
+        }
+    }
+    assert!(
+        session_active,
+        "Session must be active when model is explicitly routed"
+    );
+
+    // Task should be in Running state
+    {
+        let cp = cp_lock.read().await;
+        let task = cp.get_task(task_id).unwrap();
+        assert_eq!(task.state, TaskState::Running);
     }
 }

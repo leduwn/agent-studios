@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -20,6 +20,30 @@ use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstance
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
 use crate::server::{ClientRole, PendingRuntimeApproval, ServerState};
+
+struct InFlightApprovalGuard {
+    in_flight: Arc<Mutex<std::collections::HashSet<agent_studios_protocol::id::ApprovalId>>>,
+    approval_id: agent_studios_protocol::id::ApprovalId,
+}
+
+impl Drop for InFlightApprovalGuard {
+    fn drop(&mut self) {
+        let mut set = self.in_flight.lock().unwrap();
+        set.remove(&self.approval_id);
+    }
+}
+
+struct InFlightCancellationGuard {
+    in_flight: Arc<Mutex<std::collections::HashSet<agent_studios_protocol::id::TaskId>>>,
+    task_id: agent_studios_protocol::id::TaskId,
+}
+
+impl Drop for InFlightCancellationGuard {
+    fn drop(&mut self) {
+        let mut set = self.in_flight.lock().unwrap();
+        set.remove(&self.task_id);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -617,10 +641,26 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                 } => {
                     if session.role != ClientRole::Admin {
                         let is_foreign = {
-                            let origins = server_state.approval_origins.lock().unwrap();
-                            if let Some((s_id, k_id)) = origins.get(&approval_id) {
-                                s_id != &session.session_id
-                                    || session.key_id.as_deref() != Some(k_id.as_str())
+                            let mut origins = server_state.approval_origins.lock().unwrap();
+                            if let Some((s_id, k_id)) = origins.get_mut(&approval_id) {
+                                if let Some(ref caller_kid) = session.key_id {
+                                    if caller_kid == k_id {
+                                        if s_id != &session.session_id {
+                                            tracing::info!(
+                                                approval_id = %approval_id,
+                                                old_session = %s_id,
+                                                new_session = %session.session_id,
+                                                "Rebinding approval origin to reconnected session for authenticated key"
+                                            );
+                                            *s_id = session.session_id.clone();
+                                        }
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    true
+                                }
                             } else {
                                 true
                             }
@@ -638,6 +678,35 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                     let parsed_cp_id: Option<agent_studios_protocol::id::ApprovalId> =
                         std::str::FromStr::from_str(approval_id.as_str()).ok();
+
+                    let _in_flight_guard = if let Some(aid) = parsed_cp_id {
+                        let is_concurrent = {
+                            let mut in_flight = server_state.in_flight_approvals.lock().unwrap();
+                            if in_flight.contains(&aid) {
+                                true
+                            } else {
+                                in_flight.insert(aid);
+                                false
+                            }
+                        };
+                        if is_concurrent {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Concurrent approval resolution in progress for approval {}",
+                                    approval_id
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                        Some(InFlightApprovalGuard {
+                            in_flight: Arc::clone(&server_state.in_flight_approvals),
+                            approval_id: aid,
+                        })
+                    } else {
+                        None
+                    };
 
                     let is_in_cp = if let Some(aid) = parsed_cp_id {
                         let cp = server_state.control_plane.read().await;
@@ -973,18 +1042,34 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                 } => {
                     // Phase 4: Validate caller authorization and allowed cancellation scope
                     if session.role != ClientRole::Admin {
-                        let is_foreign = {
-                            let origins = server_state.task_origins.lock().unwrap();
-                            if let Some((s_id, k_id)) = origins.get(&task_id) {
-                                s_id != &session.session_id
-                                    || session.key_id.as_deref() != Some(k_id.as_str())
+                        let is_authorized = {
+                            let mut origins = server_state.task_origins.lock().unwrap();
+                            if let Some((s_id, k_id)) = origins.get_mut(&task_id) {
+                                if let Some(ref caller_kid) = session.key_id {
+                                    if caller_kid == k_id {
+                                        if s_id != &session.session_id {
+                                            tracing::info!(
+                                                task_id = %task_id,
+                                                old_session = %s_id,
+                                                new_session = %session.session_id,
+                                                "Rebinding task origin to reconnected session for authenticated key"
+                                            );
+                                            *s_id = session.session_id.clone();
+                                        }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
                         };
-                        if is_foreign {
+                        if !is_authorized {
                             tx.send(IpcResponse::Error {
-                                message: "Permission denied: cross-session cancellation requires admin role"
+                                message: "Permission denied: cross-session cancellation requires admin role (untracked or foreign task origin)"
                                     .to_string(),
                             })
                             .await
@@ -992,6 +1077,35 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                             continue;
                         }
                     }
+
+                    // Concurrent cancellation deduplication
+                    let _cancel_guard = {
+                        let is_concurrent = {
+                            let mut in_flight =
+                                server_state.in_flight_cancellations.lock().unwrap();
+                            if in_flight.contains(&task_id) {
+                                true
+                            } else {
+                                in_flight.insert(task_id);
+                                false
+                            }
+                        };
+                        if is_concurrent {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Concurrent cancellation in progress for task {}",
+                                    task_id
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                        InFlightCancellationGuard {
+                            in_flight: Arc::clone(&server_state.in_flight_cancellations),
+                            task_id,
+                        }
+                    };
 
                     // Validate task existence, studio ownership, and non-terminal state BEFORE stopping runtime
                     let pre_check = {
@@ -1366,9 +1480,33 @@ async fn execute_task_lifecycle(
         }
     };
 
-    let instance = match instances.into_iter().find(|i| i.is_available()) {
-        Some(inst) => inst,
-        None => {
+    let instance = if let Some(target_id) = server_state.configured_instance_id {
+        match instances
+            .into_iter()
+            .find(|i| i.instance_id == target_id && i.is_available())
+        {
+            Some(inst) => inst,
+            None => {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!(
+                            "Configured runtime instance '{target_id}' is not available"
+                        )),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+        }
+    } else {
+        let mut available: Vec<_> = instances.into_iter().filter(|i| i.is_available()).collect();
+        if available.is_empty() {
             let fail_envs = {
                 let mut cp = server_state.control_plane.write().await;
                 let _ = cp.record_run_outcome(
@@ -1378,6 +1516,25 @@ async fn execute_task_lifecycle(
                         "No available runtime instance discovered. OpenCode runtime binary not found. Install via: npm i -g opencode-ai or configure AGENT_STUDIOS_OPENCODE_PATH"
                             .to_string(),
                     ),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        } else if available.len() == 1 {
+            available.pop().unwrap()
+        } else {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!(
+                        "Multiple runtime instances available ({}) but no explicit instance selected. Configure target instance ID",
+                        available.len()
+                    )),
                 );
                 let _ = cp.transition_run_state(run_id, RunState::Failed);
                 let _ = cp.transition_task_state(task_id, TaskState::Failed);
@@ -1611,9 +1768,62 @@ async fn execute_task_lifecycle(
             .unwrap_or_default()
     };
 
-    let model_ref = {
+    let model_ref = if let Some(ref configured_ref) = server_state.default_model_ref {
         let catalog = server_state.provider_catalog.read().await;
-        catalog.list_models().first().map(|m| m.model_ref())
+        if catalog
+            .get_model(
+                &configured_ref.provider_instance_id,
+                &configured_ref.model_id,
+            )
+            .is_some()
+        {
+            Some(configured_ref.clone())
+        } else {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!(
+                        "Configured model '{}' not found in provider catalog",
+                        configured_ref
+                    )),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    } else {
+        let catalog = server_state.provider_catalog.read().await;
+        let models = catalog.list_models();
+        if models.is_empty() {
+            // Backward compatibility for test fixtures where no models are registered in catalog
+            None
+        } else if models.len() == 1 {
+            // Unambiguous single-model catalog
+            Some(models[0].model_ref())
+        } else {
+            // Non-deterministic in production: multiple models exist without explicit selection
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!(
+                        "Multiple models available ({}) in catalog but no explicit model route configured. Specify default model via IpcServerBuilder::with_default_model_ref or AGENT_STUDIOS_DEFAULT_MODEL environment variable",
+                        models.len()
+                    )),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
     };
 
     let mut start_req =
@@ -1786,6 +1996,15 @@ async fn execute_task_lifecycle(
                             runtime: runtime.clone(),
                         },
                     );
+                    if let Some((s_id, k_id)) = server_state
+                        .task_origins
+                        .lock()
+                        .unwrap()
+                        .get(&task_id)
+                        .cloned()
+                    {
+                        server_state.register_approval_origin(app.id.to_string(), s_id, k_id);
+                    }
                     let _ = server_state.publish_control_plane_events(envs);
                     let _ = server_state.emit_event(
                         "approval_requested",
