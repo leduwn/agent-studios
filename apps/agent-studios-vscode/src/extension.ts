@@ -159,6 +159,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } else if (connState === 'connecting' || connState === 'reconnecting') {
       statusBarItem.text = `$(sync~spin) Agent Studios: Connecting...${previewBadge}`;
       statusBarItem.tooltip = `Agent Studios: Connecting to daemon...${previewBadge}`;
+    } else if (connState === 'authenticating') {
+      statusBarItem.text = `$(key) Agent Studios: Authenticating...${previewBadge}`;
+      statusBarItem.tooltip = `Agent Studios: Authenticating with daemon credentials...${previewBadge}`;
+    } else if (connState === 'degraded') {
+      statusBarItem.text = `$(warning) Agent Studios: Degraded${previewBadge}`;
+      statusBarItem.tooltip = `Agent Studios: Daemon connection degraded${previewBadge}`;
+    } else if (connState === 'auth_required' || connState === 'authentication_failed') {
+      statusBarItem.text = `$(error) Agent Studios: Auth Failed${previewBadge}`;
+      statusBarItem.tooltip = `Agent Studios: Authentication failed. Please verify credentials.${previewBadge}`;
+    } else if (connState === 'incompatible' || connState === 'unsupported_protocol') {
+      statusBarItem.text = `$(error) Agent Studios: Incompatible Protocol${previewBadge}`;
+      statusBarItem.tooltip = `Agent Studios: Incompatible protocol version with daemon.${previewBadge}`;
     } else {
       statusBarItem.text = `$(circle-slash) Agent Studios: Disconnected${previewBadge}`;
       statusBarItem.tooltip = `Agent Studios: Disconnected. Click to open Agents Workbench.${previewBadge}`;

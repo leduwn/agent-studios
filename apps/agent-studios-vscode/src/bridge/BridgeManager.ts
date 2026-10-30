@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { DisconnectedBridge } from './DisconnectedBridge';
 import { FixtureBridge } from './FixtureBridge';
+import { DaemonConnectedBridge } from './DaemonConnectedBridge';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 
 /**
@@ -74,6 +75,40 @@ export class BridgeManager implements vscode.Disposable {
    */
   public get isPreviewMode(): boolean {
     return this._bridge instanceof FixtureBridge;
+  }
+
+  /**
+   * Whether currently connected to an active backend bridge.
+   */
+  public get isConnected(): boolean {
+    return this._bridge.connectionState === 'connected';
+  }
+
+  /**
+   * Whether active bridge is a real DaemonConnectedBridge.
+   */
+  public get isDaemonMode(): boolean {
+    return this._bridge instanceof DaemonConnectedBridge;
+  }
+
+  /**
+   * Connects to the local/remote agsd daemon and binds to projection.
+   */
+  public async connectDaemon(bootstrapPath?: string): Promise<DaemonConnectedBridge> {
+    const daemonBridge = new DaemonConnectedBridge({ bootstrapPath });
+    await daemonBridge.connect();
+    this.setBridge(daemonBridge);
+    return daemonBridge;
+  }
+
+  /**
+   * Disconnects current daemon connection and reverts to DisconnectedBridge.
+   */
+  public async disconnectDaemon(): Promise<void> {
+    if (this._bridge instanceof DaemonConnectedBridge) {
+      await this._bridge.disconnect();
+      this.setBridge(new DisconnectedBridge());
+    }
   }
 
   /**

@@ -1,9 +1,9 @@
 /**
  * Agent Studios — Rust IPC Wire Protocol Types (Approach A)
- * Milestone M14-UI-02.1: Protocol Correctness & Wire Compatibility
+ * Milestone M14-UI-02.1 & M14-IPC-03: Authoritative Wire Compatibility
  *
  * Defines the exact wire serialization types for the authoritative Rust daemon
- * (agent-studios-rs / crates ipc-protocol & ipc-transport).
+ * (agent-studios-rs / crates ipc-protocol, ipc-transport, protocol, provider).
  *
  * Rust Serde Format:
  * - Commands: internally tagged enum with `{"type": "snake_case"}`
@@ -34,6 +34,183 @@ export interface RustHmacAuthHeader {
   signature: string;
 }
 
+export type RustRiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+export type RustApprovalAction =
+  | {
+      action_type: 'command_execution';
+      command: string;
+      cwd: string;
+    }
+  | {
+      action_type: 'file_modification';
+      path: string;
+      diff: string;
+    }
+  | {
+      action_type: 'network_request';
+      url: string;
+      method: string;
+    }
+  | {
+      action_type: 'workspace_operation';
+      operation: string;
+      target: string;
+    }
+  | {
+      action_type: 'custom';
+      name: string;
+      details: unknown;
+    };
+
+export type RustApprovalStatus =
+  | 'requested'
+  | 'authorized'
+  | 'delivery_pending'
+  | 'delivered'
+  | 'rejected'
+  | 'timed_out'
+  | 'delivery_failed'
+  | 'execution_completed'
+  | 'execution_failed'
+  | 'cancelled';
+
+export interface RustApprovalContract {
+  approval_id: string;
+  session_id: string;
+  task_id: string;
+  run_id: string;
+  tool_call_id?: string;
+  risk_level: RustRiskLevel;
+  action: RustApprovalAction;
+  description: string;
+  created_at: string;
+  expires_at: string;
+  status: RustApprovalStatus;
+}
+
+export type RustApprovalDecision =
+  | {
+      decision: 'approved';
+      modified_details?: unknown;
+      user_note?: string;
+    }
+  | {
+      decision: 'rejected';
+      reason: string;
+    };
+
+export interface RustStudio {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export type RustTaskState =
+  | 'pending'
+  | 'blocked'
+  | 'ready'
+  | 'running'
+  | 'retrying'
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export type RustDependencyOutputPolicy = 'task_success' | 'reconciled_output';
+
+export interface RustTaskRecord {
+  id: string;
+  studio_id: string;
+  parent_task_id?: string | null;
+  assigned_agent_id?: string | null;
+  title: string;
+  description: string;
+  state: RustTaskState;
+  dependencies: string[];
+  created_at: string;
+  updated_at: string;
+  retry_count: number;
+  dependency_output_policy?: RustDependencyOutputPolicy;
+}
+
+export interface RustBatchTaskSpec {
+  key: string;
+  title: string;
+  description: string;
+  assigned_agent_id?: string | null;
+  parent_task_key?: string | null;
+  parent_task_id?: string | null;
+  dependency_keys?: string[];
+  dependency_task_ids?: string[];
+  dependency_output_policy?: RustDependencyOutputPolicy;
+}
+
+export type RustRunState =
+  | 'queued'
+  | 'starting'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface RustRunRecord {
+  id: string;
+  task_id: string;
+  agent_id: string;
+  attempt: number;
+  state: RustRunState;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface RustCancellationSummary {
+  cancelled_tasks: string[];
+  cancelled_runs: string[];
+  cancelled_approvals: string[];
+}
+
+export interface RustProviderInstance {
+  id: string;
+  provider_id: string;
+  display_name: string;
+  protocol?: unknown;
+  endpoint?: unknown;
+  authentication?: unknown;
+  enabled: boolean;
+}
+
+export interface RustModelLimits {
+  context_window_tokens?: number | null;
+  max_output_tokens?: number | null;
+}
+
+export interface RustModelDescriptor {
+  provider_instance_id: string;
+  id: string;
+  display_name: string;
+  capabilities?: unknown;
+  limits: RustModelLimits;
+  metadata_source?: 'manual' | 'static_catalog' | 'provider_discovery';
+}
+
+export interface RustIpcEvent {
+  sequence: number;
+  timestamp: string;
+  event_type: string;
+  payload: unknown;
+}
+
+export interface DaemonBootstrapInfo {
+  endpoint: string;
+  key_id: string;
+  client_key: string;
+  admin_key?: string | null;
+  pid: number;
+  created_at: number;
+}
+
 export type RustIpcCommand =
   | {
       type: 'negotiate_capabilities';
@@ -43,7 +220,7 @@ export type RustIpcCommand =
   | {
       type: 'authenticate';
       header: RustHmacAuthHeader;
-      payload: unknown | null;
+      payload?: number[] | null;
     }
   | {
       type: 'ping';
@@ -59,12 +236,12 @@ export type RustIpcCommand =
     }
   | {
       type: 'request_approval';
-      contract: unknown;
+      contract: RustApprovalContract;
     }
   | {
       type: 'resolve_approval';
       approval_id: string;
-      decision: unknown;
+      decision: RustApprovalDecision;
     }
   | {
       type: 'create_studio';
@@ -80,13 +257,13 @@ export type RustIpcCommand =
   | {
       type: 'submit_task';
       studio_id: string;
-      task_spec: unknown;
+      task_spec: RustBatchTaskSpec;
     }
   | {
       type: 'cancel_task';
-      studio_id?: string;
+      studio_id: string;
       task_id: string;
-      reason?: string;
+      reason?: string | null;
     }
   | {
       type: 'list_tasks';
@@ -119,11 +296,6 @@ export type RustIpcCommand =
     }
   | {
       type: 'shutdown';
-    }
-  | {
-      type: 'custom';
-      action: string;
-      payload: unknown;
     };
 
 export type RustIpcResponse =
@@ -151,7 +323,7 @@ export type RustIpcResponse =
     }
   | {
       type: 'event';
-      event: unknown;
+      event: RustIpcEvent;
     }
   | {
       type: 'approval_requested';
@@ -160,19 +332,19 @@ export type RustIpcResponse =
   | {
       type: 'approval_resolved';
       approval_id: string;
-      status: string;
+      status: RustApprovalStatus;
     }
   | {
       type: 'studio_created';
-      studio: unknown;
+      studio: RustStudio;
     }
   | {
       type: 'studios';
-      studios: unknown[];
+      studios: RustStudio[];
     }
   | {
       type: 'studio';
-      studio: unknown;
+      studio: RustStudio | null;
     }
   | {
       type: 'tasks_submitted';
@@ -180,38 +352,35 @@ export type RustIpcResponse =
     }
   | {
       type: 'task_cancelled';
-      summary: {
-        cancelled_task_ids: string[];
-        cancelled_run_ids: string[];
-      };
+      summary: RustCancellationSummary;
     }
   | {
       type: 'tasks';
-      tasks: unknown[];
+      tasks: RustTaskRecord[];
     }
   | {
       type: 'task';
-      task: unknown;
+      task: RustTaskRecord | null;
     }
   | {
       type: 'runs';
-      runs: unknown[];
+      runs: RustRunRecord[];
     }
   | {
       type: 'run';
-      run: unknown;
+      run: RustRunRecord | null;
     }
   | {
       type: 'providers';
-      providers: unknown[];
+      providers: RustProviderInstance[];
     }
   | {
       type: 'provider';
-      provider: unknown;
+      provider: RustProviderInstance | null;
     }
   | {
       type: 'models';
-      models: unknown[];
+      models: RustModelDescriptor[];
     }
   | {
       type: 'shutdown_acknowledged';
@@ -219,8 +388,8 @@ export type RustIpcResponse =
   | {
       type: 'error';
       message: string;
-      details?: unknown;
-      code?: string;
     };
+
+export type RustHealthResponse = Extract<RustIpcResponse, { type: 'health' }>;
 
 /* eslint-enable @typescript-eslint/naming-convention */

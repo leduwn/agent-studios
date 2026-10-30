@@ -61,7 +61,11 @@ describe('Rust IPC Codec & HMAC Authentication Unit Tests (Approach A)', () => {
       const oversizedCommand: RustIpcCommand = {
         type: 'submit_task',
         studio_id: 'studio-99',
-        task_spec: { title: 'T'.repeat(200) },
+        task_spec: {
+          key: 'task-99',
+          title: 'T'.repeat(200),
+          description: 'Oversized description payload',
+        },
       };
 
       assert.throws(() => {
