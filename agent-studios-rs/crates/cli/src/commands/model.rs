@@ -102,6 +102,10 @@ pub struct TestModelArgs {
     /// Model reference
     #[arg(value_name = "MODEL_REF")]
     pub model_ref: String,
+
+    /// Execute live network connectivity probe to provider endpoint
+    #[arg(long)]
+    pub probe: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -341,7 +345,31 @@ async fn handle_test(args: TestModelArgs) -> Result<(), Box<dyn std::error::Erro
         model.limits.context_window_tokens, model.limits.max_output_tokens
     );
 
-    println!("✓ Model descriptor verification passed. Provider endpoint reachable.");
+    if args.probe {
+        println!("Performing live connectivity probe...");
+        let secret_store = std::sync::Arc::new(crate::config::get_system_secret_store());
+        let discovery_client = agent_studios_provider::ModelDiscoveryClient::new(
+            secret_store,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(300),
+        );
+        let report = discovery_client.test_connection(instance).await;
+        if report.reachability.state == agent_studios_provider::CheckState::Passed {
+            println!(
+                "✓ Model descriptor valid. Provider endpoint reachable: {}",
+                report.reachability.message
+            );
+        } else {
+            return Err(format!(
+                "Provider endpoint unreachable: {}",
+                report.reachability.message
+            )
+            .into());
+        }
+    } else {
+        println!("✓ Model descriptor verification passed.");
+        println!("  Connectivity: NOT_TESTED (run with --probe to execute live network test)");
+    }
     Ok(())
 }
 

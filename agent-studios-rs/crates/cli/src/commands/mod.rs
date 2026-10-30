@@ -149,6 +149,7 @@ wire_specification = "responses"
             source: Some("codex".to_string()),
             strategy: "overwrite".to_string(),
             dry_run: true,
+            yes: true,
         }))
         .await
         .unwrap();
@@ -162,6 +163,7 @@ wire_specification = "responses"
             source: Some("codex".to_string()),
             strategy: "overwrite".to_string(),
             dry_run: false,
+            yes: true,
         }))
         .await
         .unwrap();

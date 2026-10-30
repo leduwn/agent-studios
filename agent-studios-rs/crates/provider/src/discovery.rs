@@ -60,6 +60,74 @@ pub enum DiscoveryError {
     HttpError { status: u16, message: String },
 }
 
+/// Status state of an individual connection test check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Passed,
+    Failed,
+    Skipped,
+    NotTested,
+}
+
+/// Granular status detail for a connection test category.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckDetail {
+    pub state: CheckState,
+    pub message: String,
+}
+
+impl CheckDetail {
+    pub fn passed(msg: impl Into<String>) -> Self {
+        Self {
+            state: CheckState::Passed,
+            message: msg.into(),
+        }
+    }
+
+    pub fn failed(msg: impl Into<String>) -> Self {
+        Self {
+            state: CheckState::Failed,
+            message: msg.into(),
+        }
+    }
+
+    pub fn skipped(msg: impl Into<String>) -> Self {
+        Self {
+            state: CheckState::Skipped,
+            message: msg.into(),
+        }
+    }
+
+    pub fn not_tested(msg: impl Into<String>) -> Self {
+        Self {
+            state: CheckState::NotTested,
+            message: msg.into(),
+        }
+    }
+}
+
+/// Comprehensive connectivity test report for a provider instance.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderConnectionReport {
+    pub instance_id: ProviderInstanceId,
+    pub configuration: CheckDetail,
+    pub credential: CheckDetail,
+    pub reachability: CheckDetail,
+    pub auth: CheckDetail,
+    pub discovery: CheckDetail,
+    pub runtime: CheckDetail,
+}
+
+impl ProviderConnectionReport {
+    pub fn is_overall_success(&self) -> bool {
+        self.configuration.state != CheckState::Failed
+            && self.credential.state != CheckState::Failed
+            && self.reachability.state != CheckState::Failed
+            && self.auth.state != CheckState::Failed
+    }
+}
+
 /// Dynamic model discovery cache mapping an instance ID to its timestamped descriptors.
 pub type ModelDiscoveryCache = Arc<
     tokio::sync::RwLock<HashMap<ProviderInstanceId, (std::time::Instant, Vec<ModelDescriptor>)>>,
@@ -84,6 +152,18 @@ impl ModelDiscoveryClient {
     pub fn with_config(secret_store: Arc<dyn SecretStore>, config: DiscoveryConfig) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(config.timeout)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if let Some(prev) = attempt.previous().first() {
+                    // Block redirects across different origins (scheme, host, or port) to prevent leaking credentials
+                    if prev.origin() != attempt.url().origin() {
+                        return attempt.stop();
+                    }
+                }
+                if attempt.previous().len() >= 5 {
+                    return attempt.stop();
+                }
+                attempt.follow()
+            }))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
@@ -103,6 +183,208 @@ impl ModelDiscoveryClient {
     /// Returns a reference to the discovery configuration.
     pub fn config(&self) -> &DiscoveryConfig {
         &self.config
+    }
+
+    /// Performs a granular, real 6-stage connectivity test for a provider instance.
+    pub async fn test_connection(&self, instance: &ProviderInstance) -> ProviderConnectionReport {
+        // 1. Configuration check
+        let url_str = match resolve_endpoint_url(instance) {
+            Ok(url) => {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    url
+                } else {
+                    return ProviderConnectionReport {
+                        instance_id: instance.id,
+                        configuration: CheckDetail::failed(
+                            "Endpoint URL must use http or https scheme",
+                        ),
+                        credential: CheckDetail::skipped("Skipped due to configuration failure"),
+                        reachability: CheckDetail::skipped("Skipped due to configuration failure"),
+                        auth: CheckDetail::skipped("Skipped due to configuration failure"),
+                        discovery: CheckDetail::skipped("Skipped due to configuration failure"),
+                        runtime: CheckDetail::not_tested(
+                            "Runtime inference requires explicit probe flag",
+                        ),
+                    };
+                }
+            }
+            Err(e) => {
+                return ProviderConnectionReport {
+                    instance_id: instance.id,
+                    configuration: CheckDetail::failed(format!("Endpoint resolution failed: {e}")),
+                    credential: CheckDetail::skipped("Skipped due to configuration failure"),
+                    reachability: CheckDetail::skipped("Skipped due to configuration failure"),
+                    auth: CheckDetail::skipped("Skipped due to configuration failure"),
+                    discovery: CheckDetail::skipped("Skipped due to configuration failure"),
+                    runtime: CheckDetail::not_tested(
+                        "Runtime inference requires explicit probe flag",
+                    ),
+                };
+            }
+        };
+
+        let configuration = CheckDetail::passed(format!("Valid endpoint URL: {url_str}"));
+
+        // 2. Credential check
+        let credential = match &instance.authentication {
+            AuthenticationScheme::None => {
+                CheckDetail::passed("No authentication required (Scheme: None)")
+            }
+            AuthenticationScheme::BearerToken { secret }
+            | AuthenticationScheme::ApiKeyHeader { secret, .. }
+            | AuthenticationScheme::QueryParameter { secret, .. }
+            | AuthenticationScheme::OAuthToken { secret } => {
+                match self.secret_store.get_secret(secret) {
+                    Ok(val) if !val.trim().is_empty() => CheckDetail::passed(format!(
+                        "Secret resolved from {} ({})",
+                        secret.backend, secret.locator
+                    )),
+                    Ok(_) => CheckDetail::failed(format!(
+                        "Secret in {} ({}) is empty",
+                        secret.backend, secret.locator
+                    )),
+                    Err(e) => CheckDetail::failed(format!(
+                        "Secret resolution failed from {} ({}): {e}",
+                        secret.backend, secret.locator
+                    )),
+                }
+            }
+            AuthenticationScheme::AwsSigV4 { credential, .. } => {
+                match self.secret_store.get_secret(credential) {
+                    Ok(val) if !val.trim().is_empty() => CheckDetail::passed(format!(
+                        "AWS credential resolved from {} ({})",
+                        credential.backend, credential.locator
+                    )),
+                    Ok(_) => CheckDetail::failed(format!(
+                        "AWS credential in {} ({}) is empty",
+                        credential.backend, credential.locator
+                    )),
+                    Err(e) => CheckDetail::failed(format!("AWS credential resolution failed: {e}")),
+                }
+            }
+        };
+
+        if credential.state == CheckState::Failed {
+            return ProviderConnectionReport {
+                instance_id: instance.id,
+                configuration,
+                credential,
+                reachability: CheckDetail::skipped("Skipped due to credential failure"),
+                auth: CheckDetail::skipped("Skipped due to credential failure"),
+                discovery: CheckDetail::skipped("Skipped due to credential failure"),
+                runtime: CheckDetail::not_tested("Runtime inference requires explicit probe flag"),
+            };
+        }
+
+        // 3. Reachability, 4. Auth, 5. Discovery
+        let (headers, query_auth) =
+            match build_headers_and_auth(instance, self.secret_store.as_ref()) {
+                Ok(h) => h,
+                Err(e) => {
+                    return ProviderConnectionReport {
+                        instance_id: instance.id,
+                        configuration,
+                        credential,
+                        reachability: CheckDetail::failed(format!(
+                            "Failed to build headers/auth: {e}"
+                        )),
+                        auth: CheckDetail::skipped("Skipped due to header construction failure"),
+                        discovery: CheckDetail::skipped(
+                            "Skipped due to header construction failure",
+                        ),
+                        runtime: CheckDetail::not_tested(
+                            "Runtime inference requires explicit probe flag",
+                        ),
+                    };
+                }
+            };
+
+        let mut req = self.http_client.get(&url_str).headers(headers);
+        if !instance.endpoint.query_params.is_empty() {
+            req = req.query(&instance.endpoint.query_params);
+        }
+        if let Some((param, val)) = query_auth {
+            req = req.query(&[(param, val)]);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let err_msg = if e.is_timeout() {
+                    format!("Connection timed out after {:?}", self.config.timeout)
+                } else if e.is_connect() {
+                    format!("Connection refused or DNS resolution failed: {e}")
+                } else {
+                    format!("Network error: {e}")
+                };
+                return ProviderConnectionReport {
+                    instance_id: instance.id,
+                    configuration,
+                    credential,
+                    reachability: CheckDetail::failed(err_msg),
+                    auth: CheckDetail::skipped("Skipped due to reachability failure"),
+                    discovery: CheckDetail::skipped("Skipped due to reachability failure"),
+                    runtime: CheckDetail::not_tested(
+                        "Runtime inference requires explicit probe flag",
+                    ),
+                };
+            }
+        };
+
+        let status = resp.status();
+        let reachability =
+            CheckDetail::passed(format!("HTTP probe contacted endpoint (HTTP {status})"));
+
+        let (auth, discovery) = if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+        {
+            (
+                CheckDetail::failed(format!("Authentication rejected: HTTP {status}")),
+                CheckDetail::skipped("Discovery skipped due to authentication failure"),
+            )
+        } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            (
+                CheckDetail::passed("Authenticated (HTTP 429 Rate Limited)"),
+                CheckDetail::skipped("Discovery skipped due to rate limit"),
+            )
+        } else if status.is_success() {
+            let auth_detail =
+                CheckDetail::passed(format!("Authentication accepted (HTTP {status})"));
+            match resp.text().await {
+                Ok(body) => match parse_and_normalize_payload(instance.id, &body) {
+                    Ok(models) => (
+                        auth_detail,
+                        CheckDetail::passed(format!(
+                            "Successfully discovered {} model(s)",
+                            models.len()
+                        )),
+                    ),
+                    Err(e) => (
+                        auth_detail,
+                        CheckDetail::failed(format!("Catalog parsing failed: {e}")),
+                    ),
+                },
+                Err(e) => (
+                    auth_detail,
+                    CheckDetail::failed(format!("Failed to read response body: {e}")),
+                ),
+            }
+        } else {
+            (
+                CheckDetail::failed(format!("Endpoint returned unexpected HTTP {status}")),
+                CheckDetail::skipped(format!("Discovery skipped due to HTTP {status}")),
+            )
+        };
+
+        ProviderConnectionReport {
+            instance_id: instance.id,
+            configuration,
+            credential,
+            reachability,
+            auth,
+            discovery,
+            runtime: CheckDetail::not_tested("Runtime inference requires explicit probe flag"),
+        }
     }
 
     /// Discovers models available on a provider instance, returning cached results if unexpired.

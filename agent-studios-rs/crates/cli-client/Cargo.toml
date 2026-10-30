@@ -14,6 +14,7 @@ agent-studios-orchestration = { path = "../orchestration" }
 agent-studios-workspace = { path = "../workspace" }
 agent-studios-external-runtime = { path = "../external-runtime" }
 agent-studios-opencode-runtime = { path = "../opencode-runtime" }
+agent-studios-provider = { path = "../provider" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

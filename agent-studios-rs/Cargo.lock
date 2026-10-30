@@ -125,6 +125,7 @@ dependencies = [
  "agent-studios-opencode-runtime",
  "agent-studios-orchestration",
  "agent-studios-protocol",
+ "agent-studios-provider",
  "agent-studios-workspace",
  "async-trait",
  "chrono",

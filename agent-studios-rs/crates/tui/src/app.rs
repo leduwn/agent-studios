@@ -193,6 +193,27 @@ impl AgsApp {
             });
         }
 
+        let default_model_label = {
+            let cat = crate::widgets::provider_panel::load_catalog_from_environment();
+            if let Some((p_id, i_id)) = cat.default_instances().iter().next() {
+                let models = cat.models_for_provider_instance(i_id);
+                if let Some(first) = models.first() {
+                    format!("{}/{}", p_id, first.id)
+                } else {
+                    format!("{}/default", p_id)
+                }
+            } else if let Some(inst) = cat.list_provider_instances().first() {
+                let models = cat.models_for_provider_instance(&inst.id);
+                if let Some(first) = models.first() {
+                    format!("{}/{}", inst.provider_id, first.id)
+                } else {
+                    format!("{}/default", inst.provider_id)
+                }
+            } else {
+                "Not configured".to_string()
+            }
+        };
+
         Self {
             client,
             theme: AgsTheme::dark(),
@@ -211,7 +232,7 @@ impl AgsApp {
             project_name,
             branch_name,
             is_dirty,
-            model_name: "Not configured".to_string(),
+            model_name: default_model_label,
             execution_mode,
             input_tokens: 0,
             output_tokens: 0,
@@ -430,7 +451,13 @@ impl AgsApp {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Provider panel interception if active
         if let Some(panel) = self.provider_panel.as_mut() {
-            if !panel.handle_key(key) {
+            let active = panel.handle_key(key);
+            if let Some(inst) = panel.selected_instance()
+                && let Some(m) = panel.selected_model()
+            {
+                self.model_name = format!("{}/{}", inst.provider_id, m.id);
+            }
+            if !active {
                 self.provider_panel = None;
             }
             return Ok(());
@@ -557,11 +584,11 @@ impl AgsApp {
                         self.scroll_offset = 0;
                         self.transcript
                             .push(TranscriptItem::UserPrompt(prompt.clone()));
-                        if let Err(e) = self
-                            .client
-                            .submit_goal(&prompt, GoalSubmissionOptions::default())
-                            .await
-                        {
+                        let mut options = GoalSubmissionOptions::default();
+                        if self.model_name != "Not configured" {
+                            options.model = Some(self.model_name.clone());
+                        }
+                        if let Err(e) = self.client.submit_goal(&prompt, options).await {
                             self.transcript.push(TranscriptItem::SystemNotice {
                                 level: "Error".to_string(),
                                 message: format!("Action failed: {e}"),

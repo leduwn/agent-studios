@@ -21,7 +21,10 @@ pub use builtin::builtin_definitions;
 pub use capabilities::{CapabilitySupport, ModelCapabilities};
 pub use catalog::ProviderCatalog;
 pub use definition::ProviderDefinition;
-pub use discovery::{DiscoveryConfig, DiscoveryError, ModelDiscoveryClient};
+pub use discovery::{
+    CheckDetail, CheckState, DiscoveryConfig, DiscoveryError, ModelDiscoveryClient,
+    ProviderConnectionReport,
+};
 pub use endpoint::EndpointProfile;
 pub use error::ProviderError;
 pub use id::{ModelId, ProviderId, ProviderInstanceId};

@@ -16,7 +16,6 @@ use agent_studios_provider::importer::{
 use agent_studios_provider::instance::ProviderInstance;
 use agent_studios_provider::protocol::ProtocolFamily;
 use agent_studios_provider::secret::SecretReference;
-use agent_studios_provider::store::SecretStore;
 
 use crate::config::{get_system_secret_store, load_catalog, save_catalog};
 
@@ -126,6 +125,10 @@ pub struct ImportProviderArgs {
     /// Preview planned changes without committing to the catalog
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Automatically confirm and apply overwrite conflicts without prompt
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]
@@ -133,6 +136,10 @@ pub struct TestProviderArgs {
     /// Provider instance ID
     #[arg(value_name = "INSTANCE_ID")]
     pub instance_id: String,
+
+    /// Output format (table or json)
+    #[arg(long, default_value = "table")]
+    pub format: OutputFormat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -512,6 +519,25 @@ fn handle_import(args: ImportProviderArgs) -> Result<(), Box<dyn std::error::Err
         for c in &preview.conflicts {
             println!("    ! Conflict on instance {}: {}", c.instance_id, c.reason);
         }
+
+        if strategy == ConflictResolutionStrategy::Overwrite && !args.dry_run && !args.yes {
+            println!(
+                "\nWarning: {} conflicting instance(s) will be overwritten.",
+                preview.conflicts.len()
+            );
+            print!("Proceed with overwrite? [y/N]: ");
+            use std::io::Write;
+            std::io::stdout().flush()?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let trimmed = input.trim().to_lowercase();
+            if trimmed != "y" && trimmed != "yes" {
+                println!(
+                    "Import cancelled by user. Specify --yes to confirm non-interactively or --strategy skip."
+                );
+                return Ok(());
+            }
+        }
     }
 
     if args.dry_run {
@@ -535,73 +561,74 @@ async fn handle_test(args: TestProviderArgs) -> Result<(), Box<dyn std::error::E
         .get_provider_instance(&id)
         .ok_or_else(|| format!("Provider instance '{id}' not found in catalog"))?;
 
-    println!(
-        "Testing provider instance '{}' ({})...",
-        instance.display_name, instance.provider_id
+    let secret_store = std::sync::Arc::new(get_system_secret_store());
+    let discovery_client = agent_studios_provider::ModelDiscoveryClient::new(
+        secret_store,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(300),
     );
-    println!("Endpoint: {}", instance.endpoint.base_url);
 
-    // Validate credentials if required
-    let secret_store = get_system_secret_store();
-    let has_credential = match &instance.authentication {
-        AuthenticationScheme::None => {
-            println!("Auth: None (no credentials required)");
-            true
-        }
-        AuthenticationScheme::BearerToken { secret } => {
-            test_secret_resolution(&secret_store, secret, "Bearer token")
-        }
-        AuthenticationScheme::ApiKeyHeader {
-            header_name,
-            secret,
-        } => test_secret_resolution(&secret_store, secret, &format!("Header '{header_name}'")),
-        AuthenticationScheme::QueryParameter {
-            parameter_name,
-            secret,
-        } => test_secret_resolution(
-            &secret_store,
-            secret,
-            &format!("Query param '{parameter_name}'"),
-        ),
-        AuthenticationScheme::OAuthToken { secret } => {
-            test_secret_resolution(&secret_store, secret, "OAuth token")
-        }
-        AuthenticationScheme::AwsSigV4 { credential, .. } => {
-            test_secret_resolution(&secret_store, credential, "AWS SigV4 credential")
-        }
-    };
+    let report = discovery_client.test_connection(instance).await;
 
-    if !has_credential {
-        return Err("Credential verification failed. Ensure environment variable or OS keyring entry is configured.".into());
+    if args.format == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if !report.is_overall_success() {
+            return Err("Provider connection test failed".into());
+        }
+        return Ok(());
     }
 
-    println!("✓ Provider instance validation succeeded.");
-    Ok(())
-}
+    fn badge_str(state: agent_studios_provider::CheckState) -> &'static str {
+        match state {
+            agent_studios_provider::CheckState::Passed => "PASSED",
+            agent_studios_provider::CheckState::Failed => "FAILED",
+            agent_studios_provider::CheckState::Skipped => "SKIPPED",
+            agent_studios_provider::CheckState::NotTested => "NOT_TESTED",
+        }
+    }
 
-fn test_secret_resolution(
-    secret_store: &dyn SecretStore,
-    secret: &SecretReference,
-    label: &str,
-) -> bool {
-    print!(
-        "Auth: {} via {} ({})... ",
-        label, secret.backend, secret.locator
+    println!(
+        "Provider Connectivity Report: {} ({})",
+        instance.display_name, instance.id
     );
-    match secret_store.get_secret(secret) {
-        Ok(val) => {
-            let len = val.len();
-            if len > 0 {
-                println!("✓ Resolved ({} chars)", len);
-                true
-            } else {
-                println!("✗ Empty secret value");
-                false
-            }
-        }
-        Err(e) => {
-            println!("✗ Failed: {e}");
-            false
-        }
+    println!("{:-<60}", "");
+    println!(
+        "  1. Configuration:   [{:<10}] {}",
+        badge_str(report.configuration.state),
+        report.configuration.message
+    );
+    println!(
+        "  2. Credential:      [{:<10}] {}",
+        badge_str(report.credential.state),
+        report.credential.message
+    );
+    println!(
+        "  3. Reachability:    [{:<10}] {}",
+        badge_str(report.reachability.state),
+        report.reachability.message
+    );
+    println!(
+        "  4. Authentication:  [{:<10}] {}",
+        badge_str(report.auth.state),
+        report.auth.message
+    );
+    println!(
+        "  5. Model Discovery: [{:<10}] {}",
+        badge_str(report.discovery.state),
+        report.discovery.message
+    );
+    println!(
+        "  6. Runtime Probe:   [{:<10}] {}",
+        badge_str(report.runtime.state),
+        report.runtime.message
+    );
+    println!("{:-<60}", "");
+
+    if report.is_overall_success() {
+        println!("✓ Overall Status: PASSED (provider instance reachable and authenticated)");
+        Ok(())
+    } else {
+        println!("✗ Overall Status: FAILED");
+        Err("Provider connection test failed".into())
     }
 }

@@ -36,9 +36,9 @@ pub struct ProviderPanelState {
     pub show_help: bool,
 }
 
-/// Loads the provider catalog from disk using `$AGENT_STUDIOS_HOME` or default user directory.
-pub fn load_catalog_from_environment() -> ProviderCatalog {
-    let path = if let Ok(h) = std::env::var("AGENT_STUDIOS_HOME") {
+/// Resolves the provider catalog file path from environment or default user directories.
+pub fn catalog_path_from_environment() -> std::path::PathBuf {
+    if let Ok(h) = std::env::var("AGENT_STUDIOS_HOME") {
         std::path::PathBuf::from(h.trim()).join("providers.json")
     } else if let Ok(u) = std::env::var("USERPROFILE") {
         std::path::PathBuf::from(u.trim())
@@ -50,8 +50,12 @@ pub fn load_catalog_from_environment() -> ProviderCatalog {
             .join("providers.json")
     } else {
         std::path::PathBuf::from(".agent-studios").join("providers.json")
-    };
+    }
+}
 
+/// Loads the provider catalog from disk using `$AGENT_STUDIOS_HOME` or default user directory.
+pub fn load_catalog_from_environment() -> ProviderCatalog {
+    let path = catalog_path_from_environment();
     if let Some(cat) = std::fs::read_to_string(&path)
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
@@ -60,6 +64,22 @@ pub fn load_catalog_from_environment() -> ProviderCatalog {
         return cat;
     }
     ProviderCatalog::with_builtin_definitions()
+}
+
+/// Atomically persists the provider catalog to disk using a sibling temporary file.
+pub fn save_catalog_to_environment(
+    catalog: &ProviderCatalog,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = catalog_path_from_environment();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let snapshot = catalog.export_snapshot();
+    let json = serde_json::to_string_pretty(&snapshot)?;
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, json.as_bytes())?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
 }
 
 impl Default for ProviderPanelState {
@@ -169,7 +189,8 @@ impl ProviderPanelState {
         }
     }
 
-    /// Sets the highlighted provider instance as default for its provider family.
+    /// Sets the highlighted provider instance as default for its provider family,
+    /// atomically persisting the updated catalog to disk.
     pub fn set_current_as_default(&mut self) -> Result<(), String> {
         let (p_id, i_id) = {
             let inst = self
@@ -182,7 +203,12 @@ impl ProviderPanelState {
             .set_default_instance_for_provider(&p_id, &i_id)
             .map_err(|e| e.to_string())?;
 
-        self.status_message = Some(format!("★ Marked {i_id} as default for '{p_id}'"));
+        if let Err(e) = save_catalog_to_environment(&self.catalog) {
+            self.status_message = Some(format!("⚠ Marked default but failed to save: {e}"));
+            return Err(e.to_string());
+        }
+
+        self.status_message = Some(format!("★ Marked {i_id} as default for '{p_id}' (saved)"));
         Ok(())
     }
 

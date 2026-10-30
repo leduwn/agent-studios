@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_studios_provider::auth::AuthenticationScheme;
-use agent_studios_provider::discovery::{DiscoveryConfig, DiscoveryError, ModelDiscoveryClient};
+use agent_studios_provider::discovery::{
+    CheckState, DiscoveryConfig, DiscoveryError, ModelDiscoveryClient,
+};
 use agent_studios_provider::endpoint::EndpointProfile;
 use agent_studios_provider::id::{ProviderId, ProviderInstanceId};
 use agent_studios_provider::instance::ProviderInstance;
@@ -451,4 +453,242 @@ async fn test_invalid_json_payload_returns_error() {
         }
         other => panic!("Expected InvalidPayload, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_connection_all_checks_passed() {
+    let server = MockServer::start().await;
+
+    let secret_ref = SecretReference::env("CONN_TEST_KEY").unwrap();
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "sk-conn-test-key"));
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("authorization", "Bearer sk-conn-test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "id": "gpt-4o" }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Test Connection",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new(server.uri()).unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    let report = client.test_connection(&instance).await;
+    assert_eq!(report.configuration.state, CheckState::Passed);
+    assert_eq!(report.credential.state, CheckState::Passed);
+    assert_eq!(report.reachability.state, CheckState::Passed);
+    assert_eq!(report.auth.state, CheckState::Passed);
+    assert_eq!(report.discovery.state, CheckState::Passed);
+    assert_eq!(report.runtime.state, CheckState::NotTested);
+    assert!(report.is_overall_success());
+}
+
+#[tokio::test]
+async fn test_connection_auth_rejected_401() {
+    let server = MockServer::start().await;
+
+    let secret_ref = SecretReference::env("BAD_KEY").unwrap();
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "invalid-token"));
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("Invalid API Key"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Bad Auth",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new(server.uri()).unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    let report = client.test_connection(&instance).await;
+    assert_eq!(report.configuration.state, CheckState::Passed);
+    assert_eq!(report.credential.state, CheckState::Passed);
+    assert_eq!(report.reachability.state, CheckState::Passed);
+    assert_eq!(report.auth.state, CheckState::Failed);
+    assert_eq!(report.discovery.state, CheckState::Skipped);
+    assert_eq!(report.runtime.state, CheckState::NotTested);
+    assert!(!report.is_overall_success());
+}
+
+#[tokio::test]
+async fn test_connection_missing_credential_fails_early() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_ref = SecretReference::env("UNSET_KEY").unwrap();
+
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Missing Key",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new("https://api.openai.com/v1").unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    let report = client.test_connection(&instance).await;
+    assert_eq!(report.configuration.state, CheckState::Passed);
+    assert_eq!(report.credential.state, CheckState::Failed);
+    assert_eq!(report.reachability.state, CheckState::Skipped);
+    assert_eq!(report.auth.state, CheckState::Skipped);
+    assert_eq!(report.discovery.state, CheckState::Skipped);
+    assert_eq!(report.runtime.state, CheckState::NotTested);
+    assert!(!report.is_overall_success());
+}
+
+#[tokio::test]
+async fn test_connection_unreachable_endpoint_fails_reachability() {
+    let secret_ref = SecretReference::env("KEY").unwrap();
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "dummy-val"));
+
+    // Connect to invalid loopback port guaranteed to fail connection
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Refused",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new("http://127.0.0.1:59999").unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_millis(500),
+        Duration::from_secs(60),
+    );
+
+    let report = client.test_connection(&instance).await;
+    assert_eq!(report.configuration.state, CheckState::Passed);
+    assert_eq!(report.credential.state, CheckState::Passed);
+    assert_eq!(report.reachability.state, CheckState::Failed);
+    assert_eq!(report.auth.state, CheckState::Skipped);
+    assert_eq!(report.discovery.state, CheckState::Skipped);
+    assert!(!report.is_overall_success());
+}
+
+#[tokio::test]
+async fn test_connection_rate_limited_429_treated_as_auth_success() {
+    let server = MockServer::start().await;
+
+    let secret_ref = SecretReference::env("KEY_429").unwrap();
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "valid-key-429"));
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("Rate limited"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI 429",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new(server.uri()).unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    let report = client.test_connection(&instance).await;
+    assert_eq!(report.configuration.state, CheckState::Passed);
+    assert_eq!(report.credential.state, CheckState::Passed);
+    assert_eq!(report.reachability.state, CheckState::Passed);
+    assert_eq!(report.auth.state, CheckState::Passed);
+    assert_eq!(report.discovery.state, CheckState::Skipped);
+    assert_eq!(report.runtime.state, CheckState::NotTested);
+    assert!(report.is_overall_success());
+}
+
+#[tokio::test]
+async fn test_redirect_cross_origin_blocked() {
+    let origin_server = MockServer::start().await;
+    let target_server = MockServer::start().await;
+
+    let secret_ref = SecretReference::env("LEAK_KEY").unwrap();
+    let secret_store =
+        Arc::new(InMemorySecretStore::new().with_secret(secret_ref.clone(), "sensitive-token-123"));
+
+    // Origin server redirects to different domain (target_server)
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/models", target_server.uri())),
+        )
+        .expect(1)
+        .mount(&origin_server)
+        .await;
+
+    // Target server must NEVER be contacted because redirect stops across different hosts
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": [] })))
+        .expect(0)
+        .mount(&target_server)
+        .await;
+
+    let instance = ProviderInstance::new(
+        ProviderInstanceId::new(),
+        ProviderId::new("openai").unwrap(),
+        "OpenAI Redirect Origin",
+        ProtocolFamily::OpenAiResponses,
+        EndpointProfile::new(origin_server.uri()).unwrap(),
+        AuthenticationScheme::BearerToken { secret: secret_ref },
+    )
+    .unwrap();
+
+    let client = ModelDiscoveryClient::new(
+        secret_store,
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+    );
+
+    // Discovery should stop at redirect and fail with unexpected status 302 rather than leaking credentials to target_server
+    let res = client.discover_models(&instance).await;
+    assert!(res.is_err());
 }
