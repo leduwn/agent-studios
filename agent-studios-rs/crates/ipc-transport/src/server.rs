@@ -21,6 +21,26 @@ pub enum ClientRole {
     Standard,
 }
 
+/// Pending runtime approval mapping tracking correlation between Control Plane approvals and external agent runtimes.
+#[derive(Clone)]
+pub struct PendingRuntimeApproval {
+    pub session_ref: agent_studios_external_runtime::RuntimeSessionRef,
+    pub runtime_approval_id: agent_studios_protocol::id::ApprovalId,
+    pub runtime: Arc<dyn agent_studios_external_runtime::AgentRuntime>,
+}
+
+pub type ActiveRuntimeSessions = Arc<
+    tokio::sync::RwLock<
+        HashMap<
+            agent_studios_protocol::id::TaskId,
+            (
+                agent_studios_external_runtime::RuntimeSessionRef,
+                Arc<dyn agent_studios_external_runtime::AgentRuntime>,
+            ),
+        >,
+    >,
+>;
+
 pub struct ServerState {
     pub auth_signer: Arc<HmacSigner>,
     pub nonce_tracker: Arc<Mutex<NonceTracker>>,
@@ -38,6 +58,13 @@ pub struct ServerState {
     pub provider_catalog: Arc<tokio::sync::RwLock<ProviderCatalog>>,
     pub auto_execute: bool,
     pub runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    pub workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
+    pub active_runtime_sessions: ActiveRuntimeSessions,
+    pub pending_runtime_approvals: Arc<
+        tokio::sync::RwLock<
+            HashMap<agent_studios_protocol::id::ApprovalId, PendingRuntimeApproval>,
+        >,
+    >,
 }
 
 impl ServerState {
@@ -109,6 +136,7 @@ pub struct IpcServerBuilder {
     provider_catalog: Option<ProviderCatalog>,
     auto_execute: bool,
     runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
 }
 
 impl Default for IpcServerBuilder {
@@ -137,6 +165,7 @@ impl IpcServerBuilder {
             provider_catalog: None,
             auto_execute: false,
             runtime: None,
+            workspace_orchestrator: None,
         }
     }
 
@@ -199,6 +228,14 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_workspace_orchestrator(
+        mut self,
+        orchestrator: Arc<agent_studios_workspace::WorkspaceOrchestrator>,
+    ) -> Self {
+        self.workspace_orchestrator = Some(orchestrator);
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -207,10 +244,28 @@ impl IpcServerBuilder {
         let control_plane = Arc::new(tokio::sync::RwLock::new(
             self.control_plane.unwrap_or_else(ControlPlane::new_default),
         ));
-        let provider_catalog = Arc::new(tokio::sync::RwLock::new(
+
+        let catalog_arc = Arc::new(
             self.provider_catalog
                 .unwrap_or_else(ProviderCatalog::with_builtin_definitions),
-        ));
+        );
+        let provider_catalog = Arc::new(tokio::sync::RwLock::new((*catalog_arc).clone()));
+
+        let runtime = self.runtime.or_else(|| {
+            agent_studios_opencode_runtime::OpenCodeRuntime::new()
+                .map(|rt| rt.with_catalog(catalog_arc.clone()))
+                .ok()
+                .map(|rt| Arc::new(rt) as Arc<dyn agent_studios_external_runtime::AgentRuntime>)
+        });
+
+        let workspace_orchestrator = self.workspace_orchestrator.or_else(|| {
+            let base_dir = std::env::temp_dir().join("agent-studios-workspaces");
+            let wt_root = base_dir.join("worktrees");
+            let art_root = base_dir.join("artifacts");
+            agent_studios_workspace::WorkspaceOrchestrator::new(wt_root, art_root)
+                .ok()
+                .map(Arc::new)
+        });
 
         let state = Arc::new(ServerState {
             auth_signer: Arc::new(HmacSigner),
@@ -228,7 +283,10 @@ impl IpcServerBuilder {
             control_plane,
             provider_catalog,
             auto_execute: self.auto_execute,
-            runtime: self.runtime,
+            runtime,
+            workspace_orchestrator,
+            active_runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            pending_runtime_approvals: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
 
         Ok(IpcServer { state })

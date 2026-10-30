@@ -15,6 +15,9 @@ struct Cli {
     #[arg(long)]
     runtime_info_path: Option<PathBuf>,
 
+    #[arg(long)]
+    admin_runtime_info_path: Option<PathBuf>,
+
     #[arg(long, default_value = "ags-client")]
     key_id: String,
 
@@ -39,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pipe_name: cli.pipe_name,
         socket_path,
         runtime_info_path: cli.runtime_info_path,
+        admin_runtime_info_path: cli.admin_runtime_info_path,
         key_id: cli.key_id,
         capacity: cli.capacity,
         auto_execute: cli.auto_execute,

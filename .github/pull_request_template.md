@@ -4,19 +4,10 @@
 
 ## Stacked PR Dependency Hierarchy
 
-This pull request is part of the Agent Studios stacked PR architecture. Dependencies must be reviewed and merged in topological order:
-
-- **Track 1: Control Plane & IPC Architecture**
-  - `PR #17` (M11 Foundation / Baseline)
-    - └── `PR #18` (M12 Claude Code Runtime & IPC Protocol)
-      - └── `PR #19` (`feat/m13-ipc-02-control-plane` — IPC Server Hardening, Authorization & Runtime Bridge)
-
-- **Track 2: Provider Management & Discovery**
-  - `PR #16` (Core Provider Abstractions)
-    - └── `PR #20` (`feat/provider-management-v1` — Provider Catalog, Secure Secret Storage & Model Discovery V1.2)
-
-- **Track 3: Client & Extension (Peer Workspace)**
-  - `PR #21` (`feat/vscode-extension` — VS Code Extension Host Hardening; strictly read-only peer track)
+<!-- Specify upstream/downstream PR dependencies in topological merge order -->
+- **Base Branch**: `main` (or parent feature branch)
+- **Dependent PRs**: None / `PR #...` (upstream dependencies that must be merged prior to this PR)
+- **Downstream PRs**: None / `PR #...` (child branches stacked on top of this PR)
 
 ---
 

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -18,7 +19,7 @@ use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstance
 
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
-use crate::server::{ClientRole, ServerState};
+use crate::server::{ClientRole, PendingRuntimeApproval, ServerState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -692,6 +693,39 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         match res {
                             Ok(()) => {
                                 let _ = server_state.publish_control_plane_events(envelopes);
+
+                                let pending_pra = {
+                                    let mut pending =
+                                        server_state.pending_runtime_approvals.write().await;
+                                    pending.remove(&aid)
+                                };
+                                if let Some(pra) = pending_pra {
+                                    let (approved, reason_str) = match &decision {
+                                        ApprovalDecision::Approved { user_note, .. } => {
+                                            (true, user_note.clone())
+                                        }
+                                        ApprovalDecision::Rejected { reason } => {
+                                            (false, Some(reason.clone()))
+                                        }
+                                    };
+                                    let input = agent_studios_external_runtime::RuntimeInput::approval_response(
+                                        pra.runtime_approval_id,
+                                        approved,
+                                        reason_str,
+                                    );
+                                    if let Err(e) = pra.runtime.send(&pra.session_ref, input).await
+                                    {
+                                        tx.send(IpcResponse::Error {
+                                            message: format!(
+                                                "Failed to deliver approval decision to runtime: {e}"
+                                            ),
+                                        })
+                                        .await
+                                        .map_err(|_| TransportError::ConnectionClosed)?;
+                                        continue;
+                                    }
+                                }
+
                                 let status = match decision {
                                     ApprovalDecision::Approved { .. } => ApprovalStatus::Authorized,
                                     ApprovalDecision::Rejected { .. } => ApprovalStatus::Rejected,
@@ -919,6 +953,20 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     task_id,
                     reason,
                 } => {
+                    let active_session = {
+                        let sessions = server_state.active_runtime_sessions.read().await;
+                        sessions.get(&task_id).cloned()
+                    };
+                    if let Some((s_ref, rt)) = active_session
+                        && let Err(e) = rt.stop(&s_ref).await
+                    {
+                        tracing::warn!(
+                            "Failed to stop runtime session for task {}: {}",
+                            task_id,
+                            e
+                        );
+                    }
+
                     let (res, envelopes) = {
                         let mut cp = server_state.control_plane.write().await;
                         if let Some(task) = cp.get_task(task_id) {
@@ -1250,7 +1298,7 @@ async fn execute_task_lifecycle(
         }
     };
 
-    let (wt_id, wt_root, wt_cwd) = {
+    let (wt_id, wt_root, wt_cwd, wt_source_root, wt_source_cwd, wt_base_sha) = {
         let mut cp = server_state.control_plane.write().await;
         let existing = cp
             .state()
@@ -1258,48 +1306,140 @@ async fn execute_task_lifecycle(
             .values()
             .find(|w| w.assigned_task_id == Some(task_id))
             .cloned();
+
         if let Some(w) = existing {
-            (w.id, w.root, w.cwd)
-        } else {
-            let temp_dir = std::env::temp_dir().join(format!("ags-ipc-wt-{}", task_id));
-            let _ = std::fs::create_dir_all(&temp_dir);
-            let wt = cp
-                .create_worktree(
-                    studio_id,
-                    format!("worktree-{}", task_id),
-                    temp_dir.clone(),
-                    temp_dir.clone(),
-                    "0000000000000000000000000000000000000000",
-                )
-                .ok();
-            if let Some(ref w) = wt {
-                let _ = cp.transition_worktree_state(
-                    w.id,
-                    agent_studios_protocol::worktree::WorktreeState::Ready,
-                );
-                let _ = cp.assign_worktree(w.id, task_id, agent_id, Some(run_id));
-                let _ = cp.transition_worktree_state(
-                    w.id,
-                    agent_studios_protocol::worktree::WorktreeState::InUse,
-                );
+            (
+                w.id,
+                w.root,
+                w.cwd,
+                w.source_root,
+                w.source_cwd,
+                w.base_commit,
+            )
+        } else if let Some(ref orchestrator) = server_state.workspace_orchestrator {
+            let source_cwd = if let Ok(repo_env) = std::env::var("AGENT_STUDIOS_REPO_PATH") {
+                PathBuf::from(repo_env)
+            } else {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            };
+
+            let mut managed_res = orchestrator
+                .create_worktree_async(source_cwd.clone(), None)
+                .await;
+            if managed_res.is_err() {
+                for backoff_ms in [50, 150, 300] {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                    managed_res = orchestrator
+                        .create_worktree_async(source_cwd.clone(), None)
+                        .await;
+                    if managed_res.is_ok() {
+                        break;
+                    }
+                }
             }
-            wt.map(|w| (w.id, w.root, w.cwd)).unwrap_or_else(|| {
-                (
-                    agent_studios_protocol::id::WorktreeId::new(),
-                    temp_dir.clone(),
-                    temp_dir,
-                )
-            })
+
+            let managed = match managed_res {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!("Physical git worktree creation failed: {e}")),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    let envs = cp.drain_committed_events();
+                    drop(cp);
+                    let _ = server_state.publish_control_plane_events(envs);
+                    return;
+                }
+            };
+
+            if let Err(e) = orchestrator.validate_worktree_path(&managed.root, &managed.cwd) {
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!("Worktree path validation failed: {e}")),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+                return;
+            }
+
+            let wt = match cp.create_worktree_with_cwds(
+                studio_id,
+                format!("worktree-{}", task_id),
+                managed.source_root.clone(),
+                managed.source_cwd.clone(),
+                managed.root.clone(),
+                managed.cwd.clone(),
+                managed.head_sha.clone(),
+            ) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!("Failed to register worktree in control plane: {e}")),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    let envs = cp.drain_committed_events();
+                    drop(cp);
+                    let _ = server_state.publish_control_plane_events(envs);
+                    return;
+                }
+            };
+
+            let _ = cp.transition_worktree_state(
+                wt.id,
+                agent_studios_protocol::worktree::WorktreeState::Ready,
+            );
+            let _ = cp.assign_worktree(wt.id, task_id, agent_id, Some(run_id));
+            let _ = cp.transition_worktree_state(
+                wt.id,
+                agent_studios_protocol::worktree::WorktreeState::InUse,
+            );
+            let envs = cp.drain_committed_events();
+            drop(cp);
+            let _ = server_state.publish_control_plane_events(envs);
+
+            (
+                wt.id,
+                managed.root,
+                managed.cwd,
+                managed.source_root,
+                managed.source_cwd,
+                managed.head_sha,
+            )
+        } else {
+            let _ = cp.record_run_outcome(
+                run_id,
+                "failed",
+                Some(
+                    "Workspace orchestrator not configured; physical isolation required"
+                        .to_string(),
+                ),
+            );
+            let _ = cp.transition_run_state(run_id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            let envs = cp.drain_committed_events();
+            drop(cp);
+            let _ = server_state.publish_control_plane_events(envs);
+            return;
         }
     };
 
     let workspace = agent_studios_protocol::worktree::ExecutionWorkspace::managed(
         wt_id,
-        wt_root.clone(),
-        wt_cwd.clone(),
         wt_root,
         wt_cwd,
-        "0000000000000000000000000000000000000000",
+        wt_source_root,
+        wt_source_cwd,
+        wt_base_sha,
     );
 
     let correlation = agent_studios_external_runtime::RuntimeCorrelation::new()
@@ -1326,13 +1466,22 @@ async fn execute_task_lifecycle(
             .unwrap_or_default()
     };
 
-    let start_req =
+    let model_ref = {
+        let catalog = server_state.provider_catalog.read().await;
+        catalog.list_models().first().map(|m| m.model_ref())
+    };
+
+    let mut start_req =
         agent_studios_external_runtime::RuntimeStartRequest::new(instance_ref, workspace)
             .with_workspace_access_mode(
                 agent_studios_external_runtime::WorkspaceAccessMode::Mutating,
             )
             .with_initial_prompt(prompt)
             .with_correlation(correlation);
+
+    if let Some(m) = model_ref {
+        start_req = start_req.with_model_ref(m);
+    }
 
     let handle = match runtime.start(start_req).await {
         Ok(h) => h,
@@ -1354,11 +1503,21 @@ async fn execute_task_lifecycle(
     };
 
     let session_ref = handle.session_ref();
+    server_state
+        .active_runtime_sessions
+        .write()
+        .await
+        .insert(task_id, (session_ref.clone(), runtime.clone()));
 
     let mut sub = match runtime.events_after(&session_ref, None).await {
         Ok(s) => s,
         Err(e) => {
             let _ = runtime.stop(&session_ref).await;
+            server_state
+                .active_runtime_sessions
+                .write()
+                .await
+                .remove(&task_id);
             let fail_envs = {
                 let mut cp = server_state.control_plane.write().await;
                 let _ = cp.record_run_outcome(
@@ -1474,6 +1633,14 @@ async fn execute_task_lifecycle(
                 ) {
                     let envs = cp.drain_committed_events();
                     drop(cp);
+                    server_state.pending_runtime_approvals.write().await.insert(
+                        app.id,
+                        PendingRuntimeApproval {
+                            session_ref: session_ref.clone(),
+                            runtime_approval_id: *approval_id,
+                            runtime: runtime.clone(),
+                        },
+                    );
                     let _ = server_state.publish_control_plane_events(envs);
                     let _ = server_state.emit_event(
                         "approval_requested",
@@ -1560,6 +1727,12 @@ async fn execute_task_lifecycle(
             let _ = server_state.publish_control_plane_events(envs);
         }
     }
+
+    server_state
+        .active_runtime_sessions
+        .write()
+        .await
+        .remove(&task_id);
 }
 
 #[cfg(test)]

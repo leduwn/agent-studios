@@ -17,7 +17,7 @@ pub use client::{
 pub use connection::{
     ConnectionSession, ConnectionState, IpcCommand, IpcResponse, handle_connection,
 };
-pub use daemon::{DaemonBootstrapInfo, DaemonConfig, run_daemon};
+pub use daemon::{DaemonAdminBootstrapInfo, DaemonBootstrapInfo, DaemonConfig, run_daemon};
 pub use error::TransportError;
 pub use framing::{DEFAULT_MAX_FRAME_SIZE, recv_frame, recv_msg, send_frame, send_msg};
-pub use server::{ClientRole, IpcServer, IpcServerBuilder, ServerState};
+pub use server::{ClientRole, IpcServer, IpcServerBuilder, PendingRuntimeApproval, ServerState};
