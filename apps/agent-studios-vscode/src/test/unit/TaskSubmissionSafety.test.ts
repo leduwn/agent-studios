@@ -13,6 +13,8 @@
 import * as assert from 'assert';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 import {
   SubmitTaskAdapter,
   SubmitTaskRequest,
@@ -57,10 +59,12 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
   beforeEach(() => {
     transport = new MockTransport();
     CapabilityMatrix.resetCapabilities();
+    OperatorConfirmationManager.resetForTesting();
   });
 
   afterEach(() => {
     CapabilityMatrix.resetCapabilities();
+    OperatorConfirmationManager.resetForTesting();
   });
 
   // =========================================================================
@@ -147,18 +151,12 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
     it('fails closed when challenge token was signed with different secret key', async () => {
       CapabilityMatrix.setCapabilityEnabled('task.submit', true);
 
-      const originalSecret = OperatorConfirmationManager.getSecret();
       const alienSecret = crypto.randomBytes(32);
-
-      // Issue challenge with alien secret
-      OperatorConfirmationManager.setSecret(alienSecret);
-      const alienChallenge = OperatorConfirmationManager.createChallenge(
+      const alienChallenge = OperatorConfirmationManager.createChallengeWithForeignSecretForTesting(
         validStudioId,
-        'Deploy smart contract'
+        'Deploy smart contract',
+        alienSecret
       );
-
-      // Restore system secret
-      OperatorConfirmationManager.setSecret(originalSecret);
 
       const req: SubmitTaskRequest = {
         studioId: validStudioId,
@@ -388,6 +386,178 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
       assert.strictEqual(result.success, true);
       assert.strictEqual(transport.sentCommands.length, 1);
     });
+
+    it('fails closed when attempting to replay a previously consumed challenge token', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      const prompt = 'Deploy database migrations';
+      const challenge = OperatorConfirmationManager.createChallenge(
+        validStudioId,
+        prompt
+      );
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+      };
+
+      // First submission consumes the token
+      const result = await SubmitTaskAdapter.submitTask(transport, req);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(transport.sentCommands.length, 1);
+
+      // Replay attempt with the EXACT SAME consumed challenge token must fail closed
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(
+            err.message.includes('Challenge token has already been consumed (replay prevented)')
+          );
+          return true;
+        }
+      );
+
+      // Command count must not increase
+      assert.strictEqual(transport.sentCommands.length, 1);
+    });
+
+    it('rejects challenge token not present in Extension Host registry (unrecognized token)', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      // Craft challenge with unknown token
+      const forgedChallenge: OperatorConfirmationChallenge = {
+        token: 'deadbeefdeadbeefdeadbeefdeadbeef',
+        studioId: validStudioId,
+        promptHash: crypto.createHash('sha256').update('Exploit payload', 'utf8').digest('hex'),
+        expiresAt: Date.now() + 60000,
+        signature: '0000000000000000000000000000000000000000000000000000000000000000',
+      };
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt: 'Exploit payload',
+        confirmedByUser: true,
+        confirmationChallenge: forgedChallenge,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          return true;
+        }
+      );
+
+      assert.strictEqual(transport.sentCommands.length, 0);
+    });
+
+    it('rejects submission when workspace presence mismatches confirmation challenge', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      // Challenge created with workspacePath, but request omits it
+      const prompt = 'Run test job';
+      const challengeWithWs = OperatorConfirmationManager.createChallenge(
+        validStudioId,
+        prompt,
+        { workspacePath: path.resolve('/some/test/workspace') }
+      );
+
+      const reqWithoutWs: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challengeWithWs,
+        // workspacePath deliberately omitted
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, reqWithoutWs);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Workspace directory presence mismatch'));
+          return true;
+        }
+      );
+
+      assert.strictEqual(transport.sentCommands.length, 0);
+    });
+
+    it('rejects submission when model presence mismatches confirmation challenge', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      // Challenge created with modelId, but request omits it
+      const prompt = 'Run test job';
+      const challengeWithModel = OperatorConfirmationManager.createChallenge(
+        validStudioId,
+        prompt,
+        { modelId: 'claude-3-5-sonnet' }
+      );
+
+      const reqWithoutModel: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challengeWithModel,
+        // requestedModelId deliberately omitted
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, reqWithoutModel);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Model ID presence mismatch'));
+          return true;
+        }
+      );
+
+      assert.strictEqual(transport.sentCommands.length, 0);
+    });
+
+    it('fails closed when pending authorizations are cleared on session or bridge reset', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      const prompt = 'Run migration';
+      const challenge = OperatorConfirmationManager.createChallenge(
+        validStudioId,
+        prompt
+      );
+
+      // Simulate bridge disconnect or session switch clearing pending confirmations
+      OperatorConfirmationManager.clearPendingChallenges();
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(
+            err.message.includes('Challenge token not found in Extension Host registry')
+          );
+          return true;
+        }
+      );
+
+      assert.strictEqual(transport.sentCommands.length, 0);
+    });
   });
 
   // =========================================================================
@@ -504,12 +674,30 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
   // 4. Workspace Mismatch Tests
   // =========================================================================
   describe('4. Workspace Mismatch & Boundary Enforcement', () => {
-    const daemonRoot = path.resolve('D:/Projects/agent-studios-ide-ui');
+    let tempDaemonDir: string;
+    let tempForeignDir: string;
+    let daemonRoot: string;
+    let foreignWorkspace: string;
+
+    before(() => {
+      tempDaemonDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-daemon-'));
+      tempForeignDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ags-foreign-'));
+      daemonRoot = fs.realpathSync(tempDaemonDir);
+      foreignWorkspace = fs.realpathSync(tempForeignDir);
+    });
+
+    after(() => {
+      try {
+        fs.rmSync(tempDaemonDir, { recursive: true, force: true });
+        fs.rmSync(tempForeignDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+    });
 
     it('fails closed when workspace directory does not match daemon repository root', async () => {
       CapabilityMatrix.setCapabilityEnabled('task.submit', true);
 
-      const foreignWorkspace = path.resolve('D:/Projects/another-unrelated-project');
       const prompt = 'Audit dependencies';
       const challenge = OperatorConfirmationManager.createChallenge(
         validStudioId,
@@ -675,16 +863,15 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
       assert.strictEqual(transport.sentCommands.length, 0);
     });
 
-    it('allows submission when workspace directory matches daemon repository root across path variations', async () => {
+    it('allows submission when workspace directory matches daemon repository root across trailing slashes', async () => {
       CapabilityMatrix.setCapabilityEnabled('task.submit', true);
 
-      // Normalization: test alternate slash separators and casing
-      const wsPathAlternate = daemonRoot.replace(/\//g, '\\');
+      const wsPathWithSlash = `${daemonRoot}${path.sep}`;
       const prompt = 'Clean build cache';
       const challenge = OperatorConfirmationManager.createChallenge(
         validStudioId,
         prompt,
-        { workspacePath: wsPathAlternate }
+        { workspacePath: wsPathWithSlash }
       );
 
       const req: SubmitTaskRequest = {
@@ -693,13 +880,139 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
         confirmedByUser: true,
         confirmationChallenge: challenge,
         daemonRepoRoot: daemonRoot,
-        workspacePath: wsPathAlternate,
+        workspacePath: wsPathWithSlash,
       };
 
       const result = await SubmitTaskAdapter.submitTask(transport, req);
       assert.strictEqual(result.success, true);
       assert.strictEqual(transport.sentCommands.length, 1);
     });
+
+    if (process.platform === 'win32') {
+      it('allows submission on Windows with alternate slash separators', async () => {
+        CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+        // Windows slash variation: forward slash vs backslash
+        const wsForwardSlash = daemonRoot.replace(/\\/g, '/');
+        const prompt = 'Compile Windows artifacts';
+        const challenge = OperatorConfirmationManager.createChallenge(
+          validStudioId,
+          prompt,
+          { workspacePath: wsForwardSlash }
+        );
+
+        const req: SubmitTaskRequest = {
+          studioId: validStudioId,
+          prompt,
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          daemonRepoRoot: daemonRoot,
+          workspacePath: wsForwardSlash,
+        };
+
+        const result = await SubmitTaskAdapter.submitTask(transport, req);
+        assert.strictEqual(result.success, true);
+        assert.strictEqual(transport.sentCommands.length, 1);
+      });
+
+      it('allows submission on Windows with drive letter casing variations', async () => {
+        CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+        const wsUpper = daemonRoot.toUpperCase();
+        const prompt = 'Build release';
+        const challenge = OperatorConfirmationManager.createChallenge(
+          validStudioId,
+          prompt,
+          { workspacePath: wsUpper }
+        );
+
+        const req: SubmitTaskRequest = {
+          studioId: validStudioId,
+          prompt,
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          daemonRepoRoot: daemonRoot,
+          workspacePath: wsUpper,
+        };
+
+        const result = await SubmitTaskAdapter.submitTask(transport, req);
+        assert.strictEqual(result.success, true);
+        assert.strictEqual(transport.sentCommands.length, 1);
+      });
+    }
+
+    if (process.platform !== 'win32') {
+      it('allows submission on POSIX when workspace is a canonical symlink to daemon repository', async () => {
+        CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+        const symlinkPath = path.join(os.tmpdir(), `ags-symlink-${Date.now()}`);
+        fs.symlinkSync(daemonRoot, symlinkPath);
+
+        try {
+          const prompt = 'Run POSIX build';
+          const challenge = OperatorConfirmationManager.createChallenge(
+            validStudioId,
+            prompt,
+            { workspacePath: symlinkPath }
+          );
+
+          const req: SubmitTaskRequest = {
+            studioId: validStudioId,
+            prompt,
+            confirmedByUser: true,
+            confirmationChallenge: challenge,
+            daemonRepoRoot: daemonRoot,
+            workspacePath: symlinkPath,
+          };
+
+          const result = await SubmitTaskAdapter.submitTask(transport, req);
+          assert.strictEqual(result.success, true);
+          assert.strictEqual(transport.sentCommands.length, 1);
+        } finally {
+          try {
+            fs.unlinkSync(symlinkPath);
+          } catch {
+            // Ignore cleanup error
+          }
+        }
+      });
+
+      it('rejects foreign-platform Windows drive paths on POSIX', async () => {
+        CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+        const foreignWindowsPath = 'C:\\Projects\\agent-studios';
+        const prompt = 'Run foreign path';
+        const challenge = OperatorConfirmationManager.createChallenge(
+          validStudioId,
+          prompt
+        );
+
+        const req: SubmitTaskRequest = {
+          studioId: validStudioId,
+          prompt,
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          daemonRepoRoot: daemonRoot,
+          workspacePath: foreignWindowsPath,
+        };
+
+        await assert.rejects(
+          async () => {
+            await SubmitTaskAdapter.submitTask(transport, req);
+          },
+          (err: unknown) => {
+            assert.ok(err instanceof TaskSubmissionError);
+            assert.ok(
+              err.message.includes('Foreign-platform Windows path') ||
+              err.message.includes('Workspace normalization error')
+            );
+            return true;
+          }
+        );
+
+        assert.strictEqual(transport.sentCommands.length, 0);
+      });
+    }
   });
 
   // =========================================================================

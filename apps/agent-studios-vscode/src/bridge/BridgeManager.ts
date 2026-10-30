@@ -8,7 +8,7 @@ import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { DisconnectedBridge } from './DisconnectedBridge';
 import { FixtureBridge } from './FixtureBridge';
 import { DaemonConnectedBridge } from './DaemonConnectedBridge';
-import { CapabilityMatrix, CapabilityDescriptor } from './ipc/CapabilityMatrix';
+import { CapabilityMatrix, CapabilityDescriptor, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 
 /**
@@ -152,6 +152,9 @@ export class BridgeManager implements vscode.Disposable {
     if (this._bridge === newBridge) {
       return;
     }
+
+    // Clear any pending operator confirmations on bridge mode transition
+    OperatorConfirmationManager.clearPendingChallenges();
 
     // Dispose old bridge if it is internal disconnected or fixture bridge
     const oldBridge = this._bridge;

@@ -45,6 +45,7 @@ import {
   SubmitTaskRequest,
   SubmitTaskResult,
 } from './ipc/SubmitTaskAdapter';
+import { OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import {
   NativeIpcTransport,
   TransportState,
@@ -123,6 +124,9 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       return;
     }
 
+    // Invalidate pending confirmations on reconnect
+    OperatorConfirmationManager.clearPendingChallenges();
+
     this.setConnectionState('connecting');
 
     try {
@@ -177,6 +181,7 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       this._transport.disconnect();
     }
     this.setConnectionState('disconnected');
+    OperatorConfirmationManager.clearPendingChallenges();
   }
 
   /**
@@ -503,6 +508,8 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   public dispose(): void {
+    OperatorConfirmationManager.clearPendingChallenges();
+
     if (this._transport) {
       this._transport.disconnect();
       this._transport.removeAllListeners();

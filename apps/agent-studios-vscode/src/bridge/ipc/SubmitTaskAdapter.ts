@@ -203,6 +203,7 @@ export class SubmitTaskAdapter {
       requestedProviderId: req.requestedProviderId,
       confirmedByUser: req.confirmedByUser,
       confirmationChallenge: req.confirmationChallenge,
+      consumeChallenge: true, // Atomically consume challenge at dispatch boundary
       workspacePath: req.workspacePath,
       daemonRepoRoot: effectiveRepo,
       daemonEffectiveModel: effectiveModel,

@@ -16,6 +16,7 @@
 
 import * as crypto from 'crypto';
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   PromptSanitizer,
   PromptSanitizationError,
@@ -27,27 +28,51 @@ export interface OperatorConfirmationChallenge {
   promptHash: string;
   workspacePath?: string;
   modelId?: string;
+  providerId?: string;
+  intent?: string;
   expiresAt: number;
   signature: string;
 }
 
+interface TrackedConfirmation {
+  token: string;
+  studioId: string;
+  promptHash: string;
+  workspacePath?: string;
+  modelId?: string;
+  providerId?: string;
+  intent: string;
+  issuedAt: number;
+  expiresAt: number;
+  confirmed: boolean;
+  consumed: boolean;
+  consumedAt?: number;
+}
+
 export class OperatorConfirmationManager {
   private static secret: Buffer = crypto.randomBytes(32);
+  private static readonly activeChallenges: Map<string, TrackedConfirmation> = new Map();
 
-  public static setSecret(secret: Buffer): void {
-    this.secret = secret;
+  /**
+   * Resets secret and clears active challenges for unit test hermeticity.
+   */
+  public static resetForTesting(): void {
+    this.secret = crypto.randomBytes(32);
+    this.activeChallenges.clear();
   }
 
-  public static getSecret(): Buffer {
-    return this.secret;
-  }
-
-  public static createChallenge(
+  /**
+   * Generates a signed challenge using an explicit foreign secret to test signature verification failure.
+   */
+  public static createChallengeWithForeignSecretForTesting(
     studioId: string,
     prompt: string,
+    foreignSecret: Buffer,
     options?: {
       workspacePath?: string;
       modelId?: string;
+      providerId?: string;
+      intent?: string;
       ttlMs?: number;
     }
   ): OperatorConfirmationChallenge {
@@ -55,31 +80,130 @@ export class OperatorConfirmationManager {
     const promptHash = crypto.createHash('sha256').update(normalizedPrompt, 'utf8').digest('hex');
     const expiresAt = Date.now() + (options?.ttlMs ?? 5 * 60 * 1000);
     const token = crypto.randomBytes(16).toString('hex');
-    const normalizedWs = options?.workspacePath
-      ? path.resolve(options.workspacePath).replace(/\\/g, '/').toLowerCase()
-      : '';
+    const intent = options?.intent ?? 'submit_task';
+    const normalizedWs = options?.workspacePath ? normalizeWorkspacePath(options.workspacePath) : '';
     const model = options?.modelId || '';
-    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${expiresAt}`;
-    const signature = crypto.createHmac('sha256', this.secret).update(payload).digest('hex');
+    const provider = options?.providerId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${intent}:${expiresAt}`;
+    const signature = crypto.createHmac('sha256', foreignSecret).update(payload, 'utf8').digest('hex');
 
-    return {
+    const challenge: OperatorConfirmationChallenge = {
       token,
       studioId,
       promptHash,
       workspacePath: options?.workspacePath,
       modelId: options?.modelId,
+      providerId: options?.providerId,
+      intent,
       expiresAt,
       signature,
     };
+
+    // Register in host active challenges so signature check is reached
+    this.activeChallenges.set(token, {
+      token,
+      studioId,
+      promptHash,
+      workspacePath: options?.workspacePath,
+      modelId: options?.modelId,
+      providerId: options?.providerId,
+      intent,
+      issuedAt: Date.now(),
+      expiresAt,
+      confirmed: true,
+      consumed: false,
+    });
+
+    return challenge;
   }
 
-  public static verifyChallenge(
+  /**
+   * Issues an authoritative operator confirmation challenge registered in Extension Host memory.
+   */
+  public static createChallenge(
+    studioId: string,
+    prompt: string,
+    options?: {
+      workspacePath?: string;
+      modelId?: string;
+      providerId?: string;
+      intent?: string;
+      ttlMs?: number;
+    }
+  ): OperatorConfirmationChallenge {
+    const normalizedPrompt = prompt.replace(/\r\n/g, '\n');
+    const promptHash = crypto.createHash('sha256').update(normalizedPrompt, 'utf8').digest('hex');
+    const expiresAt = Date.now() + (options?.ttlMs ?? 5 * 60 * 1000);
+    const token = crypto.randomBytes(16).toString('hex');
+    const intent = options?.intent ?? 'submit_task';
+    const normalizedWs = options?.workspacePath ? normalizeWorkspacePath(options.workspacePath) : '';
+    const model = options?.modelId || '';
+    const provider = options?.providerId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${intent}:${expiresAt}`;
+    const signature = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
+
+    const challenge: OperatorConfirmationChallenge = {
+      token,
+      studioId,
+      promptHash,
+      workspacePath: options?.workspacePath,
+      modelId: options?.modelId,
+      providerId: options?.providerId,
+      intent,
+      expiresAt,
+      signature,
+    };
+
+    this.activeChallenges.set(token, {
+      token,
+      studioId,
+      promptHash,
+      workspacePath: options?.workspacePath,
+      modelId: options?.modelId,
+      providerId: options?.providerId,
+      intent,
+      issuedAt: Date.now(),
+      expiresAt,
+      confirmed: true,
+      consumed: false,
+    });
+
+    return challenge;
+  }
+
+  /**
+   * Clears all pending confirmations (e.g. on session switch, bridge mode change, or daemon reconnect).
+   */
+  public static clearPendingChallenges(): void {
+    this.activeChallenges.clear();
+  }
+
+  /**
+   * Verifies and atomically consumes an operator confirmation challenge.
+   * Enforces:
+   * 1. Cryptographic HMAC signature integrity.
+   * 2. Host registry tracking (rejects forged/unregistered tokens).
+   * 3. Single-use atomic consumption (anti-replay).
+   * 4. Expiration check (TTL).
+   * 5. Studio ID exact match.
+   * 6. Prompt hash exact match (SHA-256 over normalized LF prompt).
+   * 7. Exact presence/absence and path match for workspacePath.
+   * 8. Exact presence/absence and string match for modelId.
+   * 9. Exact presence/absence and string match for providerId.
+   * 10. Intent match ('submit_task').
+   */
+  public static verifyAndConsumeChallenge(
     challenge: OperatorConfirmationChallenge | string,
     expected: {
       studioId: string;
       prompt: string;
       workspacePath?: string;
       modelId?: string;
+      providerId?: string;
+      intent?: string;
+    },
+    options?: {
+      consume?: boolean;
     }
   ): { valid: boolean; reason?: string } {
     let parsed: OperatorConfirmationChallenge;
@@ -101,6 +225,50 @@ export class OperatorConfirmationManager {
       return { valid: false, reason: 'Confirmation challenge expired' };
     }
 
+    // Verify HMAC signature
+    let normWsForSig = '';
+    try {
+      normWsForSig = parsed.workspacePath ? normalizeWorkspacePath(parsed.workspacePath) : '';
+    } catch {
+      return { valid: false, reason: 'Invalid or uninterpretable workspace path in challenge' };
+    }
+
+    const model = parsed.modelId || '';
+    const provider = parsed.providerId || '';
+    const intent = parsed.intent || 'submit_task';
+    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normWsForSig}:${model}:${provider}:${intent}:${parsed.expiresAt}`;
+    const expectedSig = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
+
+    const sigBuf = Buffer.from(parsed.signature, 'hex');
+    const expBuf = Buffer.from(expectedSig, 'hex');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return { valid: false, reason: 'Forged confirmation challenge: invalid cryptographic signature' };
+    }
+
+    // Extension Host registry lookup
+    const tracked = this.activeChallenges.get(parsed.token);
+    if (!tracked) {
+      return {
+        valid: false,
+        reason: 'Challenge token not found in Extension Host registry (unrecognized, expired, or cleared)',
+      };
+    }
+
+    if (tracked.consumed) {
+      return {
+        valid: false,
+        reason: 'Challenge token has already been consumed (replay prevented)',
+      };
+    }
+
+    if (!tracked.confirmed) {
+      return {
+        valid: false,
+        reason: 'Challenge has not been confirmed by human operator',
+      };
+    }
+
+    // Studio match
     if (parsed.studioId !== expected.studioId) {
       return {
         valid: false,
@@ -108,6 +276,7 @@ export class OperatorConfirmationManager {
       };
     }
 
+    // Prompt hash match
     const normalizedExpectedPrompt = expected.prompt.replace(/\r\n/g, '\n');
     const expectedPromptHash = crypto.createHash('sha256').update(normalizedExpectedPrompt, 'utf8').digest('hex');
     if (parsed.promptHash !== expectedPromptHash) {
@@ -117,32 +286,108 @@ export class OperatorConfirmationManager {
       };
     }
 
-    if (parsed.workspacePath && expected.workspacePath) {
-      const normalizedChWs = path.resolve(parsed.workspacePath).replace(/\\/g, '/').toLowerCase();
-      const normalizedExpWs = path.resolve(expected.workspacePath).replace(/\\/g, '/').toLowerCase();
-      if (normalizedChWs !== normalizedExpWs) {
-        return { valid: false, reason: 'Workspace directory mismatch in confirmation challenge' };
+    // Exact presence/absence equality for workspacePath:
+    const hasParsedWs = Boolean(parsed.workspacePath && parsed.workspacePath.trim().length > 0);
+    const hasExpectedWs = Boolean(expected.workspacePath && expected.workspacePath.trim().length > 0);
+
+    if (hasParsedWs !== hasExpectedWs) {
+      return {
+        valid: false,
+        reason: `Workspace directory presence mismatch in confirmation challenge (challenge had: ${hasParsedWs}, request had: ${hasExpectedWs})`,
+      };
+    }
+
+    if (hasParsedWs && hasExpectedWs) {
+      let normParsedWs = '';
+      let normExpectedWs = '';
+      try {
+        normParsedWs = normalizeWorkspacePath(parsed.workspacePath!);
+        normExpectedWs = normalizeWorkspacePath(expected.workspacePath!);
+      } catch (err: unknown) {
+        return {
+          valid: false,
+          reason: `Workspace directory normalization error: ${(err as Error).message}`,
+        };
+      }
+      if (normParsedWs !== normExpectedWs) {
+        return {
+          valid: false,
+          reason: `Workspace directory mismatch in confirmation challenge (expected '${normExpectedWs}', challenge had '${normParsedWs}')`,
+        };
       }
     }
 
-    if (parsed.modelId && expected.modelId && parsed.modelId !== expected.modelId) {
-      return { valid: false, reason: 'Model ID mismatch in confirmation challenge' };
+    // Exact presence/absence equality for modelId:
+    const hasParsedModel = Boolean(parsed.modelId && parsed.modelId.trim().length > 0);
+    const hasExpectedModel = Boolean(expected.modelId && expected.modelId.trim().length > 0);
+
+    if (hasParsedModel !== hasExpectedModel) {
+      return {
+        valid: false,
+        reason: `Model ID presence mismatch in confirmation challenge (challenge had: ${hasParsedModel}, request had: ${hasExpectedModel})`,
+      };
     }
 
-    const normalizedWs = parsed.workspacePath
-      ? path.resolve(parsed.workspacePath).replace(/\\/g, '/').toLowerCase()
-      : '';
-    const model = parsed.modelId || '';
-    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normalizedWs}:${model}:${parsed.expiresAt}`;
-    const expectedSig = crypto.createHmac('sha256', this.secret).update(payload).digest('hex');
+    if (hasParsedModel && hasExpectedModel && parsed.modelId !== expected.modelId) {
+      return {
+        valid: false,
+        reason: `Model ID mismatch in confirmation challenge (expected '${expected.modelId}', got '${parsed.modelId}')`,
+      };
+    }
 
-    const sigBuf = Buffer.from(parsed.signature, 'hex');
-    const expBuf = Buffer.from(expectedSig, 'hex');
-    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-      return { valid: false, reason: 'Forged confirmation challenge: invalid cryptographic signature' };
+    // Exact presence/absence equality for providerId:
+    const hasParsedProvider = Boolean(parsed.providerId && parsed.providerId.trim().length > 0);
+    const hasExpectedProvider = Boolean(expected.providerId && expected.providerId.trim().length > 0);
+
+    if (hasParsedProvider !== hasExpectedProvider) {
+      return {
+        valid: false,
+        reason: `Provider ID presence mismatch in confirmation challenge (challenge had: ${hasParsedProvider}, request had: ${hasExpectedProvider})`,
+      };
+    }
+
+    if (hasParsedProvider && hasExpectedProvider && parsed.providerId !== expected.providerId) {
+      return {
+        valid: false,
+        reason: `Provider ID mismatch in confirmation challenge (expected '${expected.providerId}', got '${parsed.providerId}')`,
+      };
+    }
+
+    // Intent match
+    const expectedIntent = expected.intent ?? 'submit_task';
+    const parsedIntent = parsed.intent ?? 'submit_task';
+    if (parsedIntent !== expectedIntent) {
+      return {
+        valid: false,
+        reason: `Execution intent mismatch in confirmation challenge (expected '${expectedIntent}', got '${parsedIntent}')`,
+      };
+    }
+
+    // Single-use atomic consumption
+    const shouldConsume = options?.consume ?? true;
+    if (shouldConsume) {
+      tracked.consumed = true;
+      tracked.consumedAt = Date.now();
     }
 
     return { valid: true };
+  }
+
+  public static verifyChallenge(
+    challenge: OperatorConfirmationChallenge | string,
+    expected: {
+      studioId: string;
+      prompt: string;
+      workspacePath?: string;
+      modelId?: string;
+      providerId?: string;
+      intent?: string;
+    },
+    options?: {
+      consume?: boolean;
+    }
+  ): { valid: boolean; reason?: string } {
+    return this.verifyAndConsumeChallenge(challenge, expected, options);
   }
 }
 
@@ -340,6 +585,7 @@ export interface TaskSubmissionPreflightRequest {
   requestedProviderId?: string;
   confirmedByUser: boolean;
   confirmationChallenge?: OperatorConfirmationChallenge | string;
+  consumeChallenge?: boolean;
   workspacePath?: string;
   daemonRepoRoot?: string;
   daemonEffectiveModel?: string;
@@ -376,12 +622,46 @@ export function parseDefaultModelEnv(
 
 /**
  * Normalizes workspace and repository paths for cross-platform comparison.
+ * - Handles null/empty safely.
+ * - Rejects foreign-platform Windows drive paths or UNC paths on POSIX.
+ * - Resolves symlinks canonically via realpathSync if path exists on disk.
+ * - Strips trailing slashes.
+ * - Applies case-insensitive lowercasing on Windows (win32).
  */
 export function normalizeWorkspacePath(p: string): string {
   if (!p || typeof p !== 'string') {
     return '';
   }
-  const resolved = path.resolve(p).replace(/[/\\]+$/, '');
+  const trimmed = p.trim();
+  if (trimmed.length === 0) {
+    return '';
+  }
+
+  // Reject foreign-platform Windows drive letters or UNC paths on POSIX
+  if (process.platform !== 'win32') {
+    if (/^[a-zA-Z]:[/\\]/.test(trimmed) || trimmed.startsWith('\\\\')) {
+      throw new Error(
+        `Foreign-platform Windows path '${trimmed}' cannot be safely interpreted on POSIX platform.`
+      );
+    }
+  }
+
+  // Canonicalize via path.resolve
+  let resolved = path.resolve(trimmed);
+
+  // If path exists on disk, resolve symlinks canonically
+  try {
+    if (fs.existsSync(resolved)) {
+      resolved = fs.realpathSync(resolved);
+    }
+  } catch {
+    // If not accessible or does not exist on disk, keep path.resolve result
+  }
+
+  // Strip trailing slashes
+  resolved = resolved.replace(/[/\\]+$/, '');
+
+  // Case-insensitive comparison on Windows
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
@@ -415,8 +695,12 @@ export class CapabilityMatrix {
 
   /**
    * Dynamically overrides or enables/disables capability authorization.
+   * Prohibited in production mode.
    */
   public static setCapabilityEnabled(capabilityId: string, enabled: boolean): void {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('Dynamic capability overrides are prohibited in production mode.');
+    }
     this.dynamicOverrides.set(capabilityId, enabled);
   }
 
@@ -495,6 +779,33 @@ export class CapabilityMatrix {
       };
     }
 
+    // 4.5. Early workspace path attack sequence validation (fail closed before challenge evaluation)
+    if (req.workspacePath) {
+      if (req.workspacePath.includes('\0')) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: 'Null byte injection detected in workspace path.',
+        };
+      }
+
+      if (req.workspacePath.startsWith('\\\\') || req.workspacePath.startsWith('//')) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: 'UNC network paths rejected in workspace path.',
+        };
+      }
+
+      if (/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(req.workspacePath)) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: 'Path traversal sequences rejected in workspace path.',
+        };
+      }
+    }
+
     // 5. Operator confirmation challenge: reject untrusted raw boolean without verification token
     if (req.requireChallenge || req.confirmationChallenge !== undefined) {
       if (!req.confirmationChallenge) {
@@ -507,12 +818,19 @@ export class CapabilityMatrix {
       }
 
       // Verify confirmation challenge integrity and cryptographic binding
-      const verification = OperatorConfirmationManager.verifyChallenge(req.confirmationChallenge, {
-        studioId: req.studioId!,
-        prompt: req.prompt,
-        workspacePath: req.workspacePath,
-        modelId: req.requestedModelId,
-      });
+      const verification = OperatorConfirmationManager.verifyAndConsumeChallenge(
+        req.confirmationChallenge,
+        {
+          studioId: req.studioId!,
+          prompt: req.prompt,
+          workspacePath: req.workspacePath,
+          modelId: req.requestedModelId,
+          providerId: req.requestedProviderId,
+        },
+        {
+          consume: req.consumeChallenge ?? true,
+        }
+      );
 
       if (!verification.valid) {
         return {
@@ -595,8 +913,18 @@ export class CapabilityMatrix {
         };
       }
 
-      const normalizedWs = normalizeWorkspacePath(req.workspacePath);
-      const normalizedRepo = normalizeWorkspacePath(effectiveDaemonRepo);
+      let normalizedWs: string;
+      let normalizedRepo: string;
+      try {
+        normalizedWs = normalizeWorkspacePath(req.workspacePath);
+        normalizedRepo = normalizeWorkspacePath(effectiveDaemonRepo);
+      } catch (err: unknown) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: `Workspace normalization error: ${(err as Error).message}`,
+        };
+      }
 
       if (normalizedWs !== normalizedRepo) {
         return {
