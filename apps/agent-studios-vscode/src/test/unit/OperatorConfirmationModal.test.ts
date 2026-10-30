@@ -4,6 +4,9 @@
  */
 
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   OperatorConfirmationModal,
   OperatorConfirmationDialogRequest,
@@ -11,14 +14,26 @@ import {
 import { OperatorConfirmationManager } from '../../bridge/ipc/CapabilityMatrix';
 
 describe('M15 OperatorConfirmationModal Unit Tests', () => {
+  let tempDir: string;
+  let testWorkspace: string;
+
   beforeEach(() => {
     OperatorConfirmationManager.resetForTesting();
     OperatorConfirmationModal.resetDialogHandlerForTesting();
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-modal-test-'));
+    testWorkspace = fs.realpathSync(tempDir);
   });
 
   afterEach(() => {
     OperatorConfirmationManager.resetForTesting();
     OperatorConfirmationModal.resetDialogHandlerForTesting();
+    if (tempDir && fs.existsSync(tempDir)) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // cleanup ignore
+      }
+    }
   });
 
   describe('Confirmation Approval & Challenge Binding', () => {
@@ -35,7 +50,7 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
         runtime: 'Claude Code (Native CLI)',
         providerId: 'anthropic',
         modelId: 'claude-3-5-sonnet',
-        workspacePath: 'D:\\Projects\\agent-studios-ide-ui',
+        workspacePath: testWorkspace,
         prompt: 'Refactor authentication middleware\nwith unit tests',
       };
 
@@ -46,7 +61,7 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
       assert.strictEqual(result.challenge.studioId, 'studio-987');
       assert.strictEqual(result.challenge.modelId, 'claude-3-5-sonnet');
       assert.strictEqual(result.challenge.providerId, 'anthropic');
-      assert.strictEqual(result.challenge.workspacePath, 'D:\\Projects\\agent-studios-ide-ui');
+      assert.strictEqual(result.challenge.workspacePath, testWorkspace);
       assert.strictEqual(result.challenge.intent, 'task_execution');
 
       // Verify challenge signature and parameters in OperatorConfirmationManager
@@ -68,8 +83,29 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
       assert.ok(capturedDetail.includes('Studio: Main Dev Studio'));
       assert.ok(capturedDetail.includes('Runtime: Claude Code (Native CLI)'));
       assert.ok(capturedDetail.includes('Provider / Model: anthropic / claude-3-5-sonnet'));
-      assert.ok(capturedDetail.includes('Workspace: D:\\Projects\\agent-studios-ide-ui'));
+      assert.ok(capturedDetail.includes(`Workspace: ${testWorkspace}`));
       assert.ok(capturedDetail.includes('Prompt Preview: "Refactor authentication middleware with unit tests"'));
+    });
+
+    it('does not issue challenge token before operator confirms dialog', async () => {
+      let challengeCountDuringDialog = -1;
+      OperatorConfirmationModal.setDialogHandlerForTesting(async () => {
+        // Verify that zero challenge tokens exist in host memory while modal is open
+        challengeCountDuringDialog = OperatorConfirmationManager.getActiveChallengesCountForTesting();
+        return true;
+      });
+
+      const req: OperatorConfirmationDialogRequest = {
+        studioId: 'studio-verify-pre',
+        runtime: 'Claude Code (Native CLI)',
+        workspacePath: testWorkspace,
+        prompt: 'Ensure no pre-issued tokens',
+      };
+
+      const result = await OperatorConfirmationModal.requestConfirmation(req);
+      assert.strictEqual(challengeCountDuringDialog, 0);
+      assert.strictEqual(result.confirmed, true);
+      assert.strictEqual(OperatorConfirmationManager.getActiveChallengesCountForTesting(), 1);
     });
 
     it('truncates prompt preview to 200 characters and flattens newlines', async () => {
@@ -154,6 +190,45 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
         );
       } finally {
         process.env.NODE_ENV = originalEnv;
+      }
+    });
+
+    it('verifies cross-platform path behavior without foreign Windows path on POSIX', async () => {
+      OperatorConfirmationModal.setDialogHandlerForTesting(async () => true);
+
+      // Verify that using native temporary workspace produces a valid verifiable challenge
+      const result = await OperatorConfirmationModal.requestConfirmation({
+        studioId: 'studio-cross-platform',
+        runtime: 'Claude Code (Native CLI)',
+        workspacePath: testWorkspace,
+        prompt: 'Cross-platform safe task',
+      });
+
+      assert.strictEqual(result.confirmed, true);
+      assert.ok(result.challenge);
+      const verification = OperatorConfirmationManager.verifyChallenge(
+        result.challenge,
+        {
+          studioId: 'studio-cross-platform',
+          prompt: 'Cross-platform safe task',
+          workspacePath: testWorkspace,
+          intent: 'task_execution',
+        },
+        { consume: false }
+      );
+      assert.strictEqual(verification.valid, true);
+
+      // On POSIX, foreign Windows drive path must be rejected fail-closed
+      if (process.platform !== 'win32') {
+        const foreignWindowsPath = 'C:\\Users\\runner\\work\\repo';
+        assert.throws(
+          () => {
+            OperatorConfirmationManager.createChallenge('studio-foreign', 'Prompt', {
+              workspacePath: foreignWindowsPath,
+            });
+          },
+          /Foreign-platform Windows path/
+        );
       }
     });
   });

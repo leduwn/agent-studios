@@ -37,7 +37,7 @@ describe('M15 TaskExecutionStore Unit Tests', () => {
       store.beginSubmission('studio-1', 'Prompt');
       store.taskSubmitted('task-100', 'studio-1');
       store.appendStreamChunk('Chunk 1\n');
-      assert.strictEqual(store.getState().status, 'running');
+      assert.strictEqual(store.getState().status, 'queued');
 
       store.reset();
       const state = store.getState();
@@ -48,7 +48,7 @@ describe('M15 TaskExecutionStore Unit Tests', () => {
   });
 
   describe('Lifecycle State Transitions', () => {
-    it('progresses from submitting to running to succeeded', () => {
+    it('progresses from submitting to queued to running to succeeded', () => {
       const states: TaskExecutionState[] = [];
       store.onDidChangeExecutionState((s) => states.push(s));
 
@@ -58,8 +58,19 @@ describe('M15 TaskExecutionStore Unit Tests', () => {
       assert.strictEqual(store.getState().prompt, 'Run test suite');
 
       store.taskSubmitted('task-1', 'studio-abc');
-      assert.strictEqual(store.getState().status, 'running');
+      assert.strictEqual(store.getState().status, 'queued');
       assert.strictEqual(store.getState().activeTaskId, 'task-1');
+
+      const startEvt: TimelineEvent = {
+        id: 'evt-start',
+        sequenceNumber: 1,
+        timestamp: Date.now(),
+        type: 'task_started',
+        summary: 'Task started on daemon',
+        taskId: 'task-1',
+      };
+      store.consumeDaemonTimelineEvent(startEvt);
+      assert.strictEqual(store.getState().status, 'running');
 
       store.completeTask('succeeded');
       assert.strictEqual(store.getState().status, 'succeeded');
@@ -194,7 +205,7 @@ describe('M15 TaskExecutionStore Unit Tests', () => {
       assert.strictEqual(store.getState().status, 'succeeded');
     });
 
-    it('captures streaming output deltas from timeline event payload', () => {
+    it('captures streaming output deltas from runtime_output_delta event payload', () => {
       store.beginSubmission('studio-1', 'Task');
       store.taskSubmitted('task-10', 'studio-1');
 
@@ -202,13 +213,59 @@ describe('M15 TaskExecutionStore Unit Tests', () => {
         id: 'evt-4',
         sequenceNumber: 4,
         timestamp: Date.now(),
-        type: 'tool_executing',
-        summary: 'Stream output',
+        type: 'runtime_output_delta',
+        summary: 'Stream delta',
         taskId: 'task-10',
-        details: { output: 'cargo check passed\n' },
+        details: { text: 'Compiling agent-studios-core v0.1.0\n' },
       };
       store.consumeDaemonTimelineEvent(streamEvt);
-      assert.strictEqual(store.getState().streamOutput, 'cargo check passed\n');
+      assert.strictEqual(store.getState().streamOutput, 'Compiling agent-studios-core v0.1.0\n');
+    });
+
+    it('transitions to running on task_state_transitioned event', () => {
+      store.beginSubmission('studio-1', 'Task');
+      store.taskSubmitted('task-10', 'studio-1');
+      assert.strictEqual(store.getState().status, 'queued');
+
+      const transitionEvt: TimelineEvent = {
+        id: 'evt-5',
+        sequenceNumber: 5,
+        timestamp: Date.now(),
+        type: 'task_state_transitioned',
+        summary: 'State changed',
+        taskId: 'task-10',
+        details: { to_state: 'running' },
+      };
+      store.consumeDaemonTimelineEvent(transitionEvt);
+      assert.strictEqual(store.getState().status, 'running');
+    });
+
+    it('captures authoritative metrics from daemon timeline event', () => {
+      store.beginSubmission('studio-1', 'Task');
+      store.taskSubmitted('task-10', 'studio-1');
+
+      const metricsEvt: TimelineEvent = {
+        id: 'evt-6',
+        sequenceNumber: 6,
+        timestamp: Date.now(),
+        type: 'task_completed',
+        summary: 'Completed',
+        taskId: 'task-10',
+        details: {
+          metrics: {
+            prompt_tokens: 500,
+            completion_tokens: 120,
+            total_tokens: 620,
+            cost_usd: 0.005,
+            latency_ms: 800,
+          },
+        },
+      };
+      store.consumeDaemonTimelineEvent(metricsEvt);
+      assert.strictEqual(store.getState().status, 'succeeded');
+      assert.strictEqual(store.getState().metrics?.isReported, true);
+      assert.strictEqual(store.getState().metrics?.totalTokens, 620);
+      assert.strictEqual(store.getState().metrics?.costUsd, 0.005);
     });
   });
 });

@@ -23,6 +23,7 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
+import { RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
 
 /**
  * Thrown when an operation requiring daemon connectivity is attempted while disconnected.
@@ -66,6 +67,7 @@ export interface AgentStudiosBridge extends vscode.Disposable {
   ): Promise<ChatMessage>;
   submitTask?(req: SubmitTaskRequest): Promise<SubmitTaskResult>;
   cancelTask?(taskId: string, reason?: string): Promise<CancelTaskResult>;
+  getExecutionReadiness?(): Promise<RustExecutionReadinessReport>;
   cancelCurrentRun(): Promise<void>;
   listSessions(): Promise<SessionSummary[]>;
   createSession(goal?: string): Promise<SessionInfo>;

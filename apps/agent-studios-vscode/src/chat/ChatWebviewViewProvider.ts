@@ -143,6 +143,45 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
     const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
+    let selectedRuntime = 'claude_code';
+    if (readiness) {
+      if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
+        runtimeOptions = readiness.runtime_instances.map((inst) => ({
+          id: inst.implementation,
+          name: `${inst.implementation} (${inst.instance_id})`,
+          enabled: inst.healthy,
+          tooltip: inst.healthy ? 'Healthy runtime instance' : 'Degraded runtime instance',
+        }));
+      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
+        runtimeOptions = readiness.available_runtimes.map((r) => ({
+          id: r,
+          name: r,
+          enabled: true,
+        }));
+      }
+      if (readiness.defaults?.configured_instance_id) {
+        selectedRuntime = readiness.defaults.configured_instance_id;
+      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
+        selectedRuntime = readiness.available_runtimes[0];
+      }
+    }
+
+    let studioOptions: { id: string; name: string }[] | undefined;
+    if (sessions && sessions.length > 0) {
+      studioOptions = sessions.map((s) => ({
+        id: s.id,
+        name: s.title ? `${s.title} (${s.id})` : s.id,
+      }));
+    } else if (session) {
+      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
+    }
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || 'default-studio';
+
     let isWorkspaceMatched = true;
     let workspaceMismatchReason = '';
     if (session && session.workspacePath && localWorkspace) {
@@ -177,8 +216,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         messages: this._messages,
         attachments: this._attachments,
         hasSeenOnboarding: this._hasSeenOnboarding,
-        selectedRuntime: 'claude_code',
-        selectedStudioId: 'default-studio',
+        selectedRuntime,
+        selectedStudioId,
+        runtimes: runtimeOptions,
+        studios: studioOptions,
         workspacePath: localWorkspace,
         isWorkspaceMatched,
         workspaceMismatchReason,
@@ -605,14 +646,18 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     modelId?: string;
     providerId?: string;
   }): Promise<void> {
-    const prompt = (message.prompt || '').trim();
-    if (!prompt) {
+    const prompt = message.prompt || '';
+    if (!prompt || /^\s*$/.test(prompt)) {
       await this.postMessage({ type: 'error', error: 'Prompt cannot be empty.' });
       return;
     }
-    if (prompt.length > 4 * 1024 * 1024) {
+    const promptByteLength = Buffer.byteLength(prompt, 'utf8');
+    if (promptByteLength > 4 * 1024 * 1024) {
       await this.postMessage({ type: 'error', error: 'Prompt exceeds 4 MiB wire frame limit.' });
       return;
+    }
+    if (promptByteLength > 100 * 1024) {
+      void vscode.window.showWarningMessage('Prompt size is larger than 100 KB; wire framing limits may apply.');
     }
 
     if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
@@ -682,6 +727,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         const submitResult = await this.bridge.submitTask({
           studioId,
           prompt,
+          runtimePreference: runtime,
           workspacePath: localWorkspace || undefined,
           requestedModelId: message.modelId || this._selectedModelId,
           requestedProviderId: message.providerId || this._selectedProviderId,
@@ -790,6 +836,45 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
     const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
+    let selectedRuntime = 'claude_code';
+    if (readiness) {
+      if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
+        runtimeOptions = readiness.runtime_instances.map((inst) => ({
+          id: inst.implementation,
+          name: `${inst.implementation} (${inst.instance_id})`,
+          enabled: inst.healthy,
+          tooltip: inst.healthy ? 'Healthy runtime instance' : 'Degraded runtime instance',
+        }));
+      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
+        runtimeOptions = readiness.available_runtimes.map((r) => ({
+          id: r,
+          name: r,
+          enabled: true,
+        }));
+      }
+      if (readiness.defaults?.configured_instance_id) {
+        selectedRuntime = readiness.defaults.configured_instance_id;
+      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
+        selectedRuntime = readiness.available_runtimes[0];
+      }
+    }
+
+    let studioOptions: { id: string; name: string }[] | undefined;
+    if (sessions && sessions.length > 0) {
+      studioOptions = sessions.map((s) => ({
+        id: s.id,
+        name: s.title ? `${s.title} (${s.id})` : s.id,
+      }));
+    } else if (session) {
+      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
+    }
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || 'default-studio';
+
     let isWorkspaceMatched = true;
     let workspaceMismatchReason = '';
     if (session && session.workspacePath && localWorkspace) {
@@ -813,6 +898,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       state: {
         session,
         sessions,
+        runtimes: runtimeOptions,
+        studios: studioOptions,
+        selectedRuntime,
+        selectedStudioId,
         connectionState: this.bridge.connectionState,
         isPreview: this.isPreview,
         providers,

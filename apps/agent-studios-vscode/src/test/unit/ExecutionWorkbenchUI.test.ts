@@ -321,7 +321,7 @@ describe('ExecutionWorkbenchUI Tests', () => {
       assert.ok(submitMsg.taskId, 'Must have valid task ID');
 
       const execState = TaskExecutionStore.instance.getState();
-      assert.strictEqual(execState.status, 'running');
+      assert.strictEqual(execState.status, 'queued');
       assert.strictEqual(execState.activeTaskId, submitMsg.taskId);
     });
 
@@ -378,6 +378,59 @@ describe('ExecutionWorkbenchUI Tests', () => {
       const err = postedMessages.find((m) => (m as { type?: string }).type === 'error') as { error?: string } | undefined;
       assert.ok(err, 'Must return error');
       assert.ok(err.error?.includes('task.cancel capability is not enabled'));
+    });
+
+    it('preserves prompt whitespace integrity verbatim and rejects whitespace-only prompts', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+      let capturedPrompt = '';
+      OperatorConfirmationModal.setDialogHandlerForTesting(async (req) => {
+        capturedPrompt = req.prompt;
+        return true;
+      });
+
+      const bridge = new FixtureBridge();
+      bridge.setSessionWorkspacePathForTesting('/test/workspace');
+
+      (vscode.workspace as { workspaceFolders?: readonly vscode.WorkspaceFolder[] }).workspaceFolders = [
+        {
+          uri: vscode.Uri.file('/test/workspace'),
+          name: 'test',
+          index: 0,
+        },
+      ];
+
+      const provider = new ChatWebviewViewProvider(extensionUri, bridge);
+      const mockView = new MockWebviewView(ChatWebviewViewProvider.viewType);
+      await provider.resolveWebviewView(
+        mockView as unknown as vscode.WebviewView,
+        {} as vscode.WebviewViewResolveContext,
+        {} as vscode.CancellationToken
+      );
+
+      // 1. Whitespace-only prompt must be rejected
+      await provider.handleWebviewMessage({
+        command: 'submitTask',
+        prompt: '   \n\t  \n  ',
+        studioId: 'default-studio',
+      });
+      const err = mockView.webview._sentMessages.find((m) => (m as { type?: string }).type === 'error') as { error?: string } | undefined;
+      assert.ok(err, 'Must reject whitespace-only prompt');
+      assert.ok(
+        err.error?.includes("Command 'submitTask' requires non-empty string 'prompt'") ||
+          err.error?.includes('Prompt cannot be empty.'),
+        'Must report non-empty prompt requirement'
+      );
+
+      // 2. Multiline indented prompt must preserve indentation and leading/trailing newlines
+      const rawPrompt = '  \nfn hello() {\n    println!("hello");\n  }\n  ';
+      await provider.handleWebviewMessage({
+        command: 'submitTask',
+        prompt: rawPrompt,
+        studioId: 'default-studio',
+      });
+
+      assert.strictEqual(capturedPrompt, rawPrompt, 'Prompt whitespace must be preserved verbatim without destructive trimming');
     });
   });
 });

@@ -17,6 +17,7 @@
 import { NativeIpcTransport } from './NativeIpcTransport';
 import {
   RustCancellationSummary,
+  RustExecutionReadinessReport,
   RustIpcCommand,
   RustIpcResponse,
 } from './RustIpcProtocolTypes';
@@ -68,6 +69,30 @@ export class ExecutionClient {
     }
   ): Promise<VerifiedDaemonConfig> {
     return SubmitTaskAdapter.verifyDaemonConfiguration(transport, options);
+  }
+
+  /**
+   * Retrieves truthful non-secret execution readiness report from the daemon.
+   */
+  public static async getExecutionReadiness(
+    transport: IpcCommandTransport
+  ): Promise<RustExecutionReadinessReport> {
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const command: RustIpcCommand = {
+      type: 'get_execution_readiness',
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    const resp = await transport.sendCommand(command);
+    if (resp.type === 'error') {
+      throw new Error(`Daemon execution readiness check failed: ${resp.message}`);
+    }
+    if (resp.type !== 'execution_readiness') {
+      throw new Error(
+        `Unexpected response from daemon for get_execution_readiness: ${JSON.stringify(resp)}`
+      );
+    }
+    return resp.readiness;
   }
 
   /**

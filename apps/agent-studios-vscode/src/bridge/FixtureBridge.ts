@@ -25,6 +25,7 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
+import { RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
 
 /**
  * Developer fixture / preview bridge providing deterministic mock session data
@@ -789,6 +790,35 @@ export class FixtureBridge implements AgentStudiosBridge {
         cancelled_runs: [],
         cancelled_approvals: [],
       },
+    };
+  }
+
+  public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+    return {
+      is_ready: true,
+      available_runtimes: ['claude-code'],
+      runtime_instances: [
+        {
+          instance_id: 'claude-code-local',
+          implementation: 'claude-code',
+          healthy: true,
+        },
+      ],
+      available_models: [
+        {
+          provider_instance_id: 'provider-anthropic-01',
+          model_id: 'claude-3-5-sonnet',
+          display_name: 'Claude 3.5 Sonnet',
+        },
+      ],
+      authorized_workspaces: [this._session.workspacePath],
+      defaults: {
+        default_repo_path: this._session.workspacePath,
+        default_provider_instance_id: 'provider-anthropic-01',
+        default_model_id: 'claude-3-5-sonnet',
+        configured_instance_id: 'claude-code-local',
+      },
+      blocking_reasons: [],
     };
   }
 

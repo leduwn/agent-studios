@@ -85,19 +85,7 @@ export class OperatorConfirmationModal {
       };
     }
 
-    // 1. Issue cryptographically bound challenge in host memory
-    const challenge = OperatorConfirmationManager.createChallenge(
-      request.studioId,
-      request.prompt,
-      {
-        workspacePath: request.workspacePath,
-        modelId: request.modelId,
-        providerId: request.providerId,
-        intent: 'task_execution',
-      }
-    );
-
-    // 2. Format human-readable preview & configuration summary
+    // 1. Format human-readable preview & configuration summary
     const cleanPrompt = request.prompt.trim().replace(/\r?\n+/g, ' ');
     const promptPreview = cleanPrompt.length > 200
       ? `${cleanPrompt.substring(0, 200)}...`
@@ -116,7 +104,7 @@ export class OperatorConfirmationModal {
     ];
     const detail = detailLines.join('\n');
 
-    // 3. Prompt user via native modal dialog (or test handler if active)
+    // 2. Prompt user via native modal dialog BEFORE issuing challenge
     let confirmed = false;
 
     if (this.customDialogHandler) {
@@ -131,9 +119,8 @@ export class OperatorConfirmationModal {
       confirmed = choice === 'Confirm & Execute';
     }
 
-    // 4. Handle result
+    // 3. Handle cancellation: purge pending challenges so token cannot be used
     if (!confirmed) {
-      // Operator cancelled or dismissed: purge pending challenges so token cannot be used
       OperatorConfirmationManager.clearPendingChallenges();
       return {
         confirmed: false,
@@ -141,6 +128,18 @@ export class OperatorConfirmationModal {
         reason: 'Operator cancelled confirmation dialog.',
       };
     }
+
+    // 4. Issue cryptographically bound challenge only AFTER operator confirmed
+    const challenge = OperatorConfirmationManager.createChallenge(
+      request.studioId,
+      request.prompt,
+      {
+        workspacePath: request.workspacePath,
+        modelId: request.modelId,
+        providerId: request.providerId,
+        intent: 'task_execution',
+      }
+    );
 
     return {
       confirmed: true,

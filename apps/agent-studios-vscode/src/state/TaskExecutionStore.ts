@@ -113,7 +113,7 @@ export class TaskExecutionStore implements vscode.Disposable {
   public taskSubmitted(taskId: string, studioId: string): void {
     this._state = {
       ...this._state,
-      status: 'running',
+      status: 'queued',
       activeTaskId: taskId,
       activeStudioId: studioId,
     };
@@ -205,7 +205,6 @@ export class TaskExecutionStore implements vscode.Disposable {
       : {};
 
     switch (event.type) {
-      case 'task_submitted':
       case 'task_started':
       case 'run_started':
         if (this._state.status === 'submitting' || this._state.status === 'queued') {
@@ -218,9 +217,40 @@ export class TaskExecutionStore implements vscode.Disposable {
         }
         break;
 
+      case 'task_state_transitioned':
+      case 'run_state_transitioned': {
+        const toState = (payload.to_state || payload.new_state || payload.state) as string | undefined;
+        if (toState === 'running' || toState === 'executing') {
+          if (this._state.status === 'submitting' || this._state.status === 'queued') {
+            this._state = {
+              ...this._state,
+              status: 'running',
+              activeTaskId: event.taskId ?? this._state.activeTaskId,
+            };
+            this.notifyStateChanged();
+          }
+        } else if (toState === 'succeeded' || toState === 'completed') {
+          this.completeTask('succeeded');
+        } else if (toState === 'failed') {
+          this.completeTask('failed', {
+            message: event.summary || 'Task transitioned to failed state',
+            details: payload,
+          });
+        } else if (toState === 'cancelled') {
+          this.completeTask('cancelled', {
+            message: event.summary || 'Task transitioned to cancelled state',
+            details: payload,
+          });
+        }
+        break;
+      }
+
+      case 'tool_started':
       case 'tool_executing':
         if (typeof payload.tool_name === 'string') {
           this.setToolExecution(payload.tool_name, 'executing');
+        } else if (typeof payload.name === 'string') {
+          this.setToolExecution(payload.name, 'executing');
         } else if (event.summary && event.summary.startsWith('Tool ')) {
           const match = event.summary.match(/^Tool (\S+)/);
           this.setToolExecution(match ? match[1] : 'unknown', 'executing');
@@ -230,17 +260,34 @@ export class TaskExecutionStore implements vscode.Disposable {
       case 'tool_completed':
         if (typeof payload.tool_name === 'string') {
           this.setToolExecution(payload.tool_name, 'completed');
+        } else if (typeof payload.name === 'string') {
+          this.setToolExecution(payload.name, 'completed');
         } else if (this._state.activeTool) {
           this.setToolExecution(this._state.activeTool.name, 'completed');
         }
         break;
 
-      case 'tool_failed':
-        if (typeof payload.tool_name === 'string') {
-          const err = typeof payload.error === 'string' ? payload.error : undefined;
-          this.setToolExecution(payload.tool_name, 'failed', err);
-        } else if (this._state.activeTool) {
-          this.setToolExecution(this._state.activeTool.name, 'failed');
+      case 'tool_failed': {
+        const toolName = typeof payload.tool_name === 'string'
+          ? payload.tool_name
+          : typeof payload.name === 'string'
+            ? payload.name
+            : (this._state.activeTool?.name || 'unknown');
+        const err = typeof payload.error === 'string'
+          ? payload.error
+          : (typeof payload.message === 'string' ? payload.message : undefined);
+        this.setToolExecution(toolName, 'failed', err);
+        break;
+      }
+
+      case 'runtime_output_delta':
+      case 'output_delta':
+        if (typeof payload.text === 'string') {
+          this.appendStreamChunk(payload.text);
+        } else if (typeof payload.output === 'string') {
+          this.appendStreamChunk(payload.output);
+        } else if (typeof payload.chunk === 'string') {
+          this.appendStreamChunk(payload.chunk);
         }
         break;
 
@@ -265,11 +312,25 @@ export class TaskExecutionStore implements vscode.Disposable {
         break;
     }
 
-    // Capture stdout or stderr text delta if payload carries stream content
-    if (typeof payload.output === 'string') {
-      this.appendStreamChunk(payload.output);
-    } else if (typeof payload.chunk === 'string') {
-      this.appendStreamChunk(payload.chunk);
+    // Capture stdout or stderr text delta if payload carries stream content outside delta events
+    if (event.type !== 'runtime_output_delta' && event.type !== 'output_delta') {
+      if (typeof payload.output === 'string') {
+        this.appendStreamChunk(payload.output);
+      } else if (typeof payload.chunk === 'string') {
+        this.appendStreamChunk(payload.chunk);
+      }
+    }
+
+    // Capture metrics authoritatively if reported in event payload
+    if (payload.metrics && typeof payload.metrics === 'object') {
+      const m = payload.metrics as Record<string, unknown>;
+      this.updateMetrics({
+        promptTokens: typeof m.prompt_tokens === 'number' ? m.prompt_tokens : (typeof m.promptTokens === 'number' ? m.promptTokens : undefined),
+        completionTokens: typeof m.completion_tokens === 'number' ? m.completion_tokens : (typeof m.completionTokens === 'number' ? m.completionTokens : undefined),
+        totalTokens: typeof m.total_tokens === 'number' ? m.total_tokens : (typeof m.totalTokens === 'number' ? m.totalTokens : undefined),
+        costUsd: typeof m.cost_usd === 'number' ? m.cost_usd : (typeof m.costUsd === 'number' ? m.costUsd : undefined),
+        latencyMs: typeof m.latency_ms === 'number' ? m.latency_ms : (typeof m.latencyMs === 'number' ? m.latencyMs : undefined),
+      });
     }
   }
 

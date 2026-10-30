@@ -62,6 +62,13 @@ export class OperatorConfirmationManager {
   }
 
   /**
+   * Returns number of active pending challenges in Extension Host memory.
+   */
+  public static getActiveChallengesCountForTesting(): number {
+    return this.activeChallenges.size;
+  }
+
+  /**
    * Generates a signed challenge using an explicit foreign secret to test signature verification failure.
    */
   public static createChallengeWithForeignSecretForTesting(

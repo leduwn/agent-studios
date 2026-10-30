@@ -39,6 +39,8 @@ export interface SubmitTaskRequest {
   confirmationChallenge?: OperatorConfirmationChallenge | string;
   requestedModelId?: string;
   requestedProviderId?: string;
+  runtimeInstanceId?: string;
+  runtimePreference?: string;
   workspacePath?: string;
   daemonRepoRoot?: string;
   daemonEffectiveModel?: string;
@@ -224,7 +226,7 @@ export class SubmitTaskAdapter {
       );
     }
 
-    // 2. Construct authoritative Rust BatchTaskSpec
+    // 2. Construct authoritative Rust BatchTaskSpec with execution spec (M15)
     /* eslint-disable @typescript-eslint/naming-convention */
     const taskSpec: RustBatchTaskSpec = {
       key: req.customKey || preflight.sanitizedSpec.key,
@@ -236,6 +238,14 @@ export class SubmitTaskAdapter {
       dependency_keys: [],
       dependency_task_ids: [],
       dependency_output_policy: 'task_success',
+      execution: {
+        initial_prompt: req.prompt,
+        repository_path: req.workspacePath ?? null,
+        runtime_instance_id: req.runtimeInstanceId ?? null,
+        runtime_preference: req.runtimePreference ?? null,
+        provider_instance_id: req.requestedProviderId ?? effectiveProvider ?? null,
+        model_id: req.requestedModelId ?? effectiveModel ?? null,
+      },
     };
 
     const command: RustIpcCommand = {

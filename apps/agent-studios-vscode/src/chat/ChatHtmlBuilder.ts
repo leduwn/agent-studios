@@ -27,6 +27,18 @@ import { CHAT_STYLES } from './styles.css';
 import { OnboardingWorkflow } from './OnboardingWorkflow';
 import { TaskExecutionState, ExecutionMetrics } from '../state/TaskExecutionStore';
 
+export interface RuntimeOption {
+  id: string;
+  name: string;
+  enabled: boolean;
+  tooltip?: string;
+}
+
+export interface StudioOption {
+  id: string;
+  name: string;
+}
+
 export interface ChatHtmlInitialState {
   session?: SessionInfo | null;
   sessions?: SessionSummary[];
@@ -38,6 +50,8 @@ export interface ChatHtmlInitialState {
   selectedProviderId?: string;
   selectedRuntime?: string;
   selectedStudioId?: string;
+  runtimes?: RuntimeOption[];
+  studios?: StudioOption[];
   workspacePath?: string;
   isWorkspaceMatched?: boolean;
   workspaceMismatchReason?: string;
@@ -126,6 +140,49 @@ export class ChatHtmlBuilder {
 
     // Session options HTML
     const sessionOptionsHtml = ChatHtmlBuilder.renderSessionOptions(sessions, sessionId);
+
+    // Runtime options HTML
+    const runtimeOptions: RuntimeOption[] = initialState?.runtimes && initialState.runtimes.length > 0
+      ? initialState.runtimes
+      : [
+          { id: 'claude_code', name: 'Claude Code (Native CLI)', enabled: true },
+          { id: 'codex_external', name: 'Codex Runtime (External — Coming in M16)', enabled: false, tooltip: 'Coming in M16: External process runner support' },
+          { id: 'custom_shell', name: 'Custom Shell (Disabled)', enabled: false, tooltip: 'Coming in future milestone' },
+        ];
+
+    const runtimeOptionsHtml = runtimeOptions.map((r) => {
+      const isSelected = r.id === selectedRuntime || (selectedRuntime === 'claude_code' && (r.id === 'claude-code' || r.id === 'claude_code'));
+      const parts = [`value="${escapeHtml(r.id)}"`];
+      if (isSelected) {
+        parts.push('selected');
+      }
+      if (!r.enabled) {
+        parts.push('disabled');
+      }
+      if (r.tooltip) {
+        parts.push(`title="${escapeHtml(r.tooltip)}"`);
+      }
+      return `<option ${parts.join(' ')}>${escapeHtml(r.name)}</option>`;
+    }).join('\n');
+
+    // Studio options HTML
+    const studioOptions: StudioOption[] = (initialState?.studios && initialState.studios.length > 0)
+      ? [...initialState.studios]
+      : (sessions && sessions.length > 0)
+      ? sessions.map((s) => ({ id: s.id, name: s.title || s.id }))
+      : [
+          { id: 'default-studio', name: 'default-studio' },
+          { id: 'agent-studios-core', name: 'agent-studios-core' },
+        ];
+
+    if (selectedStudioId && !studioOptions.some((s) => s.id === selectedStudioId)) {
+      studioOptions.unshift({ id: selectedStudioId, name: selectedStudioId });
+    }
+
+    const studioOptionsHtml = studioOptions.map((s) => {
+      const isSelected = s.id === selectedStudioId;
+      return `<option value="${escapeHtml(s.id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(s.name)}</option>`;
+    }).join('\n');
 
     // Initial state serialized for in-page script
     const clientStateJson = JSON.stringify({
@@ -508,17 +565,13 @@ export class ChatHtmlBuilder {
         <div class="workbench-field">
           <label for="runtimeSelect" class="workbench-field-label">Runtime</label>
           <select id="runtimeSelect" class="workbench-select" aria-label="Agent Runtime">
-            <option value="claude_code" ${selectedRuntime === 'claude_code' ? 'selected' : ''}>Claude Code (Native CLI)</option>
-            <option value="codex_external" disabled title="Coming in M16: External process runner support">Codex Runtime (External — Coming in M16)</option>
-            <option value="custom_shell" disabled title="Coming in future milestone">Custom Shell (Disabled)</option>
+            ${runtimeOptionsHtml}
           </select>
         </div>
         <div class="workbench-field">
           <label for="studioSelect" class="workbench-field-label">Studio</label>
           <select id="studioSelect" class="workbench-select" aria-label="Active Studio">
-            <option value="default-studio" ${selectedStudioId === 'default-studio' ? 'selected' : ''}>default-studio</option>
-            <option value="agent-studios-core" ${selectedStudioId === 'agent-studios-core' ? 'selected' : ''}>agent-studios-core</option>
-            ${selectedStudioId !== 'default-studio' && selectedStudioId !== 'agent-studios-core' ? `<option value="${escapeHtml(selectedStudioId)}" selected>${escapeHtml(selectedStudioId)}</option>` : ''}
+            ${studioOptionsHtml}
           </select>
         </div>
         <div class="workbench-field">
@@ -951,7 +1004,7 @@ export class ChatHtmlBuilder {
           var m = execState.metrics;
           var metricsHtml = '';
           if (m.isReported) {
-            metricsHtml = '<span class="metric-item">Tokens: ' + (m.totalTokens != null ? m.totalTokens.toLocaleString() : 'N/A') + '</span>';
+            metricsHtml = '<span class="metric-item">Tokens: ' + (m.totalTokens != null ? m.totalTokens.toLocaleString('en-US') : 'N/A') + '</span>';
             if (m.costUsd != null) {
               metricsHtml += '<span class="metric-item">Cost: $' + m.costUsd.toFixed(4) + '</span>';
             }

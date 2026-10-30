@@ -62,6 +62,7 @@ import {
   RustTaskRecord,
   RustTaskState,
   RustHealthResponse,
+  RustExecutionReadinessReport,
 } from './ipc/RustIpcProtocolTypes';
 
 export interface DaemonConnectedBridgeOptions {
@@ -502,6 +503,14 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     }
 
     return current;
+  }
+
+  /**
+   * Retrieves execution readiness report from the daemon using ExecutionClient.
+   */
+  public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+    this.assertConnected();
+    return ExecutionClient.getExecutionReadiness(this._transport!);
   }
 
   /**
