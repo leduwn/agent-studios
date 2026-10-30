@@ -1,9 +1,9 @@
 # IPC-03 Integration Layer & Capability Readiness Matrix
 
-**Milestone:** M14-UI-02  
+**Milestone:** M14-UI-02.1  
 **Run ID:** RUN-20261030-M14-UI-02  
 **Date:** 2026-10-30  
-**Scope:** IPC-03 wire framing, correlation engine, and daemon capability readiness mapping.
+**Scope:** IPC-03 wire framing, anti-DoS bounds, correlation engine, and truthful capability readiness mapping.
 
 ---
 
@@ -11,7 +11,7 @@
 
 Communication between the VS Code extension host and the native Agent Studios daemon occurs over Unix Domain Sockets (Linux/macOS) and Windows Named Pipes.
 
-To prevent framing ambiguities and stream corruption, `IpcFrameCodec.ts` implements a deterministic 4-byte big-endian length-prefixed protocol:
+To prevent framing ambiguities, buffer overruns, and stream corruption, `IpcFrameCodec.ts` and `RustIpcCodec.ts` implement a deterministic 4-byte big-endian length-prefixed protocol:
 
 ```
 ┌─────────────────┬──────────────────────────────────────────────────────┐
@@ -22,9 +22,12 @@ To prevent framing ambiguities and stream corruption, `IpcFrameCodec.ts` impleme
 ```
 
 ### Safety & Robustness Guarantees:
-1. **Length-Prefixed Framing:** Big-endian 32-bit unsigned integer encodes exact byte length of subsequent JSON string.
-2. **Chunk Reassembly:** Handles fragmented incoming socket chunks by maintaining residual buffers until complete frame arrives.
-3. **DoS Protection:** Throws immediate protocol error if frame size exceeds **16 MB** (`16 * 1024 * 1024`), blocking memory exhaustion attacks.
+1. **Length-Prefixed Framing:** Big-endian 32-bit unsigned integer encodes exact byte length of subsequent JSON string (`FRAME_HEADER_SIZE = 4`).
+2. **Authoritative 4 MiB Max Frame Size:** Aligned with native Rust transport limits (`DEFAULT_MAX_FRAME_SIZE = 4 * 1024 * 1024` bytes / 4 MiB). Inbound length prefixes exceeding 4 MiB immediately throw `RangeError`, terminating the connection.
+3. **Outbound Fast Pre-Allocation Validation:** Outbound frames measure UTF-8 byte length before allocating buffers, rejecting oversized payloads without memory spikes.
+4. **Anti-DoS Bounded Buffer Accumulation:** Partial socket stream accumulation is strictly capped at `MAX_ACCUMULATED_BUFFER_SIZE = 4 * 1024 * 1024 + 4` bytes (4,194,308 bytes). Chunk streams attempting unbounded memory exhaustion are blocked.
+5. **Serde Tagged Wire Format Codec:** `RustIpcCodec.ts` provides native encoding/decoding for Rust internally tagged commands (`type: ...`), eliminating wire incompatibility risks.
+6. **Canonical HMAC-SHA256 Authenticator:** `RustHmacSigner.ts` produces cryptographic headers matching `ipc-protocol/src/auth.rs`, incorporating canonical digest formatting, lexicographical capability sorting, and constant-time signature verification.
 
 ---
 
@@ -40,25 +43,29 @@ Asynchronous RPC calls are correlated through monotonic, collision-resistant ide
 
 ---
 
-## 3. Machine-Readable Readiness Matrix (`IPC_03_READINESS_MATRIX`)
+## 3. Truthful Machine-Readable Readiness Matrix (`IPC_03_READINESS_MATRIX`)
 
-The table below catalogs all 9 core control plane RPC capabilities between VS Code extension and native daemon:
+The table below catalogs all 12 core control plane capabilities with truthful status classifications:
 
-| Capability ID | RPC Method | Description | Implementation State | Security Verdict | Notes |
+| Capability ID | Method | Description | Implementation State | Security Verdict | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `daemon.handshake` | `daemon.handshake` | Protocol version negotiation & client auth | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Validates protocol version `1.0` |
-| `session.list` | `session.list` | Enumerate active and past sessions | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Populates Sessions TreeView |
-| `session.create` | `session.create` | Allocate new multi-agent session | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Returns fresh session ID |
-| `session.switch` | `session.switch` | Switch active session context | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Resets message history view |
-| `chat.send` | `chat.send` | Send prompt with mode & attachments | `IMPLEMENTED_UNVERIFIED` | `FAIL_CLOSED` | Streaming chunks via SSE/events |
-| `chat.cancel` | `chat.cancel` | Abort in-flight model execution | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Stops daemon token generation |
-| `approval.decide` | `approval.decide` | Approve/deny tool action | `IMPLEMENTED_IN_RUST` | `FAIL_CLOSED` | Critical security gate |
-| `artifact.list` | `artifact.list` | List modified diff artifacts | `MOCK_ONLY` | `FAIL_CLOSED` | Pending Rust diff provider hook |
-| `provider.list` | `provider.list` | Enumerate configured AI model providers | `IMPLEMENTED_IN_RUST` | `VERIFIED` | Ingests native daemon providers |
+| `daemon.handshake` | `daemon.handshake` | Version negotiation & auth | `INCOMPATIBLE_WIRE_FORMAT` | `FAIL_CLOSED` | Rust uses `negotiate_capabilities` + HMAC `authenticate` |
+| `daemon.getStatus` | `daemon.getStatus` | Daemon health & status | `INCOMPATIBLE_WIRE_FORMAT` | `VERIFIED` | Rust uses `get_health` command |
+| `session.list` | `session.list` | Enumerate active sessions | `INCOMPATIBLE_WIRE_FORMAT` | `VERIFIED` | Rust uses `list_studios` command |
+| `session.create` | `session.create` | Create multi-agent session | `INCOMPATIBLE_WIRE_FORMAT` | `FAIL_CLOSED` | Rust uses `create_studio` command |
+| `session.switch` | `session.switch` | Switch active session | `UNIMPLEMENTED` | `FAIL_CLOSED` | Client stream re-subscription required |
+| `session.sendMessage` | `session.sendMessage` | Submit task or chat prompt | `INCOMPATIBLE_WIRE_FORMAT` | `FAIL_CLOSED` | Rust uses `submit_task` with task spec |
+| `session.cancelRun` | `session.cancelRun` | Cancel running task execution | `INCOMPATIBLE_WIRE_FORMAT` | `VERIFIED` | Rust uses `cancel_task` command |
+| `approval.list` | `approval.list` | Enumerate pending approvals | `UNIMPLEMENTED` | `FAIL_CLOSED` | Approvals handled as reactive event stream |
+| `approval.decide` | `approval.decide` | Approve or deny action | `INCOMPATIBLE_WIRE_FORMAT` | `FAIL_CLOSED` | Rust uses `resolve_approval` command |
+| `artifact.list` | `artifact.list` | Enumerate diff artifacts | `UNIMPLEMENTED` | `FAIL_CLOSED` | Artifacts tracked via task graph events |
+| `artifact.getDiff` | `artifact.getDiff` | Inspect artifact diff patch | `TYPESCRIPT_CONTRACT_ONLY` | `VERIFIED` | Virtual `agent-studios-diff://` document provider |
+| `provider.list` | `provider.list` | Enumerate configured LLMs | `INCOMPATIBLE_WIRE_FORMAT` | `VERIFIED` | Rust uses `list_providers` + `list_models` |
 
-### Readiness Summary Metrics:
-- **Total Capabilities Cataloged:** 9
-- **Implemented in Native Rust Daemon:** 6 (5 verified, 1 unverified)
-- **Mock/Fixture Fallback:** 1 (`artifact.list`)
-- **Missing / Unimplemented:** 0
-- **Fail-Closed Security Gated:** 3 (`chat.send`, `approval.decide`, `artifact.list`)
+### Truthful Readiness Summary:
+- **Total Capabilities Cataloged:** 12
+- **Verified Rust Implementation:** 0 (Honest: no direct wire RPC verified against running daemon socket)
+- **TypeScript Contract Only:** 1 (`artifact.getDiff`)
+- **Incompatible Wire Format:** 8 (Serde tagged union vs JSON-RPC 2.0; bridged by `RustIpcCodec`)
+- **Unimplemented:** 3 (`session.switch`, `approval.list`, `artifact.list`)
+- **Fail-Closed Security Gated:** 7
