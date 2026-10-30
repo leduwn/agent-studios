@@ -1374,6 +1374,7 @@ async fn build_execution_readiness_report(
     let mut available_runtimes = Vec::new();
     let mut runtime_instances = Vec::new();
 
+    // 1. Runtime availability check
     if let Some(ref runtime) = server_state.runtime {
         available_runtimes.push(runtime.implementation_id().to_string());
         match runtime.discover().await {
@@ -1395,6 +1396,21 @@ async fn build_execution_readiness_report(
         blocking_reasons.push("No agent runtime configured on daemon".to_string());
     }
 
+    // Check runtime instance availability
+    if let Some(ref target_id) = server_state.configured_instance_id {
+        if !runtime_instances
+            .iter()
+            .any(|r| r.instance_id == target_id.to_string() && r.healthy)
+        {
+            blocking_reasons.push(format!(
+                "Configured runtime instance '{target_id}' is not available or unhealthy"
+            ));
+        }
+    } else if !runtime_instances.iter().any(|r| r.healthy) && server_state.runtime.is_some() {
+        blocking_reasons.push("No healthy runtime instances available".to_string());
+    }
+
+    // 2. Model catalog check
     let available_models = {
         let catalog = server_state.provider_catalog.read().await;
         catalog
@@ -1407,6 +1423,78 @@ async fn build_execution_readiness_report(
             })
             .collect::<Vec<_>>()
     };
+
+    if available_models.is_empty() {
+        blocking_reasons.push("No models available in provider catalog".to_string());
+    } else if let Some(ref configured_ref) = server_state.default_model_ref {
+        let found = available_models.iter().any(|m| {
+            m.provider_instance_id == configured_ref.provider_instance_id.to_string()
+                && m.model_id == configured_ref.model_id.as_str()
+        });
+        if !found {
+            blocking_reasons.push(format!(
+                "Configured default model '{}' not found in provider catalog",
+                configured_ref
+            ));
+        }
+    } else if available_models.len() > 1 {
+        blocking_reasons.push(format!(
+            "Multiple models available ({}) in catalog but no default model configured. Configure default model via IpcServerBuilder::with_default_model_ref or AGENT_STUDIOS_DEFAULT_MODEL",
+            available_models.len()
+        ));
+    }
+
+    // 3. Workspace authorization & repository validity check
+    let authorized_workspaces = {
+        let list = server_state.authorized_workspaces.lock().unwrap();
+        let mut paths = Vec::new();
+        if let Some(ref def) = server_state.default_repo_path {
+            if let Ok(canon) = dunce::canonicalize(def) {
+                paths.push(canon.to_string_lossy().to_string());
+            } else {
+                paths.push(def.to_string_lossy().to_string());
+            }
+        }
+        for p in list.iter() {
+            let s = dunce::canonicalize(p)
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_else(|_| p.to_string_lossy().to_string());
+            if !paths.contains(&s) {
+                paths.push(s);
+            }
+        }
+        paths
+    };
+
+    if let Some(ref def) = server_state.default_repo_path {
+        match dunce::canonicalize(def) {
+            Ok(canon) => {
+                if !canon.join(".git").exists() {
+                    blocking_reasons.push(format!(
+                        "Default workspace path '{}' is not a valid Git repository (.git not found)",
+                        canon.display()
+                    ));
+                } else if let Err(err) =
+                    server_state.verify_workspace_authorization(&canon.to_string_lossy())
+                {
+                    blocking_reasons.push(format!(
+                        "Default workspace path '{}' is not authorized: {err}",
+                        canon.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                blocking_reasons.push(format!(
+                    "Default workspace path '{}' cannot be canonicalized: {e}",
+                    def.display()
+                ));
+            }
+        }
+    } else if authorized_workspaces.is_empty() {
+        blocking_reasons.push("No authorized workspaces configured on daemon".to_string());
+    } else {
+        blocking_reasons.push("No default repository path configured on daemon".to_string());
+    }
 
     let defaults = ExecutionDefaultsReadiness {
         default_repo_path: server_state
@@ -1427,29 +1515,7 @@ async fn build_execution_readiness_report(
             .map(|id| id.to_string()),
     };
 
-    let authorized_workspaces = {
-        let list = server_state.authorized_workspaces.lock().unwrap();
-        let mut paths = Vec::new();
-        if let Some(ref def) = server_state.default_repo_path {
-            paths.push(def.to_string_lossy().to_string());
-        }
-        for p in list.iter() {
-            let s = p.to_string_lossy().to_string();
-            if !paths.contains(&s) {
-                paths.push(s);
-            }
-        }
-        paths
-    };
-
-    if authorized_workspaces.is_empty() {
-        blocking_reasons.push("No authorized workspaces configured on daemon".to_string());
-    }
-
-    let is_ready = blocking_reasons.is_empty() && runtime_instances.iter().any(|r| r.healthy);
-    if !is_ready && blocking_reasons.is_empty() {
-        blocking_reasons.push("No healthy runtime instances available".to_string());
-    }
+    let is_ready = blocking_reasons.is_empty();
 
     ExecutionReadinessReport {
         is_ready,

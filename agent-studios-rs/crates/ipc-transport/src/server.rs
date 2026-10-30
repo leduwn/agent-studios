@@ -72,6 +72,7 @@ pub struct ServerState {
     pub in_flight_approvals: Arc<Mutex<HashSet<agent_studios_protocol::id::ApprovalId>>>,
     pub in_flight_cancellations: Arc<Mutex<HashSet<agent_studios_protocol::id::TaskId>>>,
     pub authorized_workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    pub strict_workspace_roots: bool,
 }
 
 impl ServerState {
@@ -99,13 +100,19 @@ impl ServerState {
         }
 
         let allowlist = self.authorized_workspaces.lock().unwrap();
-        if self
+        if let Some(canon_def) = self
             .default_repo_path
             .as_ref()
             .and_then(|def| dunce::canonicalize(def).ok())
-            .is_some_and(|canon_def| canonical == canon_def || canonical.starts_with(&canon_def))
         {
-            return Ok(canonical);
+            let is_match = if self.strict_workspace_roots {
+                canonical == canon_def
+            } else {
+                canonical == canon_def || canonical.starts_with(&canon_def)
+            };
+            if is_match {
+                return Ok(canonical);
+            }
         }
 
         if allowlist.is_empty() {
@@ -116,10 +123,15 @@ impl ServerState {
         }
 
         for auth in allowlist.iter() {
-            if dunce::canonicalize(auth).is_ok_and(|canon_auth| {
-                canonical == canon_auth || canonical.starts_with(&canon_auth)
-            }) {
-                return Ok(canonical);
+            if let Ok(canon_auth) = dunce::canonicalize(auth) {
+                let is_match = if self.strict_workspace_roots {
+                    canonical == canon_auth
+                } else {
+                    canonical == canon_auth || canonical.starts_with(&canon_auth)
+                };
+                if is_match {
+                    return Ok(canonical);
+                }
             }
         }
 
@@ -213,6 +225,7 @@ pub struct IpcServerBuilder {
     default_model_ref: Option<agent_studios_provider::model::ModelRef>,
     configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
     authorized_workspaces: Vec<std::path::PathBuf>,
+    strict_workspace_roots: bool,
 }
 
 impl Default for IpcServerBuilder {
@@ -248,6 +261,7 @@ impl IpcServerBuilder {
             default_model_ref: None,
             configured_instance_id: None,
             authorized_workspaces: Vec::new(),
+            strict_workspace_roots: false,
         }
     }
 
@@ -352,6 +366,11 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_strict_workspace_roots(mut self, strict: bool) -> Self {
+        self.strict_workspace_roots = strict;
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -424,6 +443,7 @@ impl IpcServerBuilder {
             in_flight_approvals: Arc::new(Mutex::new(HashSet::new())),
             in_flight_cancellations: Arc::new(Mutex::new(HashSet::new())),
             authorized_workspaces: Arc::new(Mutex::new(self.authorized_workspaces)),
+            strict_workspace_roots: self.strict_workspace_roots,
         });
 
         Ok(IpcServer { state })

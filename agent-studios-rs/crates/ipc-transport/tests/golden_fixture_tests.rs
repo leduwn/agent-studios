@@ -753,3 +753,120 @@ fn test_fixture_daemon_bootstrap_info() {
     assert!(admin_debug.contains("[REDACTED]"));
     assert!(!admin_debug.contains("a81d4fae-7dec-11d0-a765-00a0c91e6bf6"));
 }
+
+#[test]
+fn test_fixture_run_record_execution_serialization() {
+    let _studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let run_id = RunId::new();
+    let agent_id = AgentId::new();
+
+    // 1. RunRecord with execution: Some(TaskExecutionSpec)
+    let execution_spec = TaskExecutionSpec {
+        initial_prompt: Some("Fix auth token validation".to_string()),
+        repository_path: Some("/path/to/my-repo".to_string()),
+        runtime_instance_id: Some("rt-inst-c0a80101-0000-0000-0000-000000000001".to_string()),
+        runtime_preference: Some("opencode".to_string()),
+        provider_instance_id: Some("c0a80101-0000-0000-0000-000000000002".to_string()),
+        model_id: Some("claude-3-7-sonnet".to_string()),
+    };
+
+    let run_with_exec = RunRecord {
+        id: run_id,
+        task_id,
+        agent_id,
+        attempt: 1,
+        state: RunState::Running,
+        started_at: Some(Utc.timestamp_opt(1793400100, 0).single().unwrap()),
+        finished_at: None,
+        execution: Some(execution_spec),
+    };
+
+    let json_str =
+        serde_json::to_string_pretty(&run_with_exec).expect("serialize RunRecord with execution");
+    let val: Value = serde_json::from_str(&json_str).expect("parse json");
+
+    assert_eq!(val["id"], run_id.to_string());
+    assert_eq!(val["task_id"], task_id.to_string());
+    assert_eq!(val["state"], "running");
+    assert_eq!(
+        val["execution"]["initial_prompt"],
+        "Fix auth token validation"
+    );
+    assert_eq!(val["execution"]["repository_path"], "/path/to/my-repo");
+    assert_eq!(
+        val["execution"]["runtime_instance_id"],
+        "rt-inst-c0a80101-0000-0000-0000-000000000001"
+    );
+    assert_eq!(val["execution"]["runtime_preference"], "opencode");
+    assert_eq!(
+        val["execution"]["provider_instance_id"],
+        "c0a80101-0000-0000-0000-000000000002"
+    );
+    assert_eq!(val["execution"]["model_id"], "claude-3-7-sonnet");
+
+    // Deserialization roundtrip
+    let deserialized: RunRecord =
+        serde_json::from_str(&json_str).expect("deserialize RunRecord with execution");
+    assert_eq!(deserialized.id, run_id);
+    assert_eq!(
+        deserialized.execution.as_ref().unwrap().model_id.as_deref(),
+        Some("claude-3-7-sonnet")
+    );
+
+    // 2. RunRecord with execution: None (backward compatibility)
+    let run_no_exec = RunRecord {
+        id: RunId::new(),
+        task_id,
+        agent_id,
+        attempt: 1,
+        state: RunState::Queued,
+        started_at: None,
+        finished_at: None,
+        execution: None,
+    };
+    let json_no_exec =
+        serde_json::to_string_pretty(&run_no_exec).expect("serialize RunRecord without execution");
+    let val_no_exec: Value = serde_json::from_str(&json_no_exec).expect("parse json");
+    assert!(val_no_exec["execution"].is_null());
+
+    let deserialized_no_exec: RunRecord =
+        serde_json::from_str(&json_no_exec).expect("deserialize RunRecord without execution");
+    assert!(deserialized_no_exec.execution.is_none());
+
+    // 3. IpcResponse::Run wrapping RunRecord
+    let resp = IpcResponse::Run {
+        run: Some(run_with_exec),
+    };
+    let resp_json = serde_json::to_string_pretty(&resp).expect("serialize IpcResponse::Run");
+    let resp_val: Value = serde_json::from_str(&resp_json).expect("parse json");
+    assert_eq!(resp_val["type"], "run");
+    assert_eq!(
+        resp_val["run"]["execution"]["model_id"],
+        "claude-3-7-sonnet"
+    );
+}
+
+#[test]
+fn test_fixture_error_responses_serialization() {
+    let err_resp = IpcResponse::Error {
+        message: "Repository path '/invalid/path' is not authorized".to_string(),
+    };
+    let err_json = serde_json::to_string_pretty(&err_resp).expect("serialize IpcResponse::Error");
+    let err_val: Value = serde_json::from_str(&err_json).expect("parse json");
+
+    assert_eq!(err_val["type"], "error");
+    assert_eq!(
+        err_val["message"],
+        "Repository path '/invalid/path' is not authorized"
+    );
+
+    let deserialized: IpcResponse =
+        serde_json::from_str(&err_json).expect("deserialize IpcResponse::Error");
+    match deserialized {
+        IpcResponse::Error { message } => {
+            assert!(message.contains("not authorized"));
+        }
+        other => panic!("Unexpected response variant: {:?}", other),
+    }
+}

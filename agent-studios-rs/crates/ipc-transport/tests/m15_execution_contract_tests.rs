@@ -931,3 +931,326 @@ async fn test_backward_compatible_m13_task_submission() {
         Some(&ModelRef::new(prov1_id, model1_id))
     );
 }
+
+#[tokio::test]
+async fn test_readiness_semantics_blocking_reasons_and_edge_cases() {
+    let mock_runtime = Arc::new(TestMockRuntime::new("opencode"));
+    let repo = IsolatedTestRepo::new();
+    let key_id = "test-readiness-edge-key";
+    let secret = b"secret-readiness-edge-123".to_vec();
+
+    // 1. No runtime configured on daemon
+    let server_no_rt = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_no_rt.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_no_rt = client.get_execution_readiness().await.unwrap();
+    assert!(!r_no_rt.is_ready);
+    assert!(
+        r_no_rt
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("No agent runtime configured")
+                || b.contains("No healthy runtime instances available"))
+    );
+
+    // 2. Empty model catalog
+    let server_no_model = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(ProviderCatalog::new())
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_no_model.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_no_model = client.get_execution_readiness().await.unwrap();
+    assert!(!r_no_model.is_ready);
+    assert!(
+        r_no_model
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("No models available in provider catalog"))
+    );
+
+    // 3. Multiple models without default model configured
+    let (catalog_multi, prov1_id, model1_id, _, _) = create_test_catalog();
+    let server_multi_no_def = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_multi_no_def.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_multi = client.get_execution_readiness().await.unwrap();
+    assert!(!r_multi.is_ready);
+    assert!(
+        r_multi
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("no default model configured"))
+    );
+
+    // 4. Configured default model does not exist in catalog
+    let missing_model_ref = ModelRef::new(prov1_id, ModelId::new("phantom-model").unwrap());
+    let server_missing_model = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_model_ref(missing_model_ref)
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_missing_model.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_missing_model = client.get_execution_readiness().await.unwrap();
+    assert!(!r_missing_model.is_ready);
+    assert!(
+        r_missing_model
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("not found in provider catalog"))
+    );
+
+    // 5. Configured runtime instance unavailable / non-matching
+    let unavail_inst_id = RuntimeInstanceId::generate();
+    let server_unavail_rt = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_model_ref(ModelRef::new(prov1_id, model1_id.clone()))
+        .with_configured_instance_id(unavail_inst_id)
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_unavail_rt.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_unavail_rt = client.get_execution_readiness().await.unwrap();
+    assert!(!r_unavail_rt.is_ready);
+    assert!(
+        r_unavail_rt
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("not available or unhealthy"))
+    );
+
+    // 6. Default workspace is not a valid Git repo
+    let non_git_dir = tempfile::tempdir().unwrap();
+    let server_non_git = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_model_ref(ModelRef::new(prov1_id, model1_id.clone()))
+        .with_configured_instance_id(mock_runtime.instance_id)
+        .with_default_repo_path(non_git_dir.path())
+        .with_authorized_workspace(non_git_dir.path())
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_non_git.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_non_git = client.get_execution_readiness().await.unwrap();
+    assert!(!r_non_git.is_ready);
+    assert!(
+        r_non_git
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("is not a valid Git repository (.git not found)"))
+    );
+
+    // 7. Default workspace path does not exist (canonicalization failure)
+    let non_existent_path = non_git_dir.path().join("deleted-repo");
+    let server_missing_dir = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_model_ref(ModelRef::new(prov1_id, model1_id.clone()))
+        .with_configured_instance_id(mock_runtime.instance_id)
+        .with_default_repo_path(&non_existent_path)
+        .with_authorized_workspace(&non_existent_path)
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_missing_dir.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_missing_dir = client.get_execution_readiness().await.unwrap();
+    assert!(!r_missing_dir.is_ready);
+    assert!(
+        r_missing_dir
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("cannot be canonicalized"))
+    );
+
+    // 8. No default workspace configured on daemon
+    let server_no_default_ws = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtime(mock_runtime.clone())
+        .with_provider_catalog(catalog_multi.clone())
+        .with_default_model_ref(ModelRef::new(prov1_id, model1_id.clone()))
+        .with_configured_instance_id(mock_runtime.instance_id)
+        .build()
+        .expect("build server");
+    let (c_stream, s_stream) = tokio::io::duplex(65536);
+    server_no_default_ws.handle_connection(s_stream);
+    let mut client = IpcClient::connect_stream(c_stream, ClientConfig::new(key_id, secret.clone()))
+        .await
+        .unwrap();
+    let r_no_default_ws = client.get_execution_readiness().await.unwrap();
+    assert!(!r_no_default_ws.is_ready);
+    assert!(
+        r_no_default_ws
+            .blocking_reasons
+            .iter()
+            .any(|b| b.contains("No authorized workspaces configured"))
+    );
+}
+
+#[tokio::test]
+async fn test_workspace_containment_and_authorization_policies() {
+    let temp_root = tempfile::tempdir().unwrap();
+    let root_path = dunce::canonicalize(temp_root.path()).unwrap();
+
+    // 1. Create main repository
+    let main_repo_dir = root_path.join("main-repo");
+    std::fs::create_dir_all(&main_repo_dir).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&main_repo_dir)
+        .output()
+        .expect("git init main");
+    let canon_main = dunce::canonicalize(&main_repo_dir).unwrap();
+
+    // 2. Create nested repository inside main repository
+    let nested_repo_dir = main_repo_dir.join("nested-sub");
+    std::fs::create_dir_all(&nested_repo_dir).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&nested_repo_dir)
+        .output()
+        .expect("git init nested");
+    let canon_nested = dunce::canonicalize(&nested_repo_dir).unwrap();
+
+    // 3. Create outside repository
+    let outside_repo_dir = root_path.join("outside-repo");
+    std::fs::create_dir_all(&outside_repo_dir).unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&outside_repo_dir)
+        .output()
+        .expect("git init outside");
+    let canon_outside = dunce::canonicalize(&outside_repo_dir).unwrap();
+
+    // 4. Create repository with .git as a regular file (submodule/worktree gitdir reference)
+    let file_git_repo_dir = root_path.join("file-git-repo");
+    std::fs::create_dir_all(&file_git_repo_dir).unwrap();
+    std::fs::write(file_git_repo_dir.join(".git"), "gitdir: ../somewhere\n").unwrap();
+    let canon_file_git = dunce::canonicalize(&file_git_repo_dir).unwrap();
+
+    // 5. Create non-git directory
+    let non_git_dir = root_path.join("plain-folder");
+    std::fs::create_dir_all(&non_git_dir).unwrap();
+
+    // Build ServerState with hierarchical containment (default: strict_workspace_roots = false)
+    let server_hierarchical = IpcServer::builder()
+        .with_authorized_workspace(&canon_main)
+        .with_authorized_workspace(&canon_file_git)
+        .build()
+        .unwrap();
+
+    // Check 1: Exact approved repository succeeds
+    let res_exact = server_hierarchical
+        .state
+        .verify_workspace_authorization(canon_main.to_str().unwrap());
+    assert_eq!(res_exact.unwrap(), canon_main);
+
+    // Check 2: Nested repository succeeds under hierarchical containment
+    let res_nested_hier = server_hierarchical
+        .state
+        .verify_workspace_authorization(canon_nested.to_str().unwrap());
+    assert_eq!(res_nested_hier.unwrap(), canon_nested);
+
+    // Check 3: Outside repository rejected
+    let res_outside = server_hierarchical
+        .state
+        .verify_workspace_authorization(canon_outside.to_str().unwrap());
+    assert!(res_outside.is_err());
+    assert!(
+        res_outside
+            .unwrap_err()
+            .contains("not in the daemon authorized workspaces allowlist")
+    );
+
+    // Check 4: Non-git directory rejected
+    let res_non_git = server_hierarchical
+        .state
+        .verify_workspace_authorization(non_git_dir.to_str().unwrap());
+    assert!(res_non_git.is_err());
+    assert!(
+        res_non_git
+            .unwrap_err()
+            .contains("is not a valid Git repository (.git not found)")
+    );
+
+    // Check 5: .git file repository (submodule/worktree) succeeds
+    let res_file_git = server_hierarchical
+        .state
+        .verify_workspace_authorization(canon_file_git.to_str().unwrap());
+    assert_eq!(res_file_git.unwrap(), canon_file_git);
+
+    // Check 6: Strict mode rejects nested repository
+    let server_strict = IpcServer::builder()
+        .with_authorized_workspace(&canon_main)
+        .with_strict_workspace_roots(true)
+        .build()
+        .unwrap();
+
+    let res_nested_strict = server_strict
+        .state
+        .verify_workspace_authorization(canon_nested.to_str().unwrap());
+    assert!(
+        res_nested_strict.is_err(),
+        "Strict mode must reject nested repositories not explicitly allowlisted"
+    );
+    assert!(
+        res_nested_strict
+            .unwrap_err()
+            .contains("not in the daemon authorized workspaces allowlist")
+    );
+
+    // Check 7: Deleted/moved path fails canonicalization
+    let res_deleted = server_hierarchical
+        .state
+        .verify_workspace_authorization("non/existent/path/987654");
+    assert!(res_deleted.is_err());
+    assert!(res_deleted.unwrap_err().contains("Failed to canonicalize"));
+}
