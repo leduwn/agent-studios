@@ -45,7 +45,12 @@ import {
   SubmitTaskRequest,
   SubmitTaskResult,
 } from './ipc/SubmitTaskAdapter';
-import { OperatorConfirmationManager } from './ipc/CapabilityMatrix';
+import {
+  ExecutionClient,
+  CancelTaskResult,
+  TaskCancellationError,
+} from './ipc/ExecutionClient';
+import { CapabilityMatrix, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import {
   NativeIpcTransport,
   TransportState,
@@ -418,12 +423,41 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Cancels current run.
-   * STRICTLY DISABLED in M14-IPC-03 read-only connected vertical slice.
-   * Fails closed to avoid fabricating cancellation state in the UI.
+   * Cancels a specific task on the daemon using M15 ExecutionClient.
+   * Gated on task.cancel capability and explicit studio/task identity.
    */
-  public async cancelCurrentRun(): Promise<void> {
-    throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+  public async cancelTask(taskId: string, reason?: string): Promise<CancelTaskResult> {
+    this.assertConnected();
+    if (!this._activeStudioId) {
+      throw new TaskCancellationError('No active studio selected for task cancellation.');
+    }
+    return ExecutionClient.cancelTask(this._transport!, {
+      studioId: this._activeStudioId,
+      taskId,
+      reason,
+    });
+  }
+
+  /**
+   * Cancels current run or active task on the daemon.
+   * Fails closed if capability is disabled or if no active studio or running task is found.
+   */
+  public async cancelCurrentRun(taskId?: string, reason?: string): Promise<void> {
+    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
+      throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+    }
+    this.assertConnected();
+    if (taskId) {
+      await this.cancelTask(taskId, reason);
+      return;
+    }
+    const tasks = await this.listTasks();
+    const running = tasks.find((t) => t.status === 'running');
+    if (running) {
+      await this.cancelTask(running.id, reason);
+      return;
+    }
+    throw new TaskCancellationError('No active or running task found to cancel in current studio.');
   }
 
   /**

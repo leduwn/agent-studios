@@ -22,6 +22,8 @@ import {
   TaskNode,
   TimelineEvent,
 } from './types';
+import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
+import { CancelTaskResult } from './ipc/ExecutionClient';
 
 /**
  * Production-safe default bridge used when the Agent Studios daemon is not connected.
@@ -94,6 +96,18 @@ export class DisconnectedBridge implements AgentStudiosBridge {
   ): Promise<ChatMessage> {
     throw new BridgeDisconnectedError(
       'Cannot send chat message: Agent Studios daemon bridge is disconnected.'
+    );
+  }
+
+  public async submitTask(_req: SubmitTaskRequest): Promise<SubmitTaskResult> {
+    throw new BridgeDisconnectedError(
+      'Cannot submit task: Agent Studios daemon bridge is disconnected.'
+    );
+  }
+
+  public async cancelTask(_taskId: string, _reason?: string): Promise<CancelTaskResult> {
+    throw new BridgeDisconnectedError(
+      'Cannot cancel task: Agent Studios daemon bridge is disconnected.'
     );
   }
 

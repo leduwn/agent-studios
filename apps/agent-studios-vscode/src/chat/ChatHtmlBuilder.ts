@@ -25,6 +25,7 @@ import { CardRenderer } from '../cards/CardRenderer';
 import { escapeHtml } from '../webviews/markdownRenderer';
 import { CHAT_STYLES } from './styles.css';
 import { OnboardingWorkflow } from './OnboardingWorkflow';
+import { TaskExecutionState, ExecutionMetrics } from '../state/TaskExecutionStore';
 
 export interface ChatHtmlInitialState {
   session?: SessionInfo | null;
@@ -35,10 +36,17 @@ export interface ChatHtmlInitialState {
   activeMode?: AgentMode;
   selectedModelId?: string;
   selectedProviderId?: string;
+  selectedRuntime?: string;
+  selectedStudioId?: string;
+  workspacePath?: string;
+  isWorkspaceMatched?: boolean;
+  workspaceMismatchReason?: string;
+  isTaskSubmitEnabled?: boolean;
   composerDraft?: string;
   messages?: ChatMessage[];
   attachments?: ContextAttachment[];
   hasSeenOnboarding?: boolean;
+  executionState?: TaskExecutionState;
 }
 
 export class ChatHtmlBuilder {
@@ -66,6 +74,39 @@ export class ChatHtmlBuilder {
 
     const sessionTitle = session?.goalSummary || 'Agent Studios Assistant';
     const sessionId = session?.id || '';
+
+    const selectedRuntime = initialState?.selectedRuntime || 'claude_code';
+    const selectedStudioId = initialState?.selectedStudioId || session?.id || 'default-studio';
+    const workspacePath = initialState?.workspacePath || session?.workspacePath || '';
+    const isWorkspaceMatched = initialState?.isWorkspaceMatched ?? true;
+    const workspaceMismatchReason = initialState?.workspaceMismatchReason || '';
+    const isTaskSubmitEnabled = initialState?.isTaskSubmitEnabled ?? true;
+    const executionState = initialState?.executionState;
+
+    const shortWorkspacePath = workspacePath
+      ? (workspacePath.length > 28 ? '...' + workspacePath.slice(-25) : workspacePath)
+      : 'No workspace';
+    const workspaceTooltip = isWorkspaceMatched
+      ? `Workspace verified against daemon root: ${workspacePath}`
+      : (workspaceMismatchReason || `Workspace mismatch with daemon root: ${workspacePath}`);
+
+    let selectedModelName = 'Default Model';
+    if (providers.length > 0) {
+      for (const p of providers) {
+        const m = p.models.find(mod => mod.id === selectedModelId && p.instanceId === selectedProviderId);
+        if (m) {
+          selectedModelName = `${m.name} (${p.displayName})`;
+          break;
+        }
+      }
+    }
+
+    const formatElapsed = (sec?: number) => {
+      const s = Math.max(0, sec || 0);
+      const mins = Math.floor(s / 60).toString().padStart(2, '0');
+      const secs = (s % 60).toString().padStart(2, '0');
+      return `${mins}:${secs}`;
+    };
 
     const hasSeenOnboarding = Boolean(initialState?.hasSeenOnboarding);
     const onboardingHtml = OnboardingWorkflow.renderOnboardingCard({
@@ -96,9 +137,16 @@ export class ChatHtmlBuilder {
       activeMode,
       selectedModelId,
       selectedProviderId,
+      selectedRuntime,
+      selectedStudioId,
+      workspacePath,
+      isWorkspaceMatched,
+      workspaceMismatchReason,
+      isTaskSubmitEnabled,
       composerDraft,
       messages,
       attachments,
+      executionState,
     }).replace(/</g, '\\u003c');
 
     return `<!DOCTYPE html>
@@ -455,6 +503,90 @@ export class ChatHtmlBuilder {
 
     <!-- Sticky Bottom Composer -->
     <footer class="chat-composer" role="region" aria-label="Message Composer">
+      <!-- M15 Workbench Toolbar: Runtime, Studio, Workspace -->
+      <div class="workbench-toolbar" role="region" aria-label="Execution Workbench">
+        <div class="workbench-field">
+          <label for="runtimeSelect" class="workbench-field-label">Runtime</label>
+          <select id="runtimeSelect" class="workbench-select" aria-label="Agent Runtime">
+            <option value="claude_code" ${selectedRuntime === 'claude_code' ? 'selected' : ''}>Claude Code (Native CLI)</option>
+            <option value="codex_external" disabled title="Coming in M16: External process runner support">Codex Runtime (External — Coming in M16)</option>
+            <option value="custom_shell" disabled title="Coming in future milestone">Custom Shell (Disabled)</option>
+          </select>
+        </div>
+        <div class="workbench-field">
+          <label for="studioSelect" class="workbench-field-label">Studio</label>
+          <select id="studioSelect" class="workbench-select" aria-label="Active Studio">
+            <option value="default-studio" ${selectedStudioId === 'default-studio' ? 'selected' : ''}>default-studio</option>
+            <option value="agent-studios-core" ${selectedStudioId === 'agent-studios-core' ? 'selected' : ''}>agent-studios-core</option>
+            ${selectedStudioId !== 'default-studio' && selectedStudioId !== 'agent-studios-core' ? `<option value="${escapeHtml(selectedStudioId)}" selected>${escapeHtml(selectedStudioId)}</option>` : ''}
+          </select>
+        </div>
+        <div class="workbench-field">
+          <span class="workbench-field-label">Workspace</span>
+          <div id="workspaceBadge" class="workspace-badge ${isWorkspaceMatched ? 'workspace-badge--matched' : 'workspace-badge--mismatched'}" title="${escapeHtml(workspaceTooltip)}">
+            <span>${isWorkspaceMatched ? '✓ Verified' : '⚠ Mismatch'}</span>
+            <span id="workspacePathDisplay">${escapeHtml(workspacePath || shortWorkspacePath)}</span>
+            ${!isWorkspaceMatched && workspaceMismatchReason ? `<span class="workspace-mismatch-detail" title="${escapeHtml(workspaceMismatchReason)}">(${escapeHtml(workspaceMismatchReason)})</span>` : ''}
+          </div>
+        </div>
+      </div>
+
+      <!-- M15 Execution Configuration Summary Card -->
+      <div id="executionSummaryCard" class="execution-summary-card" role="region" aria-label="Execution Configuration Summary">
+        <div class="summary-header">
+          <span>Execution Target Summary</span>
+          <span class="gate-badge" title="Cryptographically signed host modal confirmation">Host Modal Gate (HMAC-SHA256)</span>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="summary-label">Runtime</span>
+            <span class="summary-value" id="summaryRuntime">Claude Code (Native CLI)</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Model</span>
+            <span class="summary-value" id="summaryModel">${escapeHtml(selectedModelName)}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Workspace</span>
+            <span class="summary-value" id="summaryWorkspace" title="${escapeHtml(workspacePath)}">${escapeHtml(shortWorkspacePath)}</span>
+          </div>
+          <div class="summary-item">
+            <span class="summary-label">Approval Policy</span>
+            <span class="summary-value">Host-Owned Modal Dialog</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- M15 Live Execution Streaming Pane -->
+      <div id="executionStreamingPane" class="execution-streaming-pane" style="${executionState && executionState.status !== 'idle' ? '' : 'display: none;'}" role="region" aria-label="Live Execution Streaming Output" aria-live="polite">
+        <div class="execution-pane-header">
+          <div class="execution-status-group">
+            <span id="executionStatusBadge" class="status-badge status-${executionState?.status || 'idle'}">${(executionState?.status || 'idle').toUpperCase()}</span>
+            <span id="executionTimer" class="execution-timer">${formatElapsed(executionState?.elapsedSeconds)}</span>
+          </div>
+          <div class="execution-actions">
+            <button id="cancelExecutionBtn" class="btn-sm" style="${executionState && (executionState.status === 'submitting' || executionState.status === 'running') ? '' : 'display: none;'}" title="Cancel active task execution">Cancel Task</button>
+          </div>
+        </div>
+        <div id="activeToolBanner" class="active-tool-banner" role="status" aria-live="polite" style="${executionState?.activeTool ? '' : 'display: none;'}">
+          <div class="active-tool-info">
+            <span class="active-tool-spinner" aria-hidden="true"></span>
+            <span>Tool: <strong id="activeToolName">${escapeHtml(executionState?.activeTool?.name || '')}</strong> <span id="activeToolStatus">(${escapeHtml(executionState?.activeTool?.status || '')})</span></span>
+          </div>
+          <span id="activeToolError" class="tool-error" style="color: var(--status-red);">${escapeHtml(executionState?.activeTool?.error || '')}</span>
+        </div>
+        <div class="streaming-console-box">
+          <div class="streaming-console-title">
+            <span>Streaming Console</span>
+            <button id="clearStreamBtn" class="btn-xs" style="background: none; border: none; color: var(--fg-subtle); cursor: pointer;" title="Clear streaming console">Clear</button>
+          </div>
+          <pre id="streamingConsoleOutput" class="streaming-console-output">${escapeHtml(executionState?.streamOutput || '')}</pre>
+        </div>
+        <div id="executionMetricsContainer" class="truthful-metrics-container">
+          ${ChatHtmlBuilder.renderMetricsHtml(executionState?.metrics)}
+        </div>
+      </div>
+
       <!-- Context Chips Bar -->
       <div id="contextChipsBar" class="context-chips-bar" aria-label="Attached Context Files">
         <button id="addContextBtn" class="chip-add-btn" title="Add file context from workspace" aria-label="Add file context">+ Add File</button>
@@ -463,11 +595,21 @@ export class ChatHtmlBuilder {
 
       <!-- Composer Input Box -->
       <div class="composer-box">
+        <!-- Prompt Frame Boundary Warning / Error -->
+        <div id="composerWarning" class="composer-warning-banner" style="display: none;" role="alert">
+          <span>⚠️</span>
+          <span>Warning: Prompt exceeds 100 KB wire frame boundary threshold.</span>
+        </div>
+        <div id="composerError" class="composer-error-banner" style="display: none;" role="alert" aria-live="assertive">
+          <span>⛔</span>
+          <span>Error: Prompt exceeds 4 MiB wire frame limit. Execution blocked.</span>
+        </div>
+
         <textarea
           id="composerInput"
           class="composer-textarea"
-          rows="1"
-          placeholder="Ask Agent Studios, plan architecture, or instruct agents... (Enter to send, Shift+Enter for newline)"
+          rows="2"
+          placeholder="Describe agent task or instruction in Markdown... (Ctrl+Enter to submit, Shift+Enter for newline)"
           aria-label="Chat prompt input"
         >${escapeHtml(composerDraft)}</textarea>
 
@@ -488,11 +630,11 @@ export class ChatHtmlBuilder {
           </div>
 
           <div class="composer-buttons">
-            <button id="stopBtn" class="btn-stop" style="display: none;" title="Stop execution" aria-label="Stop execution">
-              ■ Stop
+            <button id="stopBtn" class="btn-stop" style="display: none;" title="Cancel running task" aria-label="Cancel task">
+              ■ Cancel Task
             </button>
-            <button id="sendBtn" class="btn-primary" title="Send prompt (Enter)" aria-label="Send message">
-              Send
+            <button id="sendBtn" class="btn-primary" title="Execute task via host modal confirmation (Ctrl+Enter to submit, Shift+Enter for newline)" aria-label="Start Task">
+              ▶ Start Task
             </button>
           </div>
         </div>
@@ -517,7 +659,14 @@ export class ChatHtmlBuilder {
         composerDraft: initialState.composerDraft || '',
         messages: initialState.messages || [],
         attachments: initialState.attachments || [],
-        isExecuting: false
+        isExecuting: false,
+        runtime: initialState.selectedRuntime || 'claude_code',
+        studioId: initialState.selectedStudioId || 'default-studio',
+        workspacePath: initialState.workspacePath || '',
+        isWorkspaceMatched: initialState.isWorkspaceMatched !== false,
+        workspaceMismatchReason: initialState.workspaceMismatchReason || '',
+        isTaskSubmitEnabled: initialState.isTaskSubmitEnabled !== false,
+        executionState: initialState.executionState || { status: 'idle', elapsedSeconds: 0, streamOutput: '' }
       };
 
       // DOM Elements
@@ -534,6 +683,26 @@ export class ChatHtmlBuilder {
       var contextChipsBar = document.getElementById('contextChipsBar');
       var currentSessionName = document.getElementById('currentSessionName');
       var connectionStatusIndicator = document.getElementById('connectionStatusIndicator');
+      var runtimeSelect = document.getElementById('runtimeSelect');
+      var studioSelect = document.getElementById('studioSelect');
+      var workspaceBadge = document.getElementById('workspaceBadge');
+      var workspacePathDisplay = document.getElementById('workspacePathDisplay');
+      var summaryRuntime = document.getElementById('summaryRuntime');
+      var summaryModel = document.getElementById('summaryModel');
+      var summaryWorkspace = document.getElementById('summaryWorkspace');
+      var executionStreamingPane = document.getElementById('executionStreamingPane');
+      var executionStatusBadge = document.getElementById('executionStatusBadge');
+      var executionTimer = document.getElementById('executionTimer');
+      var cancelExecutionBtn = document.getElementById('cancelExecutionBtn');
+      var activeToolBanner = document.getElementById('activeToolBanner');
+      var activeToolName = document.getElementById('activeToolName');
+      var activeToolStatus = document.getElementById('activeToolStatus');
+      var activeToolError = document.getElementById('activeToolError');
+      var clearStreamBtn = document.getElementById('clearStreamBtn');
+      var streamingConsoleOutput = document.getElementById('streamingConsoleOutput');
+      var executionMetricsContainer = document.getElementById('executionMetricsContainer');
+      var composerWarning = document.getElementById('composerWarning');
+      var composerError = document.getElementById('composerError');
 
       function escapeText(str) {
         if (!str) return '';
@@ -682,9 +851,131 @@ export class ChatHtmlBuilder {
         scrollToBottom();
       }
 
+      function getUtf8ByteLength(str) {
+        if (!str) return 0;
+        if (typeof TextEncoder !== 'undefined') {
+          return new TextEncoder().encode(str).length;
+        }
+        return encodeURIComponent(str).replace(/%[A-F\d]{2}/g, 'U').length;
+      }
+
+      function checkPromptLimits() {
+        var bytes = getUtf8ByteLength(composerInput.value);
+        var isOver100KB = bytes > 100 * 1024;
+        var isOver4MB = bytes > 4 * 1024 * 1024;
+
+        if (composerWarning) {
+          composerWarning.style.display = isOver100KB && !isOver4MB ? 'flex' : 'none';
+        }
+        if (composerError) {
+          composerError.style.display = isOver4MB ? 'flex' : 'none';
+        }
+        updateButtonStates();
+      }
+
+      function updateButtonStates() {
+        var bytes = getUtf8ByteLength(composerInput.value);
+        var isOver4MB = bytes > 4 * 1024 * 1024;
+        var isPromptEmpty = !composerInput.value.trim();
+        var isDisconnected = state.connectionState !== 'connected' && !state.isPreview;
+        var isRunning = state.executionState && (state.executionState.status === 'submitting' || state.executionState.status === 'running');
+
+        var disableReason = '';
+        if (isDisconnected) {
+          disableReason = 'Daemon disconnected';
+        } else if (!state.isTaskSubmitEnabled) {
+          disableReason = 'Task submission disabled by capability gate';
+        } else if (!state.isWorkspaceMatched) {
+          disableReason = state.workspaceMismatchReason || 'Workspace mismatch with daemon root';
+        } else if (isOver4MB) {
+          disableReason = 'Prompt exceeds 4 MiB wire frame limit';
+        } else if (isRunning) {
+          disableReason = 'Task execution in progress';
+        } else if (isPromptEmpty) {
+          disableReason = 'Enter a prompt or instruction';
+        }
+
+        sendBtn.disabled = Boolean(disableReason);
+        sendBtn.title = disableReason || 'Start task via host modal confirmation (Ctrl+Enter)';
+
+        if (stopBtn) {
+          stopBtn.style.display = isRunning ? 'inline-flex' : 'none';
+        }
+        if (cancelExecutionBtn) {
+          cancelExecutionBtn.style.display = isRunning ? 'inline-flex' : 'none';
+        }
+      }
+
+      function renderExecutionState(execState) {
+        if (!execState) return;
+        state.executionState = execState;
+
+        if (executionStreamingPane) {
+          if (execState.status !== 'idle') {
+            executionStreamingPane.style.display = 'flex';
+          }
+        }
+
+        if (executionStatusBadge) {
+          executionStatusBadge.className = 'status-badge status-' + (execState.status || 'idle');
+          executionStatusBadge.textContent = (execState.status || 'idle').toUpperCase();
+        }
+
+        if (executionTimer) {
+          var mins = Math.floor(execState.elapsedSeconds / 60);
+          var secs = execState.elapsedSeconds % 60;
+          executionTimer.textContent = (mins < 10 ? '0' : '') + mins + ':' + (secs < 10 ? '0' : '') + secs;
+        }
+
+        if (activeToolBanner) {
+          if (execState.activeTool) {
+            activeToolBanner.style.display = 'flex';
+            if (activeToolName) activeToolName.textContent = execState.activeTool.name || 'tool';
+            if (activeToolStatus) activeToolStatus.textContent = '(' + (execState.activeTool.status || 'executing') + ')';
+            if (activeToolError) {
+              activeToolError.textContent = execState.activeTool.error ? '— ' + execState.activeTool.error : '';
+            }
+          } else {
+            activeToolBanner.style.display = 'none';
+          }
+        }
+
+        if (streamingConsoleOutput && execState.streamOutput !== undefined) {
+          if (streamingConsoleOutput.textContent !== execState.streamOutput) {
+            streamingConsoleOutput.textContent = execState.streamOutput;
+            streamingConsoleOutput.scrollTop = streamingConsoleOutput.scrollHeight;
+          }
+        }
+
+        if (executionMetricsContainer && execState.metrics) {
+          var m = execState.metrics;
+          var metricsHtml = '';
+          if (m.isReported) {
+            metricsHtml = '<span class="metric-item">Tokens: ' + (m.totalTokens != null ? m.totalTokens.toLocaleString() : 'N/A') + '</span>';
+            if (m.costUsd != null) {
+              metricsHtml += '<span class="metric-item">Cost: $' + m.costUsd.toFixed(4) + '</span>';
+            }
+            if (m.latencyMs != null) {
+              metricsHtml += '<span class="metric-item">Duration: ' + (m.latencyMs / 1000).toFixed(1) + 's</span>';
+            }
+          } else {
+            metricsHtml = '<span class="metrics-unreported" title="Truthful reporting: daemon has not emitted token or cost telemetry for this run.">' +
+              'Metrics: Pending daemon telemetry' +
+              '</span>';
+          }
+          executionMetricsContainer.innerHTML = metricsHtml;
+        }
+      }
+
       function submitPrompt() {
         var text = composerInput.value.trim();
         if (!text || state.isExecuting) return;
+
+        var bytes = getUtf8ByteLength(composerInput.value);
+        if (bytes > 4 * 1024 * 1024) return;
+        if (state.connectionState !== 'connected' && !state.isPreview) return;
+        if (!state.isWorkspaceMatched) return;
+        if (!state.isTaskSubmitEnabled) return;
 
         state.isExecuting = true;
         sendBtn.disabled = true;
@@ -718,22 +1009,50 @@ export class ChatHtmlBuilder {
         composerInput.value = '';
         state.composerDraft = '';
         autoGrowTextarea();
+        checkPromptLimits();
         vscode.postMessage({ command: 'saveDraft', draft: '' });
 
-        // Dispatch sendMessage to provider
-        vscode.postMessage({
-          command: 'sendMessage',
-          text: text,
-          mode: state.mode,
-          modelId: state.selectedModelId,
-          providerId: state.selectedProviderId,
-          attachments: state.attachments
-        });
+        // If in agent mode, submit task to daemon with confirmation modal
+        if (state.mode === 'agent') {
+          vscode.postMessage({
+            command: 'submitTask',
+            prompt: text,
+            runtime: state.runtime,
+            studioId: state.studioId,
+            modelId: state.selectedModelId,
+            providerId: state.selectedProviderId
+          });
+        } else {
+          // Dispatch sendMessage to provider
+          vscode.postMessage({
+            command: 'sendMessage',
+            text: text,
+            mode: state.mode,
+            modelId: state.selectedModelId,
+            providerId: state.selectedProviderId,
+            attachments: state.attachments
+          });
+        }
+      }
+
+      function handleCancel() {
+        if (state.mode === 'agent' && state.executionState && state.executionState.activeTaskId) {
+          vscode.postMessage({
+            command: 'cancelTask',
+            taskId: state.executionState.activeTaskId,
+            studioId: state.studioId
+          });
+        } else {
+          vscode.postMessage({ command: 'cancelRun' });
+        }
       }
 
       // Event Listeners
       composerInput.addEventListener('keydown', function(e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+          e.preventDefault();
+          submitPrompt();
+        } else if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
           submitPrompt();
         }
@@ -742,6 +1061,7 @@ export class ChatHtmlBuilder {
       composerInput.addEventListener('input', function() {
         autoGrowTextarea();
         state.composerDraft = composerInput.value;
+        checkPromptLimits();
         vscode.postMessage({ command: 'saveDraft', draft: composerInput.value });
       });
 
@@ -749,9 +1069,32 @@ export class ChatHtmlBuilder {
         submitPrompt();
       });
 
-      stopBtn.addEventListener('click', function() {
-        vscode.postMessage({ command: 'cancelRun' });
-      });
+      stopBtn.addEventListener('click', handleCancel);
+      if (cancelExecutionBtn) {
+        cancelExecutionBtn.addEventListener('click', handleCancel);
+      }
+      if (clearStreamBtn) {
+        clearStreamBtn.addEventListener('click', function() {
+          if (streamingConsoleOutput) {
+            streamingConsoleOutput.textContent = '';
+          }
+        });
+      }
+
+      if (runtimeSelect) {
+        runtimeSelect.addEventListener('change', function() {
+          state.runtime = runtimeSelect.value;
+          if (summaryRuntime) {
+            summaryRuntime.textContent = runtimeSelect.options[runtimeSelect.selectedIndex].text;
+          }
+        });
+      }
+
+      if (studioSelect) {
+        studioSelect.addEventListener('change', function() {
+          state.studioId = studioSelect.value;
+        });
+      }
 
       modeSelect.addEventListener('change', function() {
         state.mode = modeSelect.value;
@@ -832,9 +1175,18 @@ export class ChatHtmlBuilder {
 
         switch (msg.type) {
           case 'streamChunk':
+            if (typeof msg.chunk === 'string') {
+              if (streamingConsoleOutput) {
+                streamingConsoleOutput.textContent += msg.chunk;
+                streamingConsoleOutput.scrollTop = streamingConsoleOutput.scrollHeight;
+              }
+              if (executionStreamingPane && executionStreamingPane.style.display === 'none') {
+                executionStreamingPane.style.display = 'flex';
+              }
+            }
             var lastMsg = state.messages[state.messages.length - 1];
             if (lastMsg && lastMsg.role === 'assistant') {
-              if (msg.chunk) {
+              if (msg.chunk && typeof msg.chunk === 'object') {
                 if (msg.chunk.type === 'text_delta' && msg.chunk.text) {
                   lastMsg.content += msg.chunk.text;
                 } else if (msg.chunk.type === 'tool_call' && msg.chunk.toolCall) {
@@ -853,6 +1205,30 @@ export class ChatHtmlBuilder {
               }
               renderMessages();
             }
+            break;
+
+          case 'executionStateChanged':
+            if (msg.executionState) {
+              renderExecutionState(msg.executionState);
+              updateButtonStates();
+            }
+            break;
+
+          case 'taskSubmitted':
+            if (executionStreamingPane) {
+              executionStreamingPane.style.display = 'flex';
+            }
+            if (msg.taskId && state.executionState) {
+              state.executionState.activeTaskId = msg.taskId;
+            }
+            updateButtonStates();
+            break;
+
+          case 'taskCancelled':
+          case 'executionCancelled':
+            state.isExecuting = false;
+            updateButtonStates();
+            renderMessages();
             break;
 
           case 'messageComplete':
@@ -962,6 +1338,19 @@ export class ChatHtmlBuilder {
                 state.attachments = msg.state.attachments;
                 renderContextChips();
               }
+              if (msg.state.executionState) {
+                renderExecutionState(msg.state.executionState);
+              }
+              if (msg.state.isWorkspaceMatched !== undefined) {
+                state.isWorkspaceMatched = msg.state.isWorkspaceMatched;
+              }
+              if (msg.state.workspaceMismatchReason !== undefined) {
+                state.workspaceMismatchReason = msg.state.workspaceMismatchReason;
+              }
+              if (msg.state.isTaskSubmitEnabled !== undefined) {
+                state.isTaskSubmitEnabled = msg.state.isTaskSubmitEnabled;
+              }
+              updateButtonStates();
             }
             break;
         }
@@ -987,6 +1376,11 @@ export class ChatHtmlBuilder {
       renderContextChips();
       renderMessages();
       autoGrowTextarea();
+      checkPromptLimits();
+      if (state.executionState) {
+        renderExecutionState(state.executionState);
+      }
+      updateButtonStates();
     })();
   </script>
 </body>
@@ -1000,6 +1394,26 @@ export class ChatHtmlBuilder {
         <h3>Agent Studios Assistant</h3>
         <p>Ask questions, explore code, propose plans, or delegate multi-agent tasks.</p>
       </div>`.trim();
+  }
+
+  public static renderMetricsHtml(metrics?: ExecutionMetrics): string {
+    if (!metrics || !metrics.isReported) {
+      return `
+        <span class="metrics-unreported" title="Truthful reporting: daemon has not emitted token or cost telemetry for this run.">
+          Metrics: Pending daemon telemetry
+        </span>`.trim();
+    }
+    const items: string[] = [];
+    if (metrics.totalTokens !== undefined) {
+      items.push(`<span class="metric-item">Tokens: ${metrics.totalTokens.toLocaleString('en-US')}</span>`);
+    }
+    if (metrics.costUsd !== undefined) {
+      items.push(`<span class="metric-item">Cost: $${metrics.costUsd.toFixed(4)}</span>`);
+    }
+    if (metrics.latencyMs !== undefined) {
+      items.push(`<span class="metric-item">Duration: ${(metrics.latencyMs / 1000).toFixed(1)}s</span>`);
+    }
+    return items.join(' ');
   }
 
   public static renderModelOptions(

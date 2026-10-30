@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import { BridgeManager } from '../bridge/BridgeManager';
+import { CapabilityMatrix, normalizeWorkspacePath } from '../bridge/ipc/CapabilityMatrix';
 import {
   AgentMode,
   ApprovalDecisionResult,
@@ -21,7 +22,9 @@ import {
   ContextAttachment,
   TimelineEvent,
 } from '../bridge/types';
+import { OperatorConfirmationModal } from '../security/OperatorConfirmationModal';
 import { SessionStateProjection } from '../state/SessionStateProjection';
+import { TaskExecutionStore } from '../state/TaskExecutionStore';
 import { ChatHtmlBuilder } from './ChatHtmlBuilder';
 import { ChatSecurityGuards } from './ChatSecurityGuards';
 
@@ -73,6 +76,24 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         })
       );
     }
+
+    this._disposables.push(
+      TaskExecutionStore.instance.onDidChangeExecutionState((state) => {
+        void this.postMessage({
+          type: 'executionStateChanged',
+          executionState: state,
+        });
+      })
+    );
+
+    this._disposables.push(
+      TaskExecutionStore.instance.onDidStreamChunk((chunk) => {
+        void this.postMessage({
+          type: 'streamChunk',
+          chunk,
+        });
+      })
+    );
   }
 
   public get bridge(): AgentStudiosBridge {
@@ -120,6 +141,25 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const session = await this.bridge.getCurrentSession().catch(() => null);
     const sessions = await this.bridge.listSessions().catch(() => []);
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    let isWorkspaceMatched = true;
+    let workspaceMismatchReason = '';
+    if (session && session.workspacePath && localWorkspace) {
+      try {
+        const normLocal = normalizeWorkspacePath(localWorkspace);
+        const normDaemon = normalizeWorkspacePath(session.workspacePath);
+        if (normLocal !== normDaemon) {
+          isWorkspaceMatched = false;
+          workspaceMismatchReason = `Workspace mismatch: daemon is bound to '${session.workspacePath}', but active VS Code workspace is '${localWorkspace}'.`;
+        }
+      } catch (err: unknown) {
+        isWorkspaceMatched = false;
+        workspaceMismatchReason = `Workspace validation error: ${(err as Error).message}`;
+      }
+    }
+
+    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit');
 
     webviewView.webview.html = ChatHtmlBuilder.buildHtml(
       webviewView.webview,
@@ -137,6 +177,13 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         messages: this._messages,
         attachments: this._attachments,
         hasSeenOnboarding: this._hasSeenOnboarding,
+        selectedRuntime: 'claude_code',
+        selectedStudioId: 'default-studio',
+        workspacePath: localWorkspace,
+        isWorkspaceMatched,
+        workspaceMismatchReason,
+        isTaskSubmitEnabled,
+        executionState: TaskExecutionStore.instance.getState(),
       }
     );
 
@@ -168,6 +215,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   public async handleWebviewMessage(message: {
     command: string;
     text?: string;
+    prompt?: string;
+    runtime?: string;
+    studioId?: string;
+    taskId?: string;
     mode?: AgentMode;
     attachments?: ContextAttachment[];
     modelId?: string;
@@ -206,6 +257,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     switch (message.command) {
       case 'sendMessage':
         await this._handleSendMessage(message);
+        break;
+
+      case 'submitTask':
+        await this._handleSubmitTask(message);
+        break;
+
+      case 'cancelTask':
+        await this._handleCancelTask(message);
         break;
 
       case 'cancelRun':
@@ -539,7 +598,166 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
   }
 
+  private async _handleSubmitTask(message: {
+    prompt?: string;
+    runtime?: string;
+    studioId?: string;
+    modelId?: string;
+    providerId?: string;
+  }): Promise<void> {
+    const prompt = (message.prompt || '').trim();
+    if (!prompt) {
+      await this.postMessage({ type: 'error', error: 'Prompt cannot be empty.' });
+      return;
+    }
+    if (prompt.length > 4 * 1024 * 1024) {
+      await this.postMessage({ type: 'error', error: 'Prompt exceeds 4 MiB wire frame limit.' });
+      return;
+    }
+
+    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Task submission is disabled by the capability matrix (task.submit capability is not enabled).',
+      });
+      return;
+    }
+
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const session = await this.bridge.getCurrentSession().catch(() => null);
+    if (session && session.workspacePath && localWorkspace) {
+      try {
+        const normLocal = normalizeWorkspacePath(localWorkspace);
+        const normDaemon = normalizeWorkspacePath(session.workspacePath);
+        if (normLocal !== normDaemon) {
+          await this.postMessage({
+            type: 'error',
+            error: `Workspace mismatch: Daemon session root (${session.workspacePath}) does not match local workspace (${localWorkspace}). Task submission blocked for security.`,
+          });
+          return;
+        }
+      } catch (err: unknown) {
+        await this.postMessage({
+          type: 'error',
+          error: `Workspace validation error: ${(err as Error).message}`,
+        });
+        return;
+      }
+    }
+
+    const studioId = message.studioId || 'default-studio';
+    const runtime = message.runtime || 'claude_code';
+
+    // Operator confirmation gate using trusted VS Code native modal dialog
+    const confirmResult = await OperatorConfirmationModal.requestConfirmation({
+      studioId,
+      runtime,
+      prompt,
+      workspacePath: localWorkspace || undefined,
+      modelId: message.modelId || this._selectedModelId,
+      providerId: message.providerId || this._selectedProviderId,
+      actionDescription: 'Mutating Coding Agent Task Execution',
+    });
+
+    if (!confirmResult.confirmed) {
+      if (confirmResult.cancelledByUser) {
+        await this.postMessage({
+          type: 'streamChunk',
+          chunk: '\n[Operator cancelled task execution confirmation]\n',
+        });
+      } else {
+        await this.postMessage({
+          type: 'error',
+          error: confirmResult.reason || 'Operator confirmation failed or was rejected.',
+        });
+      }
+      return;
+    }
+
+    const store = TaskExecutionStore.instance;
+    store.beginSubmission(studioId, prompt);
+
+    try {
+      if (typeof this.bridge.submitTask === 'function') {
+        const submitResult = await this.bridge.submitTask({
+          studioId,
+          prompt,
+          workspacePath: localWorkspace || undefined,
+          requestedModelId: message.modelId || this._selectedModelId,
+          requestedProviderId: message.providerId || this._selectedProviderId,
+          confirmedByUser: true,
+          confirmationChallenge: confirmResult.challenge,
+        });
+
+        store.taskSubmitted(submitResult.taskId, studioId);
+        await this.postMessage({
+          type: 'taskSubmitted',
+          taskId: submitResult.taskId,
+        });
+      } else {
+        throw new Error('Bridge does not support submitTask.');
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      store.completeTask('failed', { message: errorMsg });
+      await this.postMessage({
+        type: 'error',
+        error: `Task submission failed: ${errorMsg}`,
+      });
+    }
+  }
+
+  private async _handleCancelTask(message: {
+    taskId?: string;
+    studioId?: string;
+  }): Promise<void> {
+    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Task cancellation is disabled by the capability matrix (task.cancel capability is not enabled).',
+      });
+      return;
+    }
+
+    const store = TaskExecutionStore.instance;
+    const taskId = message.taskId || store.getState().activeTaskId;
+    if (!taskId) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Cannot cancel task: No active task ID found.',
+      });
+      return;
+    }
+
+    try {
+      if (typeof this.bridge.cancelTask === 'function') {
+        const result = await this.bridge.cancelTask(taskId, 'Cancelled by user operator');
+        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
+        await this.postMessage({
+          type: 'taskCancelled',
+          taskId,
+          result,
+        });
+      } else {
+        await this.bridge.cancelCurrentRun();
+        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
+        await this.postMessage({
+          type: 'taskCancelled',
+          taskId,
+        });
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      await this.postMessage({
+        type: 'error',
+        error: `Task cancellation failed: ${errorMsg}`,
+      });
+    }
+  }
+
   private _handleTimelineEvent(event: TimelineEvent): void {
+    TaskExecutionStore.instance.consumeDaemonTimelineEvent(event);
+
     if (event.type === 'approval_requested') {
       const approval = event.details as unknown as ApprovalRequest;
       if (approval) {
@@ -570,6 +788,25 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const session = await this.bridge.getCurrentSession().catch(() => null);
     const sessions = await this.bridge.listSessions().catch(() => []);
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    let isWorkspaceMatched = true;
+    let workspaceMismatchReason = '';
+    if (session && session.workspacePath && localWorkspace) {
+      try {
+        const normLocal = normalizeWorkspacePath(localWorkspace);
+        const normDaemon = normalizeWorkspacePath(session.workspacePath);
+        if (normLocal !== normDaemon) {
+          isWorkspaceMatched = false;
+          workspaceMismatchReason = `Workspace mismatch: daemon is bound to '${session.workspacePath}', but active VS Code workspace is '${localWorkspace}'.`;
+        }
+      } catch (err: unknown) {
+        isWorkspaceMatched = false;
+        workspaceMismatchReason = `Workspace validation error: ${(err as Error).message}`;
+      }
+    }
+
+    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit');
 
     await this.postMessage({
       type: 'syncState',
@@ -583,6 +820,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         composerDraft: this._composerDraft,
         messages: this._messages,
         attachments: this._attachments,
+        executionState: TaskExecutionStore.instance.getState(),
+        isWorkspaceMatched,
+        workspaceMismatchReason,
+        isTaskSubmitEnabled,
       },
     });
   }

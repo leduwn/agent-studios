@@ -13,6 +13,8 @@ import * as vscode from 'vscode';
 
 export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'sendMessage',
+  'submitTask',
+  'cancelTask',
   'cancelRun',
   'approveAction',
   'denyAction',
@@ -269,6 +271,38 @@ export class ChatSecurityGuards {
       case 'switchSession': {
         if (record.sessionId !== undefined && (typeof record.sessionId !== 'string' || record.sessionId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: "Command 'switchSession' requires a valid string 'sessionId'." };
+        }
+        return { valid: true };
+      }
+
+      case 'submitTask': {
+        if (typeof record.prompt !== 'string' || record.prompt.trim().length === 0) {
+          return { valid: false, error: "Command 'submitTask' requires non-empty string 'prompt'." };
+        }
+        if (record.prompt.length > 4 * 1024 * 1024) {
+          return { valid: false, error: "Prompt exceeds 4 MiB wire frame limit." };
+        }
+        if (record.studioId !== undefined && (typeof record.studioId !== 'string' || record.studioId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'studioId' parameter." };
+        }
+        if (record.modelId !== undefined && (typeof record.modelId !== 'string' || record.modelId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'modelId' parameter." };
+        }
+        if (record.providerId !== undefined && (typeof record.providerId !== 'string' || record.providerId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'providerId' parameter." };
+        }
+        if (record.runtime !== undefined && typeof record.runtime !== 'string') {
+          return { valid: false, error: "Invalid 'runtime' parameter." };
+        }
+        return { valid: true };
+      }
+
+      case 'cancelTask': {
+        if (record.taskId !== undefined && (typeof record.taskId !== 'string' || record.taskId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'taskId' parameter." };
+        }
+        if (record.studioId !== undefined && (typeof record.studioId !== 'string' || record.studioId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'studioId' parameter." };
         }
         return { valid: true };
       }

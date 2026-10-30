@@ -15,6 +15,7 @@ import {
   TimelineEvent,
 } from '../bridge/types';
 import { OperatorConfirmationManager } from '../bridge/ipc/CapabilityMatrix';
+import { TaskExecutionStore } from './TaskExecutionStore';
 
 export interface SequenceGapDetails {
   expected: number;
@@ -190,6 +191,7 @@ export class SessionStateProjection implements vscode.Disposable {
 
     // Clear any pending operator confirmation challenges on session hydration/switch
     OperatorConfirmationManager.clearPendingChallenges();
+    TaskExecutionStore.instance.reset();
 
     if (
       'chatMessages' in this._bridge &&
@@ -292,6 +294,8 @@ export class SessionStateProjection implements vscode.Disposable {
   }
 
   private projectEventState(event: TimelineEvent): void {
+    TaskExecutionStore.instance.consumeDaemonTimelineEvent(event);
+
     switch (event.type) {
       case 'session_started': {
         if (this._session) {
@@ -465,6 +469,7 @@ export class SessionStateProjection implements vscode.Disposable {
 
   public dispose(): void {
     OperatorConfirmationManager.clearPendingChallenges();
+    TaskExecutionStore.instance.reset();
     this.unbindBridge();
     while (this._disposables.length > 0) {
       const disposable = this._disposables.pop();
