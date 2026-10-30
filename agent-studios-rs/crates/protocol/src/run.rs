@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::TransitionError;
 use crate::id::{AgentId, RunId, TaskId};
+use crate::task::TaskExecutionSpec;
 
 /// Lifecycle state for an execution attempt (Run) of a Task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -68,6 +69,8 @@ pub struct RunRecord {
     pub state: RunState,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<TaskExecutionSpec>,
 }
 
 impl RunRecord {
@@ -80,6 +83,12 @@ impl RunRecord {
             state: RunState::Queued,
             started_at: None,
             finished_at: None,
+            execution: None,
         }
+    }
+
+    pub fn with_execution(mut self, execution: TaskExecutionSpec) -> Self {
+        self.execution = Some(execution);
+        self
     }
 }

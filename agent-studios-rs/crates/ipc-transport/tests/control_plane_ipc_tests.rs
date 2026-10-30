@@ -101,6 +101,7 @@ async fn test_ipc_task_submission_and_lifecycle() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client
@@ -172,6 +173,7 @@ async fn test_ipc_task_cancellation() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client
@@ -781,6 +783,7 @@ async fn test_ipc_task_auto_execution_fails_closed_when_unconfigured() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client
@@ -1071,6 +1074,7 @@ async fn test_ipc_task_auto_execution_lifecycle_succeeds_with_runtime() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client

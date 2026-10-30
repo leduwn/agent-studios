@@ -4,7 +4,9 @@
 //! the canonical Rust implementation.
 
 use agent_studios_ipc_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalStatus, HmacSigner, IpcEvent, ProtocolVersion, SessionId,
+    ApprovalDecision, ApprovalId, ApprovalStatus, ExecutionDefaultsReadiness,
+    ExecutionReadinessReport, HmacSigner, IpcEvent, ModelReadiness, ProtocolVersion,
+    RuntimeInstanceReadiness, SessionId,
 };
 use agent_studios_ipc_transport::{
     DaemonAdminBootstrapInfo, DaemonBootstrapInfo, IpcCommand, IpcResponse,
@@ -13,7 +15,9 @@ use agent_studios_protocol::cancellation::CancellationSummary;
 use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{BatchTaskSpec, DependencyOutputPolicy, TaskRecord, TaskState};
+use agent_studios_protocol::task::{
+    BatchTaskSpec, DependencyOutputPolicy, TaskExecutionSpec, TaskRecord, TaskState,
+};
 use agent_studios_provider::ProviderInstance;
 use agent_studios_provider::auth::AuthenticationScheme;
 use agent_studios_provider::capabilities::ModelCapabilities;
@@ -243,6 +247,7 @@ fn test_fixture_task_lifecycle_submit_and_cancel() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let submit_cmd = IpcCommand::SubmitTask {
@@ -327,6 +332,7 @@ fn test_fixture_task_lifecycle_submit_and_cancel() {
         updated_at: now,
         retry_count: 0,
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let tasks_resp = IpcResponse::Tasks {
@@ -372,6 +378,7 @@ fn test_fixture_runs_lifecycle() {
         state: RunState::Queued,
         started_at: None,
         finished_at: None,
+        execution: None,
     };
 
     let runs_resp = IpcResponse::Runs {
@@ -562,6 +569,142 @@ fn test_fixture_error_response() {
         err_val["message"],
         "Permission denied: cross-session cancellation requires admin role"
     );
+}
+
+#[test]
+fn test_fixture_execution_readiness_roundtrip() {
+    let cmd = IpcCommand::GetExecutionReadiness;
+    let cmd_json = serde_json::to_string_pretty(&cmd).expect("serialize GetExecutionReadiness");
+    let cmd_val: Value = serde_json::from_str(&cmd_json).expect("parse json");
+    assert_eq!(cmd_val["type"], "get_execution_readiness");
+
+    let report = ExecutionReadinessReport {
+        is_ready: true,
+        available_runtimes: vec!["claude-code".to_string()],
+        runtime_instances: vec![RuntimeInstanceReadiness {
+            instance_id: "rt-inst-c0a80101-0000-0000-0000-000000000001".to_string(),
+            implementation: "claude-code".to_string(),
+            healthy: true,
+        }],
+        available_models: vec![ModelReadiness {
+            provider_instance_id: "c0a80101-0000-0000-0000-000000000002".to_string(),
+            model_id: "claude-3-5-sonnet".to_string(),
+            display_name: Some("Claude 3.5 Sonnet".to_string()),
+        }],
+        authorized_workspaces: vec!["/path/to/repo".to_string()],
+        defaults: ExecutionDefaultsReadiness {
+            default_repo_path: Some("/path/to/repo".to_string()),
+            default_provider_instance_id: Some("c0a80101-0000-0000-0000-000000000002".to_string()),
+            default_model_id: Some("claude-3-5-sonnet".to_string()),
+            configured_instance_id: Some(
+                "rt-inst-c0a80101-0000-0000-0000-000000000001".to_string(),
+            ),
+        },
+        blocking_reasons: vec![],
+    };
+
+    let resp = IpcResponse::ExecutionReadiness { readiness: report };
+    let resp_json = serde_json::to_string_pretty(&resp).expect("serialize ExecutionReadiness");
+    let resp_val: Value = serde_json::from_str(&resp_json).expect("parse json");
+    assert_eq!(resp_val["type"], "execution_readiness");
+    assert_eq!(resp_val["readiness"]["is_ready"], true);
+    assert_eq!(
+        resp_val["readiness"]["runtime_instances"][0]["implementation"],
+        "claude-code"
+    );
+    assert_eq!(
+        resp_val["readiness"]["available_models"][0]["model_id"],
+        "claude-3-5-sonnet"
+    );
+    assert_eq!(
+        resp_val["readiness"]["authorized_workspaces"][0],
+        "/path/to/repo"
+    );
+    assert_eq!(
+        resp_val["readiness"]["defaults"]["default_model_id"],
+        "claude-3-5-sonnet"
+    );
+
+    // Verify roundtrip deserialization
+    let deserialized_resp: IpcResponse =
+        serde_json::from_str(&resp_json).expect("deserialize ExecutionReadiness");
+    match deserialized_resp {
+        IpcResponse::ExecutionReadiness { readiness: r } => {
+            assert!(r.is_ready);
+            assert_eq!(r.runtime_instances.len(), 1);
+            assert_eq!(r.available_models.len(), 1);
+            assert_eq!(r.authorized_workspaces.len(), 1);
+            assert_eq!(
+                r.defaults.default_model_id.as_deref(),
+                Some("claude-3-5-sonnet")
+            );
+        }
+        other => panic!("Unexpected response type: {:?}", other),
+    }
+}
+
+#[test]
+fn test_fixture_task_execution_spec_roundtrip() {
+    let studio_id = StudioId::new();
+    let exec_spec = TaskExecutionSpec {
+        initial_prompt: Some("Solve bug in auth middleware".to_string()),
+        repository_path: Some("/path/to/auth-repo".to_string()),
+        runtime_instance_id: Some("rt-inst-test-01".to_string()),
+        runtime_preference: Some("claude-code".to_string()),
+        provider_instance_id: Some("prov-test-01".to_string()),
+        model_id: Some("claude-3-7-sonnet".to_string()),
+    };
+
+    let task_spec = BatchTaskSpec {
+        key: "task-m15-spec".to_string(),
+        title: "Per-Task Execution Contract".to_string(),
+        description: "Test description".to_string(),
+        assigned_agent_id: None,
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: Some(exec_spec.clone()),
+    };
+
+    let submit_cmd = IpcCommand::SubmitTask {
+        studio_id,
+        task_spec,
+    };
+    let submit_json = serde_json::to_string_pretty(&submit_cmd).expect("serialize SubmitTask");
+    let submit_val: Value = serde_json::from_str(&submit_json).expect("parse json");
+
+    assert_eq!(submit_val["type"], "submit_task");
+    assert_eq!(
+        submit_val["task_spec"]["execution"]["initial_prompt"],
+        "Solve bug in auth middleware"
+    );
+    assert_eq!(
+        submit_val["task_spec"]["execution"]["repository_path"],
+        "/path/to/auth-repo"
+    );
+    assert_eq!(
+        submit_val["task_spec"]["execution"]["runtime_preference"],
+        "claude-code"
+    );
+    assert_eq!(
+        submit_val["task_spec"]["execution"]["model_id"],
+        "claude-3-7-sonnet"
+    );
+
+    let deserialized_cmd: IpcCommand =
+        serde_json::from_str(&submit_json).expect("deserialize SubmitTask");
+    match deserialized_cmd {
+        IpcCommand::SubmitTask {
+            studio_id: sid,
+            task_spec: ts,
+        } => {
+            assert_eq!(sid, studio_id);
+            assert_eq!(ts.execution, Some(exec_spec));
+        }
+        other => panic!("Unexpected command type: {:?}", other),
+    }
 }
 
 #[test]

@@ -7,7 +7,8 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use agent_studios_ipc_protocol::{
-    AuthBinding, HmacSigner, IpcEvent, ProtocolError, ProtocolVersion, SessionId,
+    AuthBinding, ExecutionReadinessReport, HmacSigner, IpcEvent, ProtocolError, ProtocolVersion,
+    SessionId,
 };
 use agent_studios_protocol::id::{RunId, StudioId, TaskId};
 use agent_studios_protocol::run::RunRecord;
@@ -705,6 +706,26 @@ impl IpcClient {
             )),
             other => Err(TransportError::InvalidState {
                 expected: "ApprovalResolved".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    /// Queries daemon execution readiness report (M15).
+    pub async fn get_execution_readiness(
+        &mut self,
+    ) -> Result<ExecutionReadinessReport, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::GetExecutionReadiness).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::ExecutionReadiness { readiness } => Ok(readiness),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "ExecutionReadiness".into(),
                 actual: format!("{:?}", other),
             }),
         }
