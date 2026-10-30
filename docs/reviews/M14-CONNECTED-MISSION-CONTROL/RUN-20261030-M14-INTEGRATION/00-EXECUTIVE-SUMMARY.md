@@ -28,9 +28,10 @@ The **Milestone M14 Integration Quality Gate** executes the authoritative end-to
 
 | Verification Dimension | Pre-Integration Baseline | M14 Integrated Delivery | Quality Gate Status |
 | :--- | :--- | :--- | :--- |
-| **Total Automated Tests** | 308 tests passing | **333 tests passing (100% green)** | **PASS (+25 tests)** |
-| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd.exe` E2E** | **PASS** |
-| **P1 Fabricated Task Progress** | Hardcoded 50% on running tasks | **Eliminated (Authoritative 0% / 100%)** | **PASS** |
+| **Total Automated Tests** | 308 tests passing | **352 tests passing (100% green)** | **PASS (+44 tests)** |
+| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd.exe` E2E (Named Pipe)** | **PASS** |
+| **Real VS Code Extension Host** | None | **18 Extension Host tests (Real Electron)** | **PASS** |
+| **P1 Fabricated Task Progress** | Hardcoded 50% on running tasks | **Eliminated (Explicit Indeterminate / 100%)** | **PASS** |
 | **P1 Fabricated Fleet Runtimes** | Fabricated 'codex-rs', fake models | **Truthful 'unspecified' fallback** | **PASS** |
 | **P1 Fabricated Provider Latency** | Fabricated 120ms latency | **Truthful unmeasured (`undefined`)** | **PASS** |
 | **Query Error Resilience** | `Promise.all` (swallows or crashes) | **`Promise.allSettled` + Attention Alert**| **PASS** |
@@ -46,7 +47,7 @@ The **Milestone M14 Integration Quality Gate** executes the authoritative end-to
 ## 3. Core Architectural Implementations
 
 ### A. Elimination of Fabricated Data (P1 Defect Remediation)
-- **Task Progress Truthfulness:** In `DaemonConnectedBridge.ts`, eliminated the fabricated `50%` progress for running tasks. Tasks now accurately report `100%` when `succeeded` and `0%` otherwise, until fine-grained progress metrics are implemented in daemon event streams.
+- **Task Progress Truthfulness:** In `DaemonConnectedBridge.ts`, eliminated both fabricated `50%` and misleading `0%` progress for unmeasured tasks. Tasks now accurately report `100%` when `succeeded` and `undefined` (rendered as explicit `Indeterminate`) otherwise, until fine-grained progress metrics are implemented in daemon event streams.
 - **Truthful Fleet Runtimes & Models:** In `MissionControlProjection.ts`, eliminated hardcoded `'codex-rs'` runtimes, fake model names (`'gpt-4o'`), and fabricated run identifiers. Agents synthesized from task assignments truthfully report `runtime: 'unspecified'` and `providerModel: 'unspecified'`.
 - **Truthful Provider Latency:** Removed fabricated `latencyMs: 120` from provider models. Latencies are now `undefined` unless empirically measured via live IPC round-trip ping.
 
