@@ -40,7 +40,7 @@ Status: **100% CLEAN FORMATTING**
 
 ## 3. Test Suite Execution Results
 
-### 3.1 `agent-studios-ipc-transport` (62/62 Passed)
+### 3.1 `agent-studios-ipc-transport` (73/73 Passed)
 
 #### Unit Tests (`src/lib.rs`): 26 Passed
 ```
@@ -128,6 +128,23 @@ test test_runtime_cancellation_stops_session ... ok
 test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ```
 
+#### Golden Fixture Tests (`tests/golden_fixture_tests.rs`): 11 Passed
+```
+test test_fixture_approvals_lifecycle ... ok
+test test_fixture_daemon_bootstrap_info ... ok
+test test_fixture_error_response ... ok
+test test_fixture_events_subscription ... ok
+test test_fixture_hmac_canonical_digest_and_auth_header ... ok
+test test_fixture_negotiate_capabilities_roundtrip ... ok
+test test_fixture_ping_pong_health ... ok
+test test_fixture_providers_and_models ... ok
+test test_fixture_runs_lifecycle ... ok
+test test_fixture_studios_lifecycle ... ok
+test test_fixture_task_lifecycle_submit_and_cancel ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
 ---
 
 ### 3.2 `agent-studios-opencode-runtime` (54/54 Passed)
@@ -204,4 +221,7 @@ test result: ok. 54 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 | **P1 CancelTask Origin** | Remediated `None => false` fail-open flaw; enforced fail-closed admin gate for untracked origins; added reconnected owner session rebinding. | 7 dedicated integration tests pass |
 | **P1 2PC Approval Delivery** | Ensured approval response is delivered to runtime before Control Plane commit; serialized concurrent resolutions via RAII guard. | 3 dedicated concurrency tests pass |
 | **P1 Deterministic Routing** | Disallowed arbitrary first-item fallbacks for models and runtimes; enforced deterministic configuration hierarchy with fail-closed errors. | 3 dedicated model routing tests pass |
-| **P1 Daemon Contract** | Documented wire protocol, authentication, command formats, and endpoints for PRs #23 and #24. | Documentation complete |
+| **P1 Daemon Contract** | Corrected 15 wire discrepancies against Rust source (`RUST_DAEMON_INTEGRATION_CONTRACT.md`). | Audited & verified against source |
+| **P1 Golden Fixtures** | Implemented 11 canonical serialization & HMAC test vectors in `golden_fixture_tests.rs` and `PROTOCOL_GOLDEN_FIXTURES.md`. | 11/11 tests pass cleanly |
+| **P1 M15 Readiness Matrix** | Audited 13 backend execution capabilities in `M15_BACKEND_READINESS_MATRIX.md`. | Complete architectural matrix |
+| **P1 Cross-Team Handoff** | Documented contract freeze and TypeScript guidance for PR #23 & PR #25 in `CLAUDE_2_HANDOFF.md`. | Complete handoff specification |
