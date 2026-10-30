@@ -804,6 +804,16 @@ export class CapabilityMatrix {
           error: 'Path traversal sequences rejected in workspace path.',
         };
       }
+
+      if (process.platform !== 'win32') {
+        if (/^[a-zA-Z]:[/\\]/.test(req.workspacePath.trim())) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Workspace normalization error: Foreign-platform Windows path '${req.workspacePath.trim()}' cannot be safely interpreted on POSIX platform.`,
+          };
+        }
+      }
     }
 
     // 5. Operator confirmation challenge: reject untrusted raw boolean without verification token
