@@ -954,6 +954,76 @@ impl agent_studios_external_runtime::AgentRuntime for MockSuccessfulRuntime {
     }
 }
 
+struct IsolatedTestRepo {
+    _dir: tempfile::TempDir,
+    path: std::path::PathBuf,
+    _head_commit: String,
+}
+
+impl IsolatedTestRepo {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo_path = dir.path().to_path_buf();
+
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git init");
+
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test Agent"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git config user.name");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@agentstudios.local"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git config user.email");
+
+        std::process::Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git config commit.gpgsign");
+
+        let readme = repo_path.join("README.md");
+        std::fs::write(&readme, "# Isolated Test Repo\n").expect("write README");
+
+        std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git add");
+
+        std::process::Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git commit");
+
+        let rev_out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git rev-parse HEAD");
+
+        let head_commit = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
+
+        Self {
+            _dir: dir,
+            path: repo_path,
+            _head_commit: head_commit,
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 #[tokio::test]
 async fn test_ipc_task_auto_execution_lifecycle_succeeds_with_runtime() {
     let key_id = "test-key-auto-exec-success";
@@ -961,10 +1031,20 @@ async fn test_ipc_task_auto_execution_lifecycle_succeeds_with_runtime() {
 
     let runtime = std::sync::Arc::new(MockSuccessfulRuntime::new());
 
+    let test_repo = IsolatedTestRepo::new();
+    let wt_root = test_repo.path().join("worktrees");
+    let art_root = test_repo.path().join("artifacts");
+    let orchestrator = std::sync::Arc::new(
+        agent_studios_workspace::WorkspaceOrchestrator::new(wt_root, art_root)
+            .expect("Failed to create workspace orchestrator"),
+    );
+
     let server = IpcServer::builder()
         .with_auth_key(key_id, secret.clone())
         .with_auto_execute(true)
         .with_runtime(runtime)
+        .with_workspace_orchestrator(orchestrator)
+        .with_default_repo_path(test_repo.path())
         .build()
         .expect("Server failed to build");
 

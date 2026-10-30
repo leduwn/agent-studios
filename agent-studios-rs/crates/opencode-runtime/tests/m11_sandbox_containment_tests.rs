@@ -1,9 +1,11 @@
 use std::time::Duration;
 use url::Url;
 
+#[cfg(windows)]
+use agent_studios_opencode_runtime::JobObjectGuard;
 use agent_studios_opencode_runtime::{
-    JobObjectGuard, OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel,
-    SandboxPolicy, generate_secure_password, spawn_opencode_server, verify_loopback_url,
+    OpenCodeError, OpenCodeServerConfig, ProcessContainment, SandboxLevel, SandboxPolicy,
+    generate_secure_password, spawn_opencode_server, verify_loopback_url,
 };
 
 #[test]
@@ -20,13 +22,21 @@ fn test_strict_fails_closed_without_filesystem_isolation() {
     );
 
     match containment_res.err().unwrap() {
+        #[cfg(windows)]
         OpenCodeError::SandboxPolicyViolation(msg) => {
             assert!(
                 msg.contains("filesystem isolation"),
                 "Expected violation message mentioning filesystem isolation, got: {msg}"
             );
         }
-        other => panic!("Expected SandboxPolicyViolation, got: {other:?}"),
+        #[cfg(not(windows))]
+        OpenCodeError::UnsupportedPlatform(msg) => {
+            assert!(
+                msg.contains("OS-level containment") || msg.contains("Failing closed"),
+                "Expected unsupported platform failure message, got: {msg}"
+            );
+        }
+        other => panic!("Expected SandboxPolicyViolation or UnsupportedPlatform, got: {other:?}"),
     }
 }
 

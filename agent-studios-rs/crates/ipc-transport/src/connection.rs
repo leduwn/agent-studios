@@ -676,6 +676,40 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         }
                         drop(cp_read);
 
+                        // Phase 5 transactional delivery: Deliver to runtime FIRST before mutating Control Plane
+                        let pending_pra = {
+                            let pending = server_state.pending_runtime_approvals.read().await;
+                            pending.get(&aid).cloned()
+                        };
+
+                        if let Some(ref pra) = pending_pra {
+                            let (approved, reason_str) = match &decision {
+                                ApprovalDecision::Approved { user_note, .. } => {
+                                    (true, user_note.clone())
+                                }
+                                ApprovalDecision::Rejected { reason } => {
+                                    (false, Some(reason.clone()))
+                                }
+                            };
+                            let input =
+                                agent_studios_external_runtime::RuntimeInput::approval_response(
+                                    pra.runtime_approval_id,
+                                    approved,
+                                    reason_str,
+                                );
+                            if let Err(e) = pra.runtime.send(&pra.session_ref, input).await {
+                                // Fail closed: keep pending mapping for retry/reconciliation, do NOT commit to CP
+                                tx.send(IpcResponse::Error {
+                                    message: format!(
+                                        "Failed to deliver approval decision to runtime: {e}"
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                                continue;
+                            }
+                        }
+
                         let (res, envelopes) = {
                             let mut cp = server_state.control_plane.write().await;
                             let r = match decision {
@@ -692,39 +726,14 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                         match res {
                             Ok(()) => {
-                                let _ = server_state.publish_control_plane_events(envelopes);
-
-                                let pending_pra = {
-                                    let mut pending =
-                                        server_state.pending_runtime_approvals.write().await;
-                                    pending.remove(&aid)
-                                };
-                                if let Some(pra) = pending_pra {
-                                    let (approved, reason_str) = match &decision {
-                                        ApprovalDecision::Approved { user_note, .. } => {
-                                            (true, user_note.clone())
-                                        }
-                                        ApprovalDecision::Rejected { reason } => {
-                                            (false, Some(reason.clone()))
-                                        }
-                                    };
-                                    let input = agent_studios_external_runtime::RuntimeInput::approval_response(
-                                        pra.runtime_approval_id,
-                                        approved,
-                                        reason_str,
-                                    );
-                                    if let Err(e) = pra.runtime.send(&pra.session_ref, input).await
-                                    {
-                                        tx.send(IpcResponse::Error {
-                                            message: format!(
-                                                "Failed to deliver approval decision to runtime: {e}"
-                                            ),
-                                        })
+                                if pending_pra.is_some() {
+                                    server_state
+                                        .pending_runtime_approvals
+                                        .write()
                                         .await
-                                        .map_err(|_| TransportError::ConnectionClosed)?;
-                                        continue;
-                                    }
+                                        .remove(&aid);
                                 }
+                                let _ = server_state.publish_control_plane_events(envelopes);
 
                                 let status = match decision {
                                     ApprovalDecision::Approved { .. } => ApprovalStatus::Authorized,
@@ -918,6 +927,15 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     match res {
                         Ok(tasks) => {
                             let task_ids: Vec<TaskId> = tasks.into_iter().map(|t| t.id).collect();
+                            if let Some(ref kid) = session.key_id {
+                                for tid in &task_ids {
+                                    server_state.register_task_origin(
+                                        *tid,
+                                        session.session_id.clone(),
+                                        kid,
+                                    );
+                                }
+                            }
                             let _ = server_state.publish_control_plane_events(envelopes);
                             tx.send(IpcResponse::TasksSubmitted {
                                 task_ids: task_ids.clone(),
@@ -953,18 +971,79 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     task_id,
                     reason,
                 } => {
+                    // Phase 4: Validate caller authorization and allowed cancellation scope
+                    if session.role != ClientRole::Admin {
+                        let is_foreign = {
+                            let origins = server_state.task_origins.lock().unwrap();
+                            if let Some((s_id, k_id)) = origins.get(&task_id) {
+                                s_id != &session.session_id
+                                    || session.key_id.as_deref() != Some(k_id.as_str())
+                            } else {
+                                false
+                            }
+                        };
+                        if is_foreign {
+                            tx.send(IpcResponse::Error {
+                                message: "Permission denied: cross-session cancellation requires admin role"
+                                    .to_string(),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                    }
+
+                    // Validate task existence, studio ownership, and non-terminal state BEFORE stopping runtime
+                    let pre_check = {
+                        let cp = server_state.control_plane.read().await;
+                        match cp.get_task(task_id) {
+                            None => Err(format!("Task {} not found", task_id)),
+                            Some(task) if task.studio_id != studio_id => Err(format!(
+                                "Studio mismatch: task {} belongs to studio {}, not {}",
+                                task_id, task.studio_id, studio_id
+                            )),
+                            Some(task) if task.state.is_terminal() => Err(format!(
+                                "Cannot cancel task {}: already in terminal state {:?}",
+                                task_id, task.state
+                            )),
+                            Some(_) => Ok(()),
+                        }
+                    };
+
+                    if let Err(err_msg) = pre_check {
+                        tx.send(IpcResponse::Error { message: err_msg })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        continue;
+                    }
+
+                    // Stop associated runtime if an active session exists
                     let active_session = {
                         let sessions = server_state.active_runtime_sessions.read().await;
                         sessions.get(&task_id).cloned()
                     };
-                    if let Some((s_ref, rt)) = active_session
-                        && let Err(e) = rt.stop(&s_ref).await
-                    {
-                        tracing::warn!(
-                            "Failed to stop runtime session for task {}: {}",
-                            task_id,
-                            e
-                        );
+                    if let Some((s_ref, rt)) = active_session {
+                        if let Err(e) = rt.stop(&s_ref).await {
+                            tracing::warn!(
+                                "Failed to stop runtime session for task {}: {}",
+                                task_id,
+                                e
+                            );
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Failed to stop runtime session for task {}: {}",
+                                    task_id, e
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                        server_state
+                            .active_runtime_sessions
+                            .write()
+                            .await
+                            .remove(&task_id);
                     }
 
                     let (res, envelopes) = {
@@ -975,6 +1054,14 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                     Err(format!(
                                         "Studio mismatch: task {} belongs to studio {}, not {}",
                                         task_id, task.studio_id, studio_id
+                                    )),
+                                    Vec::new(),
+                                )
+                            } else if task.state.is_terminal() {
+                                (
+                                    Err(format!(
+                                        "Cannot cancel task {}: already in terminal state {:?}",
+                                        task_id, task.state
                                     )),
                                     Vec::new(),
                                 )
@@ -1287,7 +1374,10 @@ async fn execute_task_lifecycle(
                 let _ = cp.record_run_outcome(
                     run_id,
                     "failed",
-                    Some("No available runtime instance discovered".to_string()),
+                    Some(
+                        "No available runtime instance discovered. OpenCode runtime binary not found. Install via: npm i -g opencode-ai or configure AGENT_STUDIOS_OPENCODE_PATH"
+                            .to_string(),
+                    ),
                 );
                 let _ = cp.transition_run_state(run_id, RunState::Failed);
                 let _ = cp.transition_task_state(task_id, TaskState::Failed);
@@ -1299,13 +1389,14 @@ async fn execute_task_lifecycle(
     };
 
     let (wt_id, wt_root, wt_cwd, wt_source_root, wt_source_cwd, wt_base_sha) = {
-        let mut cp = server_state.control_plane.write().await;
-        let existing = cp
-            .state()
-            .worktrees
-            .values()
-            .find(|w| w.assigned_task_id == Some(task_id))
-            .cloned();
+        let existing = {
+            let cp = server_state.control_plane.read().await;
+            cp.state()
+                .worktrees
+                .values()
+                .find(|w| w.assigned_task_id == Some(task_id))
+                .cloned()
+        };
 
         if let Some(w) = existing {
             (
@@ -1317,12 +1408,15 @@ async fn execute_task_lifecycle(
                 w.base_commit,
             )
         } else if let Some(ref orchestrator) = server_state.workspace_orchestrator {
-            let source_cwd = if let Ok(repo_env) = std::env::var("AGENT_STUDIOS_REPO_PATH") {
+            let source_cwd = if let Some(ref p) = server_state.default_repo_path {
+                p.clone()
+            } else if let Ok(repo_env) = std::env::var("AGENT_STUDIOS_REPO_PATH") {
                 PathBuf::from(repo_env)
             } else {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
             };
 
+            // Phase 3: Physical git worktree creation OUTSIDE Control Plane write lock
             let mut managed_res = orchestrator
                 .create_worktree_async(source_cwd.clone(), None)
                 .await;
@@ -1341,94 +1435,145 @@ async fn execute_task_lifecycle(
             let managed = match managed_res {
                 Ok(m) => m,
                 Err(e) => {
-                    let _ = cp.record_run_outcome(
-                        run_id,
-                        "failed",
-                        Some(format!("Physical git worktree creation failed: {e}")),
-                    );
-                    let _ = cp.transition_run_state(run_id, RunState::Failed);
-                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                    let envs = cp.drain_committed_events();
-                    drop(cp);
-                    let _ = server_state.publish_control_plane_events(envs);
+                    let fail_envs = {
+                        let mut cp = server_state.control_plane.write().await;
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "failed",
+                            Some(format!("Physical git worktree creation failed: {e}")),
+                        );
+                        let _ = cp.transition_run_state(run_id, RunState::Failed);
+                        let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                        cp.drain_committed_events()
+                    };
+                    let _ = server_state.publish_control_plane_events(fail_envs);
                     return;
                 }
             };
 
             if let Err(e) = orchestrator.validate_worktree_path(&managed.root, &managed.cwd) {
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "failed",
-                    Some(format!("Worktree path validation failed: {e}")),
-                );
-                let _ = cp.transition_run_state(run_id, RunState::Failed);
-                let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                let envs = cp.drain_committed_events();
-                drop(cp);
-                let _ = server_state.publish_control_plane_events(envs);
-                return;
-            }
-
-            let wt = match cp.create_worktree_with_cwds(
-                studio_id,
-                format!("worktree-{}", task_id),
-                managed.source_root.clone(),
-                managed.source_cwd.clone(),
-                managed.root.clone(),
-                managed.cwd.clone(),
-                managed.head_sha.clone(),
-            ) {
-                Ok(w) => w,
-                Err(e) => {
+                let _ = orchestrator
+                    .release_worktree_async(
+                        managed.source_cwd.clone(),
+                        managed.root.clone(),
+                        false,
+                        Some("validation failed".to_string()),
+                    )
+                    .await;
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
                     let _ = cp.record_run_outcome(
                         run_id,
                         "failed",
-                        Some(format!("Failed to register worktree in control plane: {e}")),
+                        Some(format!("Worktree path validation failed: {e}")),
                     );
                     let _ = cp.transition_run_state(run_id, RunState::Failed);
                     let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                    let envs = cp.drain_committed_events();
-                    drop(cp);
-                    let _ = server_state.publish_control_plane_events(envs);
-                    return;
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+
+            // Phase 4: Re-acquire CP write lock — validate task still active, attach worktree
+            let attach_res = {
+                let mut cp = server_state.control_plane.write().await;
+                let task_active = cp
+                    .get_task(task_id)
+                    .map(|t| !t.state.is_terminal())
+                    .unwrap_or(false);
+                let run_active = cp
+                    .get_run(run_id)
+                    .map(|r| !r.state.is_terminal())
+                    .unwrap_or(false);
+
+                if !task_active || !run_active {
+                    Err("Task or run terminated during worktree creation".to_string())
+                } else {
+                    match cp.create_worktree_with_cwds(
+                        studio_id,
+                        format!("worktree-{}", task_id),
+                        managed.source_root.clone(),
+                        managed.source_cwd.clone(),
+                        managed.root.clone(),
+                        managed.cwd.clone(),
+                        managed.head_sha.clone(),
+                    ) {
+                        Ok(wt) => {
+                            let _ = cp.transition_worktree_state(
+                                wt.id,
+                                agent_studios_protocol::worktree::WorktreeState::Ready,
+                            );
+                            let _ = cp.assign_worktree(wt.id, task_id, agent_id, Some(run_id));
+                            let _ = cp.transition_worktree_state(
+                                wt.id,
+                                agent_studios_protocol::worktree::WorktreeState::InUse,
+                            );
+                            let envs = cp.drain_committed_events();
+                            Ok((wt.id, envs))
+                        }
+                        Err(e) => Err(format!("Failed to register worktree in control plane: {e}")),
+                    }
                 }
             };
 
-            let _ = cp.transition_worktree_state(
-                wt.id,
-                agent_studios_protocol::worktree::WorktreeState::Ready,
-            );
-            let _ = cp.assign_worktree(wt.id, task_id, agent_id, Some(run_id));
-            let _ = cp.transition_worktree_state(
-                wt.id,
-                agent_studios_protocol::worktree::WorktreeState::InUse,
-            );
-            let envs = cp.drain_committed_events();
-            drop(cp);
-            let _ = server_state.publish_control_plane_events(envs);
-
-            (
-                wt.id,
-                managed.root,
-                managed.cwd,
-                managed.source_root,
-                managed.source_cwd,
-                managed.head_sha,
-            )
+            match attach_res {
+                Ok((wt_id, envs)) => {
+                    let _ = server_state.publish_control_plane_events(envs);
+                    (
+                        wt_id,
+                        managed.root,
+                        managed.cwd,
+                        managed.source_root,
+                        managed.source_cwd,
+                        managed.head_sha,
+                    )
+                }
+                Err(err) => {
+                    // Phase 5: Rollback worktree, record failure, exit cleanly
+                    let _ = orchestrator
+                        .release_worktree_async(
+                            managed.source_cwd.clone(),
+                            managed.root.clone(),
+                            false,
+                            Some("rollback".to_string()),
+                        )
+                        .await;
+                    let fail_envs = {
+                        let mut cp = server_state.control_plane.write().await;
+                        if let Some(r) = cp.get_run(run_id)
+                            && !r.state.is_terminal()
+                        {
+                            let _ = cp.record_run_outcome(run_id, "failed", Some(err));
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                        }
+                        if let Some(t) = cp.get_task(task_id)
+                            && !t.state.is_terminal()
+                        {
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                        }
+                        cp.drain_committed_events()
+                    };
+                    let _ = server_state.publish_control_plane_events(fail_envs);
+                    return;
+                }
+            }
         } else {
-            let _ = cp.record_run_outcome(
-                run_id,
-                "failed",
-                Some(
-                    "Workspace orchestrator not configured; physical isolation required"
-                        .to_string(),
-                ),
-            );
-            let _ = cp.transition_run_state(run_id, RunState::Failed);
-            let _ = cp.transition_task_state(task_id, TaskState::Failed);
-            let envs = cp.drain_committed_events();
-            drop(cp);
-            let _ = server_state.publish_control_plane_events(envs);
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(
+                        "Workspace orchestrator not configured; physical isolation required"
+                            .to_string(),
+                    ),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
             return;
         }
     };
@@ -1656,6 +1801,17 @@ async fn execute_task_lifecycle(
             agent_studios_external_runtime::RuntimeEventKind::Completed { summary } => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
+                let is_task_terminal = cp
+                    .get_task(task_id)
+                    .map(|t| t.state.is_terminal())
+                    .unwrap_or(true);
+                let is_run_terminal = cp
+                    .get_run(run_id)
+                    .map(|r| r.state.is_terminal())
+                    .unwrap_or(true);
+                if is_task_terminal || is_run_terminal {
+                    break;
+                }
                 let _ = cp.record_run_outcome(run_id, "succeeded", summary.clone());
                 let _ = cp.transition_run_state(run_id, RunState::Succeeded);
                 let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
@@ -1667,6 +1823,17 @@ async fn execute_task_lifecycle(
             agent_studios_external_runtime::RuntimeEventKind::Failed { safe_error_summary } => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
+                let is_task_terminal = cp
+                    .get_task(task_id)
+                    .map(|t| t.state.is_terminal())
+                    .unwrap_or(true);
+                let is_run_terminal = cp
+                    .get_run(run_id)
+                    .map(|r| r.state.is_terminal())
+                    .unwrap_or(true);
+                if is_task_terminal || is_run_terminal {
+                    break;
+                }
                 let _ = cp.record_run_outcome(
                     run_id,
                     "failed",
@@ -1682,6 +1849,17 @@ async fn execute_task_lifecycle(
             agent_studios_external_runtime::RuntimeEventKind::Stopped => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
+                let is_task_terminal = cp
+                    .get_task(task_id)
+                    .map(|t| t.state.is_terminal())
+                    .unwrap_or(true);
+                let is_run_terminal = cp
+                    .get_run(run_id)
+                    .map(|r| r.state.is_terminal())
+                    .unwrap_or(true);
+                if is_task_terminal || is_run_terminal {
+                    break;
+                }
                 let _ = cp.record_run_outcome(
                     run_id,
                     "stopped",
@@ -1697,6 +1875,17 @@ async fn execute_task_lifecycle(
             agent_studios_external_runtime::RuntimeEventKind::Interrupted { reason } => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
+                let is_task_terminal = cp
+                    .get_task(task_id)
+                    .map(|t| t.state.is_terminal())
+                    .unwrap_or(true);
+                let is_run_terminal = cp
+                    .get_run(run_id)
+                    .map(|r| r.state.is_terminal())
+                    .unwrap_or(true);
+                if is_task_terminal || is_run_terminal {
+                    break;
+                }
                 let _ =
                     cp.record_run_outcome(run_id, "interrupted", Some(reason.as_str().to_string()));
                 let _ = cp.transition_run_state(run_id, RunState::Cancelled);

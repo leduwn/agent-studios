@@ -51,6 +51,7 @@ pub struct ServerState {
     pub start_time: i64,
     pub approvals: Arc<Mutex<HashMap<ApprovalId, ApprovalContract>>>,
     pub approval_origins: Arc<Mutex<HashMap<ApprovalId, (SessionId, String)>>>,
+    pub task_origins: Arc<Mutex<HashMap<agent_studios_protocol::id::TaskId, (SessionId, String)>>>,
     pub auth_keys: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     pub key_roles: Arc<Mutex<HashMap<String, ClientRole>>>,
     pub supported_capabilities: Vec<String>,
@@ -59,6 +60,7 @@ pub struct ServerState {
     pub auto_execute: bool,
     pub runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
     pub workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
+    pub default_repo_path: Option<std::path::PathBuf>,
     pub active_runtime_sessions: ActiveRuntimeSessions,
     pub pending_runtime_approvals: Arc<
         tokio::sync::RwLock<
@@ -78,6 +80,18 @@ impl ServerState {
             ApprovalId::new(approval_id.into()),
             (session_id, key_id.into()),
         );
+    }
+
+    pub fn register_task_origin(
+        &self,
+        task_id: agent_studios_protocol::id::TaskId,
+        session_id: SessionId,
+        key_id: impl Into<String>,
+    ) {
+        self.task_origins
+            .lock()
+            .unwrap()
+            .insert(task_id, (session_id, key_id.into()));
     }
 
     pub fn publish_event(&self, event: IpcEvent) -> Result<(), TransportError> {
@@ -137,6 +151,7 @@ pub struct IpcServerBuilder {
     auto_execute: bool,
     runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
     workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
+    default_repo_path: Option<std::path::PathBuf>,
 }
 
 impl Default for IpcServerBuilder {
@@ -166,6 +181,7 @@ impl IpcServerBuilder {
             auto_execute: false,
             runtime: None,
             workspace_orchestrator: None,
+            default_repo_path: None,
         }
     }
 
@@ -236,6 +252,11 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_default_repo_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.default_repo_path = Some(path.into());
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -277,6 +298,7 @@ impl IpcServerBuilder {
             start_time: chrono::Utc::now().timestamp(),
             approvals: Arc::new(Mutex::new(HashMap::new())),
             approval_origins: Arc::new(Mutex::new(HashMap::new())),
+            task_origins: Arc::new(Mutex::new(HashMap::new())),
             auth_keys: Arc::new(Mutex::new(self.auth_keys)),
             key_roles: Arc::new(Mutex::new(self.key_roles)),
             supported_capabilities: self.supported_capabilities,
@@ -285,6 +307,7 @@ impl IpcServerBuilder {
             auto_execute: self.auto_execute,
             runtime,
             workspace_orchestrator,
+            default_repo_path: self.default_repo_path,
             active_runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             pending_runtime_approvals: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         });
