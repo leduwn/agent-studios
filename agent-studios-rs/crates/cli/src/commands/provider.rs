@@ -584,6 +584,7 @@ async fn handle_test(args: TestProviderArgs) -> Result<(), Box<dyn std::error::E
             agent_studios_provider::CheckState::Failed => "FAILED",
             agent_studios_provider::CheckState::Skipped => "SKIPPED",
             agent_studios_provider::CheckState::NotTested => "NOT_TESTED",
+            agent_studios_provider::CheckState::RateLimited => "RATE_LIMITED",
         }
     }
 

@@ -68,6 +68,7 @@ pub enum CheckState {
     Failed,
     Skipped,
     NotTested,
+    RateLimited,
 }
 
 /// Granular status detail for a connection test category.
@@ -105,6 +106,13 @@ impl CheckDetail {
             message: msg.into(),
         }
     }
+
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self {
+            state: CheckState::RateLimited,
+            message: msg.into(),
+        }
+    }
 }
 
 /// Comprehensive connectivity test report for a provider instance.
@@ -125,6 +133,7 @@ impl ProviderConnectionReport {
             && self.credential.state != CheckState::Failed
             && self.reachability.state != CheckState::Failed
             && self.auth.state != CheckState::Failed
+            && self.auth.state != CheckState::RateLimited
     }
 }
 
@@ -343,8 +352,16 @@ impl ModelDiscoveryClient {
                 CheckDetail::skipped("Discovery skipped due to authentication failure"),
             )
         } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|h| h.to_str().ok())
+                .map(|s| format!(" (retry-after: {s})"))
+                .unwrap_or_default();
             (
-                CheckDetail::passed("Authenticated (HTTP 429 Rate Limited)"),
+                CheckDetail::rate_limited(format!(
+                    "Rate limited: HTTP 429{retry_after}; authentication state unverified"
+                )),
                 CheckDetail::skipped("Discovery skipped due to rate limit"),
             )
         } else if status.is_success() {

@@ -604,7 +604,7 @@ async fn test_connection_unreachable_endpoint_fails_reachability() {
 }
 
 #[tokio::test]
-async fn test_connection_rate_limited_429_treated_as_auth_success() {
+async fn test_connection_rate_limited_429_reports_rate_limited() {
     let server = MockServer::start().await;
 
     let secret_ref = SecretReference::env("KEY_429").unwrap();
@@ -638,10 +638,10 @@ async fn test_connection_rate_limited_429_treated_as_auth_success() {
     assert_eq!(report.configuration.state, CheckState::Passed);
     assert_eq!(report.credential.state, CheckState::Passed);
     assert_eq!(report.reachability.state, CheckState::Passed);
-    assert_eq!(report.auth.state, CheckState::Passed);
+    assert_eq!(report.auth.state, CheckState::RateLimited);
     assert_eq!(report.discovery.state, CheckState::Skipped);
     assert_eq!(report.runtime.state, CheckState::NotTested);
-    assert!(report.is_overall_success());
+    assert!(!report.is_overall_success());
 }
 
 #[tokio::test]
