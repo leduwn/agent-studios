@@ -157,6 +157,8 @@ export class MockWebviewPanel {
   public readonly webview = new MockWebview();
   public readonly _disposeEmitter = new MockEventEmitter<void>();
   public onDidDispose = this._disposeEmitter.event;
+  public readonly _viewStateEmitter = new MockEventEmitter<{ webviewPanel: MockWebviewPanel }>();
+  public onDidChangeViewState = this._viewStateEmitter.event;
 
   constructor(
     public readonly viewType: string,
