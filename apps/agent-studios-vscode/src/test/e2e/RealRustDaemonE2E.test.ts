@@ -1,6 +1,11 @@
 /**
- * Agent Studios — Real Rust Daemon E2E Test Suite
- * Milestone M14 Integration Quality Gate: Mission Control + ConnectedClient + Real Rust Daemon
+ * Agent Studios — Tier 3: Real Compiled Rust agsd E2E Test Suite
+ * Milestone M14-M15 Integration Quality Gate: Mission Control + ConnectedClient + Real Rust Daemon
+ *
+ * Classification:
+ * - AUTHENTICATED_RUST_IPC_VERIFIED (Real two-phase HMAC-SHA256 negotiation and auth)
+ * - LIVE_READ_ONLY_RUST_DATA_VERIFIED (Real daemon health, ping, tasks, providers, models query)
+ * - REAL_AI_TASK_EXECUTION_NOT_VERIFIED (Mutating coding task execution with external AI runtime engine not run)
  *
  * Verifies real OS cross-process communication against the actual compiled Rust
  * `agsd` binary over Windows Named Pipes (and Unix Domain Sockets on POSIX).
@@ -69,7 +74,7 @@ function resolveAgsdBinaryPath(): string {
   );
 }
 
-describe('Real Rust Daemon (agsd) E2E Test Suite', function () {
+describe('Tier 3: Real Compiled Rust agsd E2E Test Suite (AUTHENTICATED_RUST_IPC_VERIFIED & LIVE_READ_ONLY_RUST_DATA_VERIFIED)', function () {
   // Guard timeout up to 30s per test across all scenarios
   this.timeout(30000);
 

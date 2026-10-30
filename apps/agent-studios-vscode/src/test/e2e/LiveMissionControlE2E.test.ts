@@ -1,10 +1,14 @@
 /**
- * Agent Studios — Live Mission Control Data Projection E2E Test Suite
- * Milestone M14 Mission Control Integration
+ * Agent Studios — Tier 2: Mock Daemon Mission Control Projection E2E Test Suite
+ * Milestone M14-M15 Integration Quality Gate
  *
+ * Classification: MOCK_PROJECTED_TASK_STATE_VERIFIED
  * Verifies live Mission Control data projection against seeded Control Plane
- * and native daemon over authentic OS IPC (Named Pipes / Domain Sockets)
+ * state in a cross-process standalone mock daemon over authentic OS IPC (Named Pipes / Domain Sockets)
  * using HMAC-authenticated wire framing and role-based access control.
+ *
+ * NOTE: These seeded tasks validate UI projection fidelity and state transformations;
+ * they are mock tasks and do NOT represent REAL_AI_TASK_EXECUTION.
  */
 
 import * as assert from 'assert';
@@ -47,7 +51,7 @@ function resolveAgsdBinaryPath(): string | null {
   return null;
 }
 
-describe('Live Mission Control Data Projection E2E', () => {
+describe('Tier 2: Mock Daemon Mission Control Projection E2E (MOCK_PROJECTED_TASK_STATE_VERIFIED)', () => {
   let tempDir: string;
   let runtimePath: string;
   let adminRuntimePath: string;

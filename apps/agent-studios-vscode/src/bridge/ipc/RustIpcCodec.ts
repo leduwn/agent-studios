@@ -27,6 +27,16 @@ export class RustIpcCodec {
     command: RustIpcCommand,
     maxSize: number = RUST_DEFAULT_MAX_FRAME_SIZE
   ): Buffer {
+    if (
+      !command ||
+      typeof command !== 'object' ||
+      typeof (command as any).type !== 'string' ||
+      (command as any).jsonrpc !== undefined
+    ) {
+      throw new Error(
+        `Invalid Rust IPC command: must be an internally-tagged object with 'type' property; foreign contracts (JSON-RPC) rejected.`
+      );
+    }
     const json = JSON.stringify(command);
     const payloadLength = Buffer.byteLength(json, 'utf8');
 
@@ -89,6 +99,16 @@ export class RustIpcCodec {
       const jsonStr = buffer.toString('utf8', offset + RUST_FRAME_HEADER_SIZE, offset + RUST_FRAME_HEADER_SIZE + length);
       try {
         const parsed = JSON.parse(jsonStr) as RustIpcResponse;
+        if (
+          !parsed ||
+          typeof parsed !== 'object' ||
+          typeof (parsed as any).type !== 'string' ||
+          (parsed as any).jsonrpc !== undefined
+        ) {
+          throw new Error(
+            `Invalid Rust IPC response: must be an internally-tagged object with 'type' property; foreign contracts (JSON-RPC) rejected.`
+          );
+        }
         responses.push(parsed);
       } catch (err) {
         throw new Error(`Failed to parse Rust IPC JSON response: ${err}`);

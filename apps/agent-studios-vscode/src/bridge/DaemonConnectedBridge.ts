@@ -41,6 +41,11 @@ import {
   TimelineEventType,
 } from './types';
 import {
+  SubmitTaskAdapter,
+  SubmitTaskRequest,
+  SubmitTaskResult,
+} from './ipc/SubmitTaskAdapter';
+import {
   NativeIpcTransport,
   TransportState,
 } from './ipc/NativeIpcTransport';
@@ -384,6 +389,15 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
+   * Submits a task to the daemon using the M15 SubmitTaskAdapter.
+   * Gated on operator confirmation and explicit studio identity.
+   */
+  public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
+    this.assertConnected();
+    return SubmitTaskAdapter.submitTask(this._transport!, req);
+  }
+
+  /**
    * Sends chat message / prompts agent.
    * STRICTLY DISABLED AND FAILS CLOSED in M14-IPC-03 read-only slice.
    */
@@ -592,14 +606,49 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
 
   private mapDaemonEvent(rustEvent: RustIpcEvent): TimelineEvent {
     const timestamp = new Date(rustEvent.timestamp).getTime() || Date.now();
-    const eventType = this.mapTimelineEventType(rustEvent.event_type);
+    let eventType = this.mapTimelineEventType(rustEvent.event_type);
     const payload = (rustEvent.payload && typeof rustEvent.payload === 'object')
       ? (rustEvent.payload as Record<string, unknown>)
       : {};
 
-    const summary = typeof payload.summary === 'string'
-      ? payload.summary
-      : `${rustEvent.event_type} (seq ${rustEvent.sequence})`;
+    if (rustEvent.event_type === 'task_state_transitioned') {
+      const to = String(payload.to || '');
+      if (to === 'running') {
+        eventType = 'task_started';
+      } else if (to === 'succeeded') {
+        eventType = 'task_completed';
+      } else if (to === 'failed') {
+        eventType = 'task_failed';
+      } else if (to === 'cancelled') {
+        eventType = 'task_cancelled';
+      } else if (to === 'blocked') {
+        eventType = 'task_blocked';
+      }
+    } else if (rustEvent.event_type === 'run_state_transitioned') {
+      const to = String(payload.to || '');
+      if (to === 'running') {
+        eventType = 'run_started';
+      } else if (to === 'succeeded') {
+        eventType = 'run_completed';
+      } else if (to === 'failed') {
+        eventType = 'run_failed';
+      }
+    }
+
+    let summary: string;
+    if (typeof payload.text === 'string') {
+      summary = payload.text;
+    } else if (typeof payload.summary === 'string') {
+      summary = payload.summary;
+    } else if (rustEvent.event_type === 'tool_started' && typeof payload.tool_name === 'string') {
+      summary = `Tool ${payload.tool_name} started`;
+    } else if (rustEvent.event_type === 'tool_completed' && typeof payload.tool_name === 'string') {
+      summary = `Tool ${payload.tool_name} completed`;
+    } else if (rustEvent.event_type === 'tool_failed' && typeof payload.tool_name === 'string') {
+      summary = `Tool ${payload.tool_name} failed: ${payload.error || 'Unknown error'}`;
+    } else {
+      summary = `${rustEvent.event_type} (seq ${rustEvent.sequence})`;
+    }
 
     const taskId = typeof payload.task_id === 'string' ? payload.task_id : undefined;
     const agentName = typeof payload.agent_name === 'string' ? payload.agent_name : undefined;
@@ -618,21 +667,27 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
 
   private mapTimelineEventType(daemonEventType: string): TimelineEventType {
     switch (daemonEventType) {
+      case 'tool_started':
+        return 'tool_executing';
       case 'session_started':
       case 'session_ended':
       case 'run_started':
       case 'run_completed':
       case 'run_failed':
+      case 'task_submitted':
       case 'task_started':
       case 'task_completed':
       case 'task_failed':
       case 'task_blocked':
+      case 'task_cancelled':
       case 'agent_assigned':
       case 'tool_executing':
       case 'tool_completed':
+      case 'tool_failed':
       case 'approval_requested':
       case 'approval_decided':
       case 'artifact_created':
+      case 'runtime_output_delta':
         return daemonEventType as TimelineEventType;
       default:
         return 'task_started';

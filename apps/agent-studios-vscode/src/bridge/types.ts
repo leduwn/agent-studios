@@ -131,16 +131,20 @@ export type TimelineEventType =
   | 'run_started'
   | 'run_completed'
   | 'run_failed'
+  | 'task_submitted'
   | 'task_started'
   | 'task_completed'
   | 'task_failed'
   | 'task_blocked'
+  | 'task_cancelled'
   | 'agent_assigned'
   | 'tool_executing'
   | 'tool_completed'
+  | 'tool_failed'
   | 'approval_requested'
   | 'approval_decided'
-  | 'artifact_created';
+  | 'artifact_created'
+  | 'runtime_output_delta';
 
 export interface TimelineEvent {
   sequenceNumber: number;
@@ -239,6 +243,7 @@ export interface ChatSendRequest {
   providerInstanceId?: string;
   modelId?: string;
   attachments?: ContextAttachment[];
+  confirmedByUser?: boolean;
 }
 
 export interface SessionSummary {

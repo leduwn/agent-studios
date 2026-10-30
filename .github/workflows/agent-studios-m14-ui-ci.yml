@@ -41,9 +41,21 @@ jobs:
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
-          git fetch --depth=1 --force origin 946643d90fa11c9361c04394eaff7f57f970ebcc:backend-pin || git fetch --depth=1 --force origin feat/m13-ipc-02-control-plane:backend-pin
+          PINNED_SHA="ce0396c1f165760ea271110eaf9bfd6dc84a67a7"
+          echo "Fetching pinned backend commit: $PINNED_SHA"
+          git fetch --depth=1 --force origin "$PINNED_SHA":backend-pin || {
+            echo "::error::Failed to fetch pinned backend commit $PINNED_SHA. Branch fallback disabled."
+            exit 1
+          }
+          ACTUAL_SHA=$(git rev-parse backend-pin)
+          echo "Verified fetched backend commit: $ACTUAL_SHA"
+          if [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
+            echo "::error::Backend commit mismatch: expected $PINNED_SHA but got $ACTUAL_SHA"
+            exit 1
+          fi
           rm -rf agent-studios-rs
           git checkout backend-pin -- agent-studios-rs/
+          echo "Successfully extracted agent-studios-rs/ from pinned commit $ACTUAL_SHA"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -52,7 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent-studios-rs
-          key: 946643d90fa11c9361c04394eaff7f57f970ebcc
+          key: ce0396c1f165760ea271110eaf9bfd6dc84a67a7
 
       - name: Build agsd native daemon
         working-directory: ${{ github.workspace }}
