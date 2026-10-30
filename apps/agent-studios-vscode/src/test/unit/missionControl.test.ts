@@ -532,7 +532,7 @@ describe('Mission Control Workbench Unit Tests', () => {
             description: 'A task that is retrying',
             status: 'running',
             dependencies: [],
-            progress: 0,
+            progress: undefined,
             createdAt: Date.now(),
             updatedAt: Date.now(),
           },
@@ -556,7 +556,7 @@ describe('Mission Control Workbench Unit Tests', () => {
       await projection.refresh();
 
       const state = projection.getState();
-      assert.strictEqual(state.tasks[0].progress, 0, 'Progress must be 0, not fabricated 50');
+      assert.strictEqual(state.tasks[0].progress, undefined, 'Progress must be undefined/indeterminate, not fabricated 50');
 
       // Providers latency must not be hardcoded 120ms
       for (const prov of state.providers) {

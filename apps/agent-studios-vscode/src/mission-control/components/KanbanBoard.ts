@@ -48,7 +48,7 @@ export function renderKanbanBoard(
                   }
                 </div>
                 ${
-                  task.progress > 0
+                  task.progress !== undefined && task.progress > 0
                     ? `
                   <div class="progress-bar-container">
                     <div class="progress-bar-fill" style="width: ${Math.min(100, Math.max(0, task.progress))}%"></div>

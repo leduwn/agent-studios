@@ -93,7 +93,7 @@ export interface TaskLifecycleModel {
   assignedAgentName?: string;
   createdAt: string;
   updatedAt: string;
-  progress: number;
+  progress?: number;
   worktreePath?: string;
   error?: string;
 }

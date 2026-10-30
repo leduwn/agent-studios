@@ -28,10 +28,16 @@ export function renderTasksView(state: MissionControlState): string {
               <td><code>${escapeHtml(task.id)}</code></td>
               <td><span class="status-pill ${statusClass}">${task.state.toUpperCase()}</span></td>
               <td>
-                <div class="progress-bar-container" style="width: 100px;">
-                  <div class="progress-bar-fill" style="width: ${Math.min(100, Math.max(0, task.progress))}%"></div>
-                </div>
-                <span class="text-xs text-secondary">${task.progress}%</span>
+                ${
+                  task.progress !== undefined
+                    ? `
+                  <div class="progress-bar-container" style="width: 100px;">
+                    <div class="progress-bar-fill" style="width: ${Math.min(100, Math.max(0, task.progress))}%"></div>
+                  </div>
+                  <span class="text-xs text-secondary">${task.progress}%</span>
+                `
+                    : '<span class="text-xs text-secondary">Indeterminate</span>'
+                }
               </td>
               <td>
                 ${
@@ -157,7 +163,7 @@ function renderSelectedTaskDrawer(task: TaskLifecycleModel): string {
         </div>
         <div class="meta-item">
           <span class="meta-label">Progress</span>
-          <span class="meta-value">${task.progress}%</span>
+          <span class="meta-value">${task.progress !== undefined ? `${task.progress}%` : '<span class="text-secondary">Indeterminate</span>'}</span>
         </div>
         <div class="meta-item">
           <span class="meta-label">Assigned Agent</span>

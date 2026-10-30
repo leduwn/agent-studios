@@ -85,7 +85,7 @@ export interface TaskNode {
   assignedAgentName?: string;
   dependencies: TaskId[];
   subtasks?: TaskId[];
-  progress: number; // 0 - 100
+  progress?: number; // 0 - 100, undefined if indeterminate/unmeasured
   error?: string;
   createdAt: number;
   updatedAt: number;

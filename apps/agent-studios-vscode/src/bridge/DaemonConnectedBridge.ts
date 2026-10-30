@@ -641,7 +641,7 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       status: this.mapTaskState(r.state),
       assignedAgentId: r.assigned_agent_id ?? undefined,
       dependencies: Array.isArray(r.dependencies) ? r.dependencies : [],
-      progress: r.state === 'succeeded' ? 100 : 0,
+      progress: r.state === 'succeeded' ? 100 : undefined,
       error: r.state === 'failed' ? 'Task failed' : undefined,
       createdAt: new Date(r.created_at).getTime() || Date.now(),
       updatedAt: new Date(r.updated_at).getTime() || Date.now(),
