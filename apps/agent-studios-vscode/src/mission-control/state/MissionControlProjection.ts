@@ -8,6 +8,7 @@
 
 import * as vscode from 'vscode';
 import { BridgeManager } from '../../bridge/BridgeManager';
+import { DaemonConnectedBridge } from '../../bridge/DaemonConnectedBridge';
 import {
   ApprovalRequest,
   Artifact,
@@ -17,6 +18,7 @@ import {
   TaskNode,
   TimelineEvent,
 } from '../../bridge/types';
+import { RustHealthResponse } from '../../bridge/ipc/RustIpcProtocolTypes';
 import {
   MissionControlState,
   MissionControlTabId,
@@ -26,6 +28,7 @@ import {
   ApprovalRecord,
   ProviderUsageSummary,
   AttentionItem,
+  QueryErrors,
 } from '../models/types';
 import { createPreviewMissionControlState } from '../fixtures/missionControlFixtures';
 
@@ -40,6 +43,7 @@ export class MissionControlProjection implements vscode.Disposable {
   private _selectedRunId?: string;
 
   private _disposables: vscode.Disposable[] = [];
+  private _bridgeSubscriptions: vscode.Disposable[] = [];
   private _isDisposed = false;
 
   constructor(private readonly _bridgeManager: BridgeManager) {
@@ -110,14 +114,62 @@ export class MissionControlProjection implements vscode.Disposable {
       return;
     }
 
+    const isConnectedBridge = bridge instanceof DaemonConnectedBridge;
+
     try {
-      const [session, tasks, approvals, artifacts, providers] = await Promise.all([
-        bridge.getCurrentSession().catch(() => null),
-        bridge.listTasks().catch(() => []),
-        bridge.listPendingApprovals().catch(() => []),
-        bridge.listArtifacts().catch(() => []),
-        bridge.listProviderSummaries().catch(() => []),
+      const [
+        sessionRes,
+        tasksRes,
+        approvalsRes,
+        artifactsRes,
+        providersRes,
+        healthRes,
+      ] = await Promise.allSettled([
+        bridge.getCurrentSession(),
+        bridge.listTasks(),
+        bridge.listPendingApprovals(),
+        bridge.listArtifacts(),
+        bridge.listProviderSummaries(),
+        isConnectedBridge ? (bridge as DaemonConnectedBridge).getHealth() : Promise.resolve(null),
       ]);
+
+      const queryErrors: QueryErrors = {};
+
+      const session = sessionRes.status === 'fulfilled' ? sessionRes.value : null;
+      if (sessionRes.status === 'rejected') {
+        queryErrors.session =
+          sessionRes.reason instanceof Error ? sessionRes.reason.message : String(sessionRes.reason);
+      }
+
+      const tasks = tasksRes.status === 'fulfilled' ? tasksRes.value : [];
+      if (tasksRes.status === 'rejected') {
+        queryErrors.tasks =
+          tasksRes.reason instanceof Error ? tasksRes.reason.message : String(tasksRes.reason);
+      }
+
+      const approvals = approvalsRes.status === 'fulfilled' ? approvalsRes.value : [];
+      if (approvalsRes.status === 'rejected') {
+        queryErrors.approvals =
+          approvalsRes.reason instanceof Error ? approvalsRes.reason.message : String(approvalsRes.reason);
+      }
+
+      const artifacts = artifactsRes.status === 'fulfilled' ? artifactsRes.value : [];
+      if (artifactsRes.status === 'rejected') {
+        queryErrors.artifacts =
+          artifactsRes.reason instanceof Error ? artifactsRes.reason.message : String(artifactsRes.reason);
+      }
+
+      const providers = providersRes.status === 'fulfilled' ? providersRes.value : [];
+      if (providersRes.status === 'rejected') {
+        queryErrors.providers =
+          providersRes.reason instanceof Error ? providersRes.reason.message : String(providersRes.reason);
+      }
+
+      const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
+      if (healthRes.status === 'rejected') {
+        queryErrors.health =
+          healthRes.reason instanceof Error ? healthRes.reason.message : String(healthRes.reason);
+      }
 
       this._currentState = this.projectRealState(
         connState,
@@ -125,7 +177,9 @@ export class MissionControlProjection implements vscode.Disposable {
         tasks,
         approvals,
         artifacts,
-        providers
+        providers,
+        health,
+        queryErrors
       );
       this._onDidChangeState.fire(this._currentState);
     } catch {
@@ -161,6 +215,8 @@ export class MissionControlProjection implements vscode.Disposable {
           running: 0,
           blocked: 0,
           review: 0,
+          retrying: 0,
+          paused: 0,
           succeeded: 0,
           failed: 0,
           cancelled: 0,
@@ -207,18 +263,31 @@ export class MissionControlProjection implements vscode.Disposable {
     tasks: TaskNode[],
     approvals: ApprovalRequest[],
     artifacts: Artifact[],
-    providers: ProviderSummary[]
+    providers: ProviderSummary[],
+    health: RustHealthResponse | null,
+    queryErrors: QueryErrors
   ): MissionControlState {
     const mappedTasks: TaskLifecycleModel[] = tasks.map((t) => {
       let state: TaskLifecycleModel['state'] = 'pending';
-      if (t.status === 'running') {
+      const statusLower = (t.status || '').toLowerCase();
+      if (statusLower === 'running') {
         state = 'running';
-      } else if (t.status === 'succeeded') {
+      } else if (statusLower === 'succeeded') {
         state = 'succeeded';
-      } else if (t.status === 'failed') {
+      } else if (statusLower === 'failed') {
         state = 'failed';
-      } else if (t.status === 'blocked') {
+      } else if (statusLower === 'blocked') {
         state = 'blocked';
+      } else if (statusLower === 'ready') {
+        state = 'ready';
+      } else if (statusLower === 'review') {
+        state = 'review';
+      } else if (statusLower === 'retrying') {
+        state = 'retrying';
+      } else if (statusLower === 'paused') {
+        state = 'paused';
+      } else if (statusLower === 'cancelled') {
+        state = 'cancelled';
       }
 
       return {
@@ -230,8 +299,8 @@ export class MissionControlProjection implements vscode.Disposable {
         dependencies: t.dependencies ?? [],
         assignedAgentId: t.assignedAgentId,
         assignedAgentName: t.assignedAgentName,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: new Date(t.createdAt || Date.now()).toISOString(),
+        updatedAt: new Date(t.updatedAt || Date.now()).toISOString(),
         progress: t.progress,
         error: t.error,
       };
@@ -243,12 +312,14 @@ export class MissionControlProjection implements vscode.Disposable {
       running: mappedTasks.filter((t) => t.state === 'running').length,
       blocked: mappedTasks.filter((t) => t.state === 'blocked').length,
       review: mappedTasks.filter((t) => t.state === 'review').length,
+      retrying: mappedTasks.filter((t) => t.state === 'retrying').length,
+      paused: mappedTasks.filter((t) => t.state === 'paused').length,
       succeeded: mappedTasks.filter((t) => t.state === 'succeeded').length,
       failed: mappedTasks.filter((t) => t.state === 'failed').length,
       cancelled: mappedTasks.filter((t) => t.state === 'cancelled').length,
     };
 
-    // Synthesize fleet members from task assignments
+    // Synthesize fleet members from task assignments without fabricated runtimes or models
     const agentMap = new Map<string, AgentFleetMember>();
     for (const t of tasks) {
       if (t.assignedAgentId) {
@@ -260,8 +331,8 @@ export class MissionControlProjection implements vscode.Disposable {
             status: t.status === 'running' ? 'running' : 'idle',
             assignedTaskId: t.id,
             assignedTaskTitle: t.title,
-            runtime: 'codex-rs',
-            providerModel: 'default',
+            runtime: 'unspecified',
+            providerModel: 'unspecified',
             lastActivityAt: Date.now(),
             toolCallCount: 0,
           });
@@ -291,16 +362,30 @@ export class MissionControlProjection implements vscode.Disposable {
       modifiedUri: `agent-studios-diff://artifact/${art.id}/${art.name}`,
     }));
 
+    // Truthful provider summaries: omit unmeasured latency instead of fabricating 120ms
     const mappedProviders: ProviderUsageSummary[] = providers.map((p) => ({
       id: p.instanceId,
       displayName: p.displayName,
-      modelId: p.models[0]?.name ?? 'default-model',
+      modelId: p.models[0]?.name ?? p.models[0]?.id ?? 'unspecified',
       status: p.status === 'available' ? 'available' : 'degraded',
       contextWindow: p.models[0]?.contextWindow,
-      latencyMs: 120,
+      latencyMs: undefined,
     }));
 
     const attentionItems: AttentionItem[] = [];
+
+    // Attention for query errors
+    if (Object.keys(queryErrors).length > 0) {
+      attentionItems.push({
+        id: 'att-query-errors',
+        severity: 'warning',
+        title: 'Query Error During Projection Refresh',
+        description: `Failed to query: ${Object.keys(queryErrors).join(', ')}`,
+        targetTab: 'diagnostics',
+        timestamp: Date.now(),
+      });
+    }
+
     if (mappedApprovals.filter((a) => a.status === 'pending').length > 0) {
       attentionItems.push({
         id: 'att-approvals',
@@ -325,6 +410,28 @@ export class MissionControlProjection implements vscode.Disposable {
       });
     }
 
+    // Read real diagnostic telemetry from bridge/transport/health
+    const bridge = this._bridgeManager.bridge;
+    let endpoint = 'ipc://agent-studios.sock';
+    let agreedCapabilities: string[] = [];
+    let watermark = 0;
+    let activeClients = 1;
+    let uptimeSecs = 0;
+
+    if (bridge instanceof DaemonConnectedBridge) {
+      if (bridge.endpoint) {
+        endpoint = bridge.endpoint;
+      }
+      if (bridge.transport) {
+        agreedCapabilities = bridge.transport.getAgreedCapabilities();
+        watermark = bridge.transport.getLastReceivedSequence();
+      }
+      if (health) {
+        activeClients = health.active_clients;
+        uptimeSecs = health.uptime_secs;
+      }
+    }
+
     return {
       version: '0.1.0',
       timestamp: Date.now(),
@@ -335,7 +442,7 @@ export class MissionControlProjection implements vscode.Disposable {
         ? {
             id: session.id,
             name: session.goalSummary,
-            workspacePath: '',
+            workspacePath: session.workspacePath || '',
             createdAt: new Date().toISOString(),
             runStatus: session.status === 'running' ? 'running' : 'idle',
           }
@@ -356,24 +463,34 @@ export class MissionControlProjection implements vscode.Disposable {
       approvals: mappedApprovals,
       providers: mappedProviders,
       diagnostics: {
-        endpoint: 'ipc://agent-studios.sock',
-        sessionId: session?.id ?? null,
+        endpoint,
+        sessionId:
+          session?.id ??
+          (bridge instanceof DaemonConnectedBridge && bridge.transport
+            ? bridge.transport.getSessionId()
+            : null),
         protocolVersion: '1.0.0',
-        agreedCapabilities: ['worktree_isolation', 'event_streaming'],
-        watermark: 0,
-        activeClients: 1,
-        uptimeSecs: 0,
-        lastError: null,
+        agreedCapabilities,
+        watermark,
+        activeClients,
+        uptimeSecs,
+        lastError:
+          queryErrors.tasks ||
+          queryErrors.session ||
+          queryErrors.health ||
+          null,
       },
       selectedAgentId: this._selectedAgentId,
       selectedTaskId: this._selectedTaskId,
       selectedRunId: this._selectedRunId,
+      queryErrors: Object.keys(queryErrors).length > 0 ? queryErrors : undefined,
     };
   }
 
   private bindBridgeListeners(): void {
     this._disposables.push(
       this._bridgeManager.onBridgeChanged(() => {
+        this.rebindActiveBridgeListeners();
         this.refresh();
       }),
       this._bridgeManager.stateProjection.onSessionChanged(() => {
@@ -381,26 +498,50 @@ export class MissionControlProjection implements vscode.Disposable {
       })
     );
 
-    // Also listen to bridge events
-    const bindBridge = () => {
-      try {
-        const disposable = this._bridgeManager.bridge.onEvent((_event: TimelineEvent) => {
-          this.refresh();
-        });
-        if (disposable && typeof disposable.dispose === 'function') {
-          this._disposables.push(disposable);
-        }
-      } catch {
-        // Safe ignore
+    this.rebindActiveBridgeListeners();
+  }
+
+  private rebindActiveBridgeListeners(): void {
+    for (const d of this._bridgeSubscriptions) {
+      d.dispose();
+    }
+    this._bridgeSubscriptions = [];
+
+    const bridge = this._bridgeManager.bridge;
+
+    try {
+      const eventDisp = bridge.onEvent((_event: TimelineEvent) => {
+        this.refresh();
+      });
+      if (eventDisp && typeof eventDisp.dispose === 'function') {
+        this._bridgeSubscriptions.push(eventDisp);
       }
-    };
-    bindBridge();
+    } catch {
+      // Safe ignore
+    }
+
+    try {
+      const stateDisp = bridge.onConnectionStateChanged((_state: ConnectionState) => {
+        this.refresh();
+      });
+      if (stateDisp && typeof stateDisp.dispose === 'function') {
+        this._bridgeSubscriptions.push(stateDisp);
+      }
+    } catch {
+      // Safe ignore
+    }
   }
 
   public dispose(): void {
     if (!this._isDisposed) {
       this._isDisposed = true;
       this._onDidChangeState.dispose();
+
+      for (const d of this._bridgeSubscriptions) {
+        d.dispose();
+      }
+      this._bridgeSubscriptions = [];
+
       for (const d of this._disposables) {
         d.dispose();
       }

@@ -190,7 +190,7 @@ describe('DaemonConnectedBridge Unit Tests', () => {
     assert.strictEqual(tasks[0].progress, 100);
     assert.strictEqual(tasks[1].id, 'task-2');
     assert.strictEqual(tasks[1].status, 'running');
-    assert.strictEqual(tasks[1].progress, 50);
+    assert.strictEqual(tasks[1].progress, 0);
 
     // Query task graph
     const graph = await bridge.getTaskGraph();

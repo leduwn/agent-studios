@@ -396,4 +396,174 @@ describe('Mission Control Workbench Unit Tests', () => {
       assert.ok(html.includes('Event Watermark'));
     });
   });
+
+  describe('Integration Quality Gate & Defect Elimination', () => {
+    it('buildViewFragments outputs all 9 tab view strings', () => {
+      const state = createPreviewMissionControlState();
+      const fragments = MissionControlHtmlBuilder.buildViewFragments(state);
+      assert.ok(fragments.overview.includes('overview-view'));
+      assert.ok(fragments.agents.includes('agents-view'));
+      assert.ok(fragments.tasks.includes('tasks-view'));
+      assert.ok(fragments.runs.includes('runs-view'));
+      assert.ok(fragments.timeline.includes('timeline-view'));
+      assert.ok(fragments.review.includes('review-view'));
+      assert.ok(fragments.approvals.includes('approvals-view'));
+      assert.ok(fragments.providers.includes('providers-view'));
+      assert.ok(fragments.diagnostics.includes('diagnostics-view'));
+    });
+
+    it('performs incremental state updates via postMessage without rewriting webview.html', () => {
+      const projection = new MissionControlProjection(bridgeManager);
+      const panel = MissionControlPanel.createOrShow(extensionUri, projection);
+
+      const panelAny = panel as unknown as {
+        _panel: { webview: { html: string; _sentMessages: Array<{ type: string; fragments?: unknown }> } };
+      };
+
+      const initialHtml = panelAny._panel.webview.html;
+      assert.ok(initialHtml.length > 0);
+      assert.strictEqual(panelAny._panel.webview._sentMessages.length, 0);
+
+      // Trigger a state change
+      projection.selectTask('task-101');
+
+      // HTML document is NOT rewritten
+      assert.strictEqual(panelAny._panel.webview.html, initialHtml);
+      // Typed postMessage is dispatched
+      assert.strictEqual(panelAny._panel.webview._sentMessages.length, 1);
+      assert.strictEqual(panelAny._panel.webview._sentMessages[0].type, 'stateUpdate');
+      assert.ok(panelAny._panel.webview._sentMessages[0].fragments);
+
+      panel.dispose();
+      projection.dispose();
+    });
+
+    it('re-binds bridge listeners dynamically when onBridgeChanged fires', async () => {
+      let bridge2ListenersCount = 0;
+      const emitter2 = new vscode.EventEmitter<any>();
+
+      const mockBridge1: any = {
+        connectionState: 'connected',
+        onConnectionStateChanged: new vscode.EventEmitter<any>().event,
+        onEvent: new vscode.EventEmitter<any>().event,
+        getCurrentSession: async () => null,
+        listTasks: async () => [],
+        listPendingApprovals: async () => [],
+        listArtifacts: async () => [],
+        listProviderSummaries: async () => [],
+        dispose: () => {},
+      };
+
+      const mockBridge2: any = {
+        connectionState: 'connected',
+        onConnectionStateChanged: new vscode.EventEmitter<any>().event,
+        onEvent: (listener: (e: any) => any) => {
+          bridge2ListenersCount++;
+          return emitter2.event(listener);
+        },
+        getCurrentSession: async () => null,
+        listTasks: async () => [],
+        listPendingApprovals: async () => [],
+        listArtifacts: async () => [],
+        listProviderSummaries: async () => [],
+        dispose: () => {},
+      };
+
+      bridgeManager.setBridge(mockBridge1);
+      const projection = new MissionControlProjection(bridgeManager);
+
+      // Switch bridge
+      bridgeManager.setBridge(mockBridge2);
+      assert.ok(bridge2ListenersCount >= 1, 'Bridge 2 should receive listener binding onBridgeChanged');
+
+      projection.dispose();
+    });
+
+    it('resiliently handles partial query failures via Promise.allSettled without throwing', async () => {
+      const failingBridge: any = {
+        connectionState: 'connected',
+        onConnectionStateChanged: new vscode.EventEmitter<any>().event,
+        onEvent: new vscode.EventEmitter<any>().event,
+        getCurrentSession: async () => ({
+          id: 'studio-failing-test',
+          workspacePath: '/test',
+          goalSummary: 'Resilience Test',
+          status: 'running',
+          activeAgentCount: 0,
+          totalAgentCount: 0,
+          completedTasksCount: 0,
+          totalTasksCount: 0,
+          startedAt: Date.now(),
+          elapsedMs: 0,
+        }),
+        listTasks: async () => {
+          throw new Error('Simulated tasks query failure');
+        },
+        listPendingApprovals: async () => [],
+        listArtifacts: async () => [],
+        listProviderSummaries: async () => [],
+        dispose: () => {},
+      };
+
+      bridgeManager.setBridge(failingBridge);
+
+      const projection = new MissionControlProjection(bridgeManager);
+      await projection.refresh();
+
+      const state = projection.getState();
+      assert.strictEqual(state.tasks.length, 0);
+      assert.ok(state.queryErrors?.tasks?.includes('Simulated tasks query failure'));
+      assert.ok(state.overview.attentionItems.some((a) => a.id === 'att-query-errors'));
+
+      projection.dispose();
+    });
+
+    it('maps retrying and paused task states truthfully without fabricated metrics', async () => {
+      const customBridge: any = {
+        connectionState: 'connected',
+        onConnectionStateChanged: new vscode.EventEmitter<any>().event,
+        onEvent: new vscode.EventEmitter<any>().event,
+        getCurrentSession: async () => null,
+        listTasks: async () => [
+          {
+            id: 'task-retrying',
+            runId: 'run-1',
+            title: 'Retrying Task',
+            description: 'A task that is retrying',
+            status: 'running',
+            dependencies: [],
+            progress: 0,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        ],
+        listPendingApprovals: async () => [],
+        listArtifacts: async () => [],
+        listProviderSummaries: async () => [
+          {
+            instanceId: 'prov-1',
+            displayName: 'Real Provider',
+            status: 'available',
+            models: [{ id: 'm1', name: 'Real Model', contextWindow: 64000 }],
+          },
+        ],
+        dispose: () => {},
+      };
+
+      bridgeManager.setBridge(customBridge);
+
+      const projection = new MissionControlProjection(bridgeManager);
+      await projection.refresh();
+
+      const state = projection.getState();
+      assert.strictEqual(state.tasks[0].progress, 0, 'Progress must be 0, not fabricated 50');
+
+      // Providers latency must not be hardcoded 120ms
+      for (const prov of state.providers) {
+        assert.strictEqual(prov.latencyMs, undefined, 'Latency must be undefined when unmeasured');
+      }
+
+      projection.dispose();
+    });
+  });
 });

@@ -25,6 +25,7 @@ export class MissionControlPanel implements vscode.Disposable {
   private readonly _projection: MissionControlProjection;
   private readonly _diffReviewManager?: DiffReviewManager;
   private _disposables: vscode.Disposable[] = [];
+  private _isHtmlInitialized = false;
 
   public static createOrShow(
     extensionUri: vscode.Uri,
@@ -130,11 +131,28 @@ export class MissionControlPanel implements vscode.Disposable {
       ? `Mission Control: ${state.activeStudio.name}`
       : 'Agent Studios: Mission Control';
 
-    this._panel.webview.html = MissionControlHtmlBuilder.buildHtml(
-      this._panel.webview,
-      this._extensionUri,
-      state
-    );
+    if (!this._isHtmlInitialized) {
+      this._panel.webview.html = MissionControlHtmlBuilder.buildHtml(
+        this._panel.webview,
+        this._extensionUri,
+        state
+      );
+      this._isHtmlInitialized = true;
+    } else {
+      const fragments = MissionControlHtmlBuilder.buildViewFragments(state);
+      const pendingApprovalsCount = state.approvals.filter((a) => a.status === 'pending').length;
+      this._panel.webview.postMessage({
+        type: 'stateUpdate',
+        state,
+        fragments,
+        badges: {
+          agents: state.fleet.length,
+          tasks: state.tasks.length,
+          review: state.artifacts.length,
+          approvals: pendingApprovalsCount,
+        },
+      });
+    }
   }
 
   private async _handleMessage(message: MissionControlWebviewMessage): Promise<void> {

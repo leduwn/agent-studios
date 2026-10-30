@@ -106,6 +106,10 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     return this._transport;
   }
 
+  public get endpoint(): string | null {
+    return this._transport?.endpoint ?? null;
+  }
+
   /**
    * Connects to the running agsd daemon via discovery and performs authenticated handshake.
    */
@@ -637,7 +641,7 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       status: this.mapTaskState(r.state),
       assignedAgentId: r.assigned_agent_id ?? undefined,
       dependencies: Array.isArray(r.dependencies) ? r.dependencies : [],
-      progress: r.state === 'succeeded' ? 100 : r.state === 'running' ? 50 : 0,
+      progress: r.state === 'succeeded' ? 100 : 0,
       error: r.state === 'failed' ? 'Task failed' : undefined,
       createdAt: new Date(r.created_at).getTime() || Date.now(),
       updatedAt: new Date(r.updated_at).getTime() || Date.now(),

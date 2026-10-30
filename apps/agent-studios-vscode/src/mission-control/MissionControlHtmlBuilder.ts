@@ -25,6 +25,26 @@ import { renderDiagnosticsView } from './views/DiagnosticsView';
 
 export class MissionControlHtmlBuilder {
   /**
+   * Generates individual view fragment HTML strings for all 9 tabs.
+   * Used for initial render and incremental webview DOM patching.
+   */
+  public static buildViewFragments(
+    state: MissionControlState
+  ): Record<MissionControlTabId, string> {
+    return {
+      overview: renderOverviewView(state),
+      agents: renderAgentsView(state),
+      tasks: renderTasksView(state),
+      runs: renderRunsView(state),
+      timeline: renderTimelineView(state),
+      review: renderReviewView(state),
+      approvals: renderApprovalsView(state),
+      providers: renderProvidersView(state),
+      diagnostics: renderDiagnosticsView(state),
+    };
+  }
+
+  /**
    * Generates complete HTML string for the Mission Control WebviewPanel.
    */
   public static buildHtml(
@@ -72,15 +92,7 @@ export class MissionControlHtmlBuilder {
       .join('');
 
     // Pre-render all 9 views
-    const overviewHtml = renderOverviewView(state);
-    const agentsHtml = renderAgentsView(state);
-    const tasksHtml = renderTasksView(state);
-    const runsHtml = renderRunsView(state);
-    const timelineHtml = renderTimelineView(state);
-    const reviewHtml = renderReviewView(state);
-    const approvalsHtml = renderApprovalsView(state);
-    const providersHtml = renderProvidersView(state);
-    const diagnosticsHtml = renderDiagnosticsView(state);
+    const fragments = MissionControlHtmlBuilder.buildViewFragments(state);
 
     const clientStateJson = JSON.stringify({
       activeTab: state.activeTab,
@@ -153,21 +165,38 @@ export class MissionControlHtmlBuilder {
 
   <!-- Viewport Area containing all tabs -->
   <main class="mc-viewport">
-    ${overviewHtml}
-    ${agentsHtml}
-    ${tasksHtml}
-    ${runsHtml}
-    ${timelineHtml}
-    ${reviewHtml}
-    ${approvalsHtml}
-    ${providersHtml}
-    ${diagnosticsHtml}
+    ${fragments.overview}
+    ${fragments.agents}
+    ${fragments.tasks}
+    ${fragments.runs}
+    ${fragments.timeline}
+    ${fragments.review}
+    ${fragments.approvals}
+    ${fragments.providers}
+    ${fragments.diagnostics}
   </main>
 
   <script nonce="${nonce}">
     (function() {
       const vscode = acquireVsCodeApi();
       let currentState = ${clientStateJson};
+
+      // Helper to update navigation badges dynamically
+      function updateBadge(tabId, count) {
+        const btn = document.querySelector('.nav-tab-btn[data-tab="' + tabId + '"]');
+        if (!btn) return;
+        let badge = btn.querySelector('.badge');
+        if (count !== undefined && count > 0) {
+          if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'badge ' + (tabId === 'approvals' ? 'badge-warning' : 'badge-secondary');
+            btn.appendChild(badge);
+          }
+          badge.textContent = String(count);
+        } else if (badge) {
+          badge.remove();
+        }
+      }
 
       // Set initial tab visibility
       function applyActiveTab(tabId) {
@@ -294,48 +323,86 @@ export class MissionControlHtmlBuilder {
         updateDagTransform();
       };
 
-      const dagSvg = document.getElementById('dag-svg');
-      if (dagSvg) {
-        dagSvg.addEventListener('mousedown', function(e) {
-          if (e.target.closest('.dag-node')) {
-            return;
-          }
-          isPanning = true;
-          startX = e.clientX - panX;
-          startY = e.clientY - panY;
-          dagSvg.style.cursor = 'grabbing';
-        });
+      function initDagSvg() {
+        const dagSvg = document.getElementById('dag-svg');
+        if (dagSvg && !dagSvg.dataset.initialized) {
+          dagSvg.dataset.initialized = 'true';
+          dagSvg.addEventListener('mousedown', function(e) {
+            if (e.target.closest('.dag-node')) {
+              return;
+            }
+            isPanning = true;
+            startX = e.clientX - panX;
+            startY = e.clientY - panY;
+            dagSvg.style.cursor = 'grabbing';
+          });
 
-        window.addEventListener('mousemove', function(e) {
-          if (!isPanning) return;
-          panX = e.clientX - startX;
-          panY = e.clientY - startY;
-          updateDagTransform();
-        });
-
-        window.addEventListener('mouseup', function() {
-          if (isPanning) {
-            isPanning = false;
-            dagSvg.style.cursor = 'grab';
-          }
-        });
-
-        dagSvg.addEventListener('wheel', function(e) {
-          e.preventDefault();
-          const delta = e.deltaY < 0 ? 0.1 : -0.1;
-          window.zoomDag(delta);
-        }, { passive: false });
+          dagSvg.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            const delta = e.deltaY < 0 ? 0.1 : -0.1;
+            window.zoomDag(delta);
+          }, { passive: false });
+        }
       }
 
-      // Inbound messages from extension host
+      initDagSvg();
+
+      window.addEventListener('mousemove', function(e) {
+        if (!isPanning) return;
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        updateDagTransform();
+      });
+
+      window.addEventListener('mouseup', function() {
+        if (isPanning) {
+          isPanning = false;
+          const dagSvg = document.getElementById('dag-svg');
+          if (dagSvg) {
+            dagSvg.style.cursor = 'grab';
+          }
+        }
+      });
+
+      // Incremental state updates from extension host via postMessage
       window.addEventListener('message', function(event) {
         const message = event.data;
         if (!message) return;
 
         if (message.type === 'stateUpdate') {
-          // If we receive a full re-render trigger or state update
-          if (message.payload && message.payload.activeTab) {
-            applyActiveTab(message.payload.activeTab);
+          if (message.state) {
+            currentState = message.state;
+          }
+
+          // Update badges
+          if (message.badges) {
+            updateBadge('agents', message.badges.agents);
+            updateBadge('tasks', message.badges.tasks);
+            updateBadge('review', message.badges.review);
+            updateBadge('approvals', message.badges.approvals);
+          }
+
+          // Incremental DOM update preserving scroll positions
+          if (message.fragments) {
+            for (const tabId in message.fragments) {
+              const viewEl = document.querySelector('.' + tabId + '-view');
+              if (viewEl) {
+                const prevScrollTop = viewEl.scrollTop;
+                const prevScrollLeft = viewEl.scrollLeft;
+                viewEl.outerHTML = message.fragments[tabId];
+                const newViewEl = document.querySelector('.' + tabId + '-view');
+                if (newViewEl) {
+                  newViewEl.scrollTop = prevScrollTop;
+                  newViewEl.scrollLeft = prevScrollLeft;
+                  newViewEl.classList.toggle('active', tabId === (currentState.activeTab || 'overview'));
+                }
+              }
+            }
+            initDagSvg();
+          }
+
+          if (currentState.activeTab) {
+            applyActiveTab(currentState.activeTab);
           }
         }
       });

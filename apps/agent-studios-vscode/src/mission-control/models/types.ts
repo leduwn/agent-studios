@@ -22,6 +22,8 @@ export type TaskLifecycleState =
   | 'running'
   | 'blocked'
   | 'review'
+  | 'retrying'
+  | 'paused'
   | 'succeeded'
   | 'failed'
   | 'cancelled';
@@ -53,6 +55,8 @@ export interface OverviewProjection {
     running: number;
     blocked: number;
     review: number;
+    retrying?: number;
+    paused?: number;
     succeeded: number;
     failed: number;
     cancelled: number;
@@ -169,6 +173,15 @@ export interface ProviderUsageSummary {
   tokensUsed?: number;
 }
 
+export interface QueryErrors {
+  session?: string;
+  tasks?: string;
+  approvals?: string;
+  artifacts?: string;
+  providers?: string;
+  health?: string;
+}
+
 export interface DiagnosticsRecord {
   endpoint: string;
   sessionId: string | null;
@@ -199,6 +212,7 @@ export interface MissionControlState {
   selectedAgentId?: string;
   selectedTaskId?: string;
   selectedRunId?: string;
+  queryErrors?: QueryErrors;
 }
 
 export type WebviewToHostMessage =

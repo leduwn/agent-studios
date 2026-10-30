@@ -69,6 +69,10 @@ export class NativeIpcTransport extends EventEmitter {
     return this.state;
   }
 
+  public get endpoint(): string {
+    return this.options.endpoint;
+  }
+
   public getSessionId(): string | null {
     return this.sessionId;
   }

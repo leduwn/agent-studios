@@ -257,8 +257,9 @@
     "lint": "eslint src --ext ts",
     "test": "node out/test/unit/runner.js",
     "test:unit": "node out/test/unit/runner.js",
+    "test:e2e": "node out/test/e2e/runner.js",
     "test:integration": "node out/test/integration/runTest.js",
-    "test:all": "npm run test:unit && npm run test:integration",
+    "test:all": "npm run test:unit && npm run test:e2e && npm run test:integration",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
