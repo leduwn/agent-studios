@@ -1,0 +1,257 @@
+{
+  "name": "agent-studios-vscode",
+  "displayName": "Agent Studios",
+  "description": "Code-OSS native AI Agents Workbench extension for Agent Studios",
+  "version": "0.1.0",
+  "publisher": "agent-studios",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leduwn/agent-studios.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:agent-studios.chat",
+    "onView:agent-studios.session",
+    "onView:agent-studios.tasks",
+    "onView:agent-studios.approvals",
+    "onView:agent-studios.artifacts",
+    "onView:agent-studios.timeline",
+    "onView:agent-studios.providers"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-studios-activitybar",
+          "title": "Agents",
+          "icon": "media/agents-activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "agent-studios-activitybar": [
+        {
+          "type": "webview",
+          "id": "agent-studios.chat",
+          "name": "Chat & Assistant"
+        },
+        {
+          "id": "agent-studios.session",
+          "name": "Current Session"
+        },
+        {
+          "id": "agent-studios.tasks",
+          "name": "Tasks"
+        },
+        {
+          "id": "agent-studios.approvals",
+          "name": "Approvals"
+        },
+        {
+          "id": "agent-studios.artifacts",
+          "name": "Artifacts"
+        },
+        {
+          "id": "agent-studios.timeline",
+          "name": "Timeline & Activity"
+        },
+        {
+          "id": "agent-studios.providers",
+          "name": "Providers (Read-Only)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agent-studios.openAgents",
+        "title": "Agent Studios: Open Agents Workbench",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.openSession",
+        "title": "Agent Studios: Open Session Details",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.showTaskGraph",
+        "title": "Agent Studios: Show Task Graph (DAG)",
+        "category": "Agent Studios",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "agent-studios.showApprovals",
+        "title": "Agent Studios: Show Approvals Inbox",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.inspectArtifact",
+        "title": "Agent Studios: Inspect Artifact Diff",
+        "category": "Agent Studios",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "agent-studios.approveAction",
+        "title": "Agent Studios: Approve Action",
+        "category": "Agent Studios",
+        "icon": "$(check)"
+      },
+      {
+        "command": "agent-studios.denyAction",
+        "title": "Agent Studios: Deny Action",
+        "category": "Agent Studios",
+        "icon": "$(close)"
+      },
+      {
+        "command": "agent-studios.connectDaemon",
+        "title": "Agent Studios: Connect to Daemon",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.disconnectDaemon",
+        "title": "Agent Studios: Disconnect from Daemon",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.toggleFixturePreview",
+        "title": "Agent Studios: Toggle Developer Fixture Preview",
+        "category": "Agent Studios",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "agent-studios.refreshViews",
+        "title": "Agent Studios: Refresh Views",
+        "category": "Agent Studios",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "agent-studios.explainSelection",
+        "title": "Ask Agent Studios to Explain",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.refactorSelection",
+        "title": "Refactor with Agent Studios",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.generateTests",
+        "title": "Generate Unit Tests with Agent Studios",
+        "category": "Agent Studios"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "when": "editorHasSelection",
+          "command": "agent-studios.explainSelection",
+          "group": "agent-studios@1"
+        },
+        {
+          "when": "editorHasSelection",
+          "command": "agent-studios.refactorSelection",
+          "group": "agent-studios@2"
+        },
+        {
+          "when": "editorHasSelection",
+          "command": "agent-studios.generateTests",
+          "group": "agent-studios@3"
+        }
+      ],
+      "view/title": [
+        {
+          "view": "agent-studios.tasks",
+          "command": "agent-studios.showTaskGraph",
+          "group": "navigation@1"
+        },
+        {
+          "view": "agent-studios.session",
+          "command": "agent-studios.toggleFixturePreview",
+          "group": "navigation@1"
+        },
+        {
+          "view": "agent-studios.session",
+          "command": "agent-studios.refreshViews",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "view": "agent-studios.approvals",
+          "command": "agent-studios.approveAction",
+          "when": "viewItem == approvalItemPending",
+          "group": "inline@1"
+        },
+        {
+          "view": "agent-studios.approvals",
+          "command": "agent-studios.denyAction",
+          "when": "viewItem == approvalItemPending",
+          "group": "inline@2"
+        },
+        {
+          "view": "agent-studios.artifacts",
+          "command": "agent-studios.inspectArtifact",
+          "when": "viewItem == artifactItem",
+          "group": "inline@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent Studios",
+      "properties": {
+        "agentStudios.daemonEndpoint": {
+          "type": "string",
+          "default": "ipc://agent-studios.sock",
+          "description": "Authoritative Agent Studios daemon endpoint"
+        },
+        "agentStudios.previewMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable developer fixture preview mode (shows mock data with clear indicator)"
+        },
+        "agentStudios.logLevel": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Extension log verbosity"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build": "tsc -p ./",
+    "typecheck": "tsc --noEmit -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node out/test/unit/runner.js",
+    "test:unit": "node out/test/unit/runner.js",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.7",
+    "@types/node": "^20.14.9",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^7.15.0",
+    "@typescript-eslint/parser": "^7.15.0",
+    "@vscode/vsce": "^4.1.0",
+    "eslint": "^8.57.0",
+    "mocha": "^10.7.3",
+    "typescript": "^5.5.3"
+  }
+}

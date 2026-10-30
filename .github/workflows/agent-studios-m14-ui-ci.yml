@@ -1,0 +1,63 @@
+name: Agent Studios M14 UI CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'feature/**'
+    paths:
+      - 'apps/agent-studios-vscode/**'
+      - '.github/workflows/agent-studios-m14-ui-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'apps/agent-studios-vscode/**'
+      - '.github/workflows/agent-studios-m14-ui-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        working-directory: apps/agent-studios-vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: apps/agent-studios-vscode/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint source files
+        run: npm run lint
+
+      - name: Typecheck TypeScript
+        run: npm run typecheck
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Run pure unit test suite
+        run: npm test
+
+      - name: Validate VSIX packaging
+        run: npx vsce package --no-dependencies
