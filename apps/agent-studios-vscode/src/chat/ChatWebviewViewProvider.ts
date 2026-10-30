@@ -22,6 +22,7 @@ import {
 } from '../bridge/types';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 import { ChatHtmlBuilder } from './ChatHtmlBuilder';
+import { ChatSecurityGuards } from './ChatSecurityGuards';
 
 export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'agent-studios.chat';
@@ -37,6 +38,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private _selectedProviderId?: string;
   private _attachments: ContextAttachment[] = [];
   private _messages: ChatMessage[] = [];
+  private _hasSeenOnboarding = false;
   private readonly _disposables: vscode.Disposable[] = [];
   private _isDisposed = false;
 
@@ -133,6 +135,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         composerDraft: this._composerDraft,
         messages: this._messages,
         attachments: this._attachments,
+        hasSeenOnboarding: this._hasSeenOnboarding,
       }
     );
 
@@ -177,6 +180,25 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     path?: string;
   }): Promise<void> {
     if (!message || !message.command) {
+      return;
+    }
+
+    // Security Validation: Prototype pollution, command allowlist, path traversal
+    const validation = ChatSecurityGuards.validateWebviewMessage(message);
+    if (!validation.valid) {
+      await this.postMessage({
+        type: 'error',
+        error: `Security guard rejected request: ${validation.error}`,
+      });
+      return;
+    }
+
+    // Security Validation: Workspace trust enforcement
+    if (!ChatSecurityGuards.verifyWorkspaceTrust(message.command)) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Action blocked: This workspace is untrusted. Agent Studios requires workspace trust to execute coordinator commands.',
+      });
       return;
     }
 
@@ -246,6 +268,18 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
 
       case 'saveDraft':
         this._composerDraft = message.draft ?? '';
+        break;
+
+      case 'enablePreviewMode':
+        await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
+        break;
+
+      case 'connectDaemon':
+        await vscode.commands.executeCommand('agent-studios.connectDaemon');
+        break;
+
+      case 'dismissOnboarding':
+        this._hasSeenOnboarding = true;
         break;
     }
   }
