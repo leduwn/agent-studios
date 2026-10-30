@@ -13,6 +13,12 @@ path = "src/bin/agsd.rs"
 
 [dependencies]
 agent-studios-ipc-protocol = { path = "../ipc-protocol" }
+agent-studios-control-plane = { path = "../control-plane" }
+agent-studios-protocol = { path = "../protocol" }
+agent-studios-provider = { path = "../provider" }
+agent-studios-external-runtime = { path = "../external-runtime" }
+agent-studios-opencode-runtime = { path = "../opencode-runtime" }
+agent-studios-workspace = { path = "../workspace" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

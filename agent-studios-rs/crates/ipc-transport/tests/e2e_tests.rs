@@ -312,14 +312,14 @@ async fn test_e2e_graceful_shutdown() {
     let secret = b"secret-shutdown-123".to_vec();
 
     let server = IpcServer::builder()
-        .with_auth_key(key_id, secret.clone())
+        .with_admin_auth_key(key_id, secret.clone())
         .build()
         .expect("Server failed to build");
 
     let (client_stream, server_stream) = tokio::io::duplex(65536);
     let server_handle = server.handle_connection(server_stream);
 
-    let config = ClientConfig::new(key_id, secret).with_capabilities(vec!["shutdown".to_string()]);
+    let config = ClientConfig::new(key_id, secret);
     let mut client = IpcClient::connect_stream(client_stream, config)
         .await
         .expect("Client connect failed");
@@ -349,7 +349,7 @@ async fn test_e2e_windows_named_pipe_full_lifecycle() {
     let secret = b"win-pipe-secret-123".to_vec();
 
     let server = IpcServer::builder()
-        .with_auth_key(key_id, secret.clone())
+        .with_admin_auth_key(key_id, secret.clone())
         .with_replay_capacity(100)
         .build()
         .expect("Server failed to build");
@@ -362,8 +362,7 @@ async fn test_e2e_windows_named_pipe_full_lifecycle() {
     // Allow named pipe listener to initialize
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let config = ClientConfig::new(key_id, secret)
-        .with_capabilities(vec!["admin".to_string(), "shutdown".to_string()]);
+    let config = ClientConfig::new(key_id, secret);
 
     let mut client = IpcClient::connect_named_pipe(&pipe_name, config)
         .await

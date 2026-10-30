@@ -118,6 +118,12 @@ impl ReplayBuffer {
         limit: Option<usize>,
     ) -> Result<Vec<IpcEvent>, ProtocolError> {
         if self.buffer.is_empty() {
+            if from_sequence > 1 {
+                return Err(ProtocolError::SequenceGapRecoverable {
+                    expected: 1,
+                    found: from_sequence,
+                });
+            }
             return Ok(Vec::new());
         }
 
@@ -354,8 +360,15 @@ mod tests {
         assert_eq!(buffer.oldest_sequence(), None);
         assert_eq!(buffer.latest_sequence(), None);
 
-        // Empty replay returns empty vec
+        // Empty replay returns empty vec for seq <= 1, but reports gap for seq > 1
         assert!(buffer.replay_from(1, None).unwrap().is_empty());
+        assert!(matches!(
+            buffer.replay_from(2, None),
+            Err(ProtocolError::SequenceGapRecoverable {
+                expected: 1,
+                found: 2
+            })
+        ));
 
         // Push 1 item
         buffer

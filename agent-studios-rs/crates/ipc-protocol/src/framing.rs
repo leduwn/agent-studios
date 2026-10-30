@@ -27,6 +27,8 @@ pub enum IpcCommand {
         options: serde_json::Value,
     },
     CancelTask {
+        #[serde(default)]
+        studio_id: Option<String>,
         task_id: String,
         reason: Option<String>,
     },
@@ -43,6 +45,36 @@ pub enum IpcCommand {
     ReplayEvents {
         from_sequence: u64,
         limit: Option<usize>,
+    },
+    ListStudios,
+    GetStudio {
+        studio_id: String,
+    },
+    SubmitTask {
+        studio_id: String,
+        task_spec: serde_json::Value,
+    },
+    ListTasks {
+        studio_id: String,
+    },
+    GetTask {
+        studio_id: String,
+        task_id: String,
+    },
+    ListRuns {
+        studio_id: String,
+    },
+    GetRun {
+        studio_id: String,
+        run_id: String,
+    },
+    ListProviders,
+    GetProvider {
+        provider_id: String,
+    },
+    ListModels {
+        #[serde(default)]
+        instance_id: Option<String>,
     },
     Custom {
         action: String,
@@ -194,6 +226,35 @@ mod tests {
         let json = serde_json::to_string(&resolve).expect("serialize");
         let decoded: IpcCommand = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(resolve, decoded);
+
+        let list_studios = IpcCommand::ListStudios;
+        let json = serde_json::to_string(&list_studios).expect("serialize");
+        let decoded: IpcCommand = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(list_studios, decoded);
+
+        let submit_task = IpcCommand::SubmitTask {
+            studio_id: "studio-1".to_string(),
+            task_spec: serde_json::json!({ "key": "spec_1", "title": "Spec Task" }),
+        };
+        let json = serde_json::to_string(&submit_task).expect("serialize");
+        let decoded: IpcCommand = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(submit_task, decoded);
+
+        let cancel_task = IpcCommand::CancelTask {
+            studio_id: Some("studio-1".to_string()),
+            task_id: "task-1".to_string(),
+            reason: Some("cancelled by user".to_string()),
+        };
+        let json = serde_json::to_string(&cancel_task).expect("serialize");
+        let decoded: IpcCommand = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cancel_task, decoded);
+
+        let list_models = IpcCommand::ListModels {
+            instance_id: Some("prov-inst-1".to_string()),
+        };
+        let json = serde_json::to_string(&list_models).expect("serialize");
+        let decoded: IpcCommand = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(list_models, decoded);
     }
 
     #[test]

@@ -198,7 +198,13 @@ dependencies = [
 name = "agent-studios-ipc-transport"
 version = "0.1.0"
 dependencies = [
+ "agent-studios-control-plane",
+ "agent-studios-external-runtime",
  "agent-studios-ipc-protocol",
+ "agent-studios-opencode-runtime",
+ "agent-studios-protocol",
+ "agent-studios-provider",
+ "agent-studios-workspace",
  "async-trait",
  "bytes",
  "chrono",

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use std::sync::Arc;
-use tracing::{info, warn};
+#[cfg(windows)]
+use tracing::info;
+use tracing::warn;
 
 use crate::error::OpenCodeError;
 

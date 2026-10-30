@@ -9,10 +9,17 @@ use tracing::debug;
 use agent_studios_ipc_protocol::{
     AuthBinding, HmacSigner, IpcEvent, ProtocolError, ProtocolVersion, SessionId,
 };
+use agent_studios_protocol::id::{RunId, StudioId, TaskId};
+use agent_studios_protocol::run::RunRecord;
+use agent_studios_protocol::studio::Studio;
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord};
+use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstanceId};
 
 use crate::connection::{IpcCommand, IpcResponse};
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
+
+pub type ModelDefinition = ModelDescriptor;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PongResponse {
@@ -46,7 +53,11 @@ impl ClientConfig {
             client_id: format!("client_{}", uuid::Uuid::new_v4().simple()),
             key_id: key_id.into(),
             secret: secret.into(),
-            capabilities: vec!["admin".to_string(), "shutdown".to_string()],
+            capabilities: vec![
+                "worktree_isolation".to_string(),
+                "approval_routing".to_string(),
+                "event_streaming".to_string(),
+            ],
             protocol_version: ProtocolVersion::CURRENT,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
         }
@@ -410,6 +421,300 @@ impl IpcClient {
                 expected: "ShutdownAcknowledged".into(),
                 actual: format!("{:?}", other),
             }),
+        }
+    }
+
+    pub async fn create_studio(&mut self, name: &str) -> Result<Studio, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::CreateStudio {
+                name: name.to_string(),
+            },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::StudioCreated { studio } => Ok(studio),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "StudioCreated".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn list_studios(&mut self) -> Result<Vec<Studio>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::ListStudios).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Studios { studios } => Ok(studios),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Studios".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn get_studio(&mut self, id: StudioId) -> Result<Option<Studio>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::GetStudio { studio_id: id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Studio { studio } => Ok(studio),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Studio".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn submit_task(
+        &mut self,
+        studio_id: StudioId,
+        spec: BatchTaskSpec,
+    ) -> Result<Vec<TaskId>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::SubmitTask {
+                studio_id,
+                task_spec: spec,
+            },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::TasksSubmitted { task_ids } => Ok(task_ids),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "TasksSubmitted".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn cancel_task(
+        &mut self,
+        studio_id: StudioId,
+        task_id: TaskId,
+        reason: &str,
+    ) -> Result<(), TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::CancelTask {
+                studio_id,
+                task_id,
+                reason: Some(reason.to_string()),
+            },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::TaskCancelled { .. } => Ok(()),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "TaskCancelled".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn list_tasks(
+        &mut self,
+        studio_id: StudioId,
+    ) -> Result<Vec<TaskRecord>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::ListTasks { studio_id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Tasks { tasks } => Ok(tasks),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Tasks".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn get_task(
+        &mut self,
+        studio_id: StudioId,
+        task_id: TaskId,
+    ) -> Result<Option<TaskRecord>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::GetTask { studio_id, task_id },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Task { task } => Ok(task),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Task".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn list_runs(
+        &mut self,
+        studio_id: StudioId,
+    ) -> Result<Vec<RunRecord>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::ListRuns { studio_id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Runs { runs } => Ok(runs),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Runs".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn get_run(
+        &mut self,
+        studio_id: StudioId,
+        run_id: RunId,
+    ) -> Result<Option<RunRecord>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::GetRun { studio_id, run_id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Run { run } => Ok(run),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Run".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn list_providers(&mut self) -> Result<Vec<ProviderInstance>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::ListProviders).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Providers { providers } => Ok(providers),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Providers".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn get_provider(
+        &mut self,
+        provider_id: ProviderInstanceId,
+    ) -> Result<Option<ProviderInstance>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::GetProvider { provider_id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Provider { provider } => Ok(provider),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Provider".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn list_models(
+        &mut self,
+        instance_id: Option<ProviderInstanceId>,
+    ) -> Result<Vec<ModelDefinition>, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::ListModels { instance_id }).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Models { models } => Ok(models),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Models".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub async fn resolve_approval(
+        &mut self,
+        approval_id: impl Into<String>,
+        decision: agent_studios_ipc_protocol::ApprovalDecision,
+    ) -> Result<agent_studios_ipc_protocol::ApprovalStatus, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::ResolveApproval {
+                approval_id: agent_studios_ipc_protocol::ApprovalId::new(approval_id.into()),
+                decision,
+            },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::ApprovalResolved { status, .. } => Ok(status),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "ApprovalResolved".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    pub fn event_stream(&self) -> EventSubscriptionStream {
+        EventSubscriptionStream {
+            inner: self.inner.clone(),
+            last_received_sequence: self.last_received_sequence.clone(),
+            max_frame_size: self.config.max_frame_size,
         }
     }
 
