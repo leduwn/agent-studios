@@ -57,7 +57,15 @@ jobs:
         run: npm run build
 
       - name: Run pure unit test suite
-        run: npm test
+        run: npm run test:unit
+
+      - name: Run VS Code extension host integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration
+
+      - name: Run VS Code extension host integration tests (Windows)
+        if: runner.os == 'Windows'
+        run: npm run test:integration
 
       - name: Validate VSIX packaging
-        run: npx vsce package --no-dependencies
+        run: npx @vscode/vsce package --no-dependencies

@@ -241,6 +241,8 @@
     "lint": "eslint src --ext ts",
     "test": "node out/test/unit/runner.js",
     "test:unit": "node out/test/unit/runner.js",
+    "test:integration": "node out/test/integration/runTest.js",
+    "test:all": "npm run test:unit && npm run test:integration",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
@@ -249,6 +251,7 @@
     "@types/vscode": "^1.90.0",
     "@typescript-eslint/eslint-plugin": "^7.15.0",
     "@typescript-eslint/parser": "^7.15.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.1.0",
     "eslint": "^8.57.0",
     "mocha": "^10.7.3",

@@ -197,15 +197,20 @@ export function registerApprovalCommands(
     }
   );
 
-  // Command: agent-studios.showApprovals
-  const showApprovalsCommand = vscode.commands.registerCommand(
-    'agent-studios.showApprovals',
-    async () => {
-      await vscode.commands.executeCommand('agent-studios.approvals.focus');
-    }
-  );
+  disposables.push(approveCommand, denyCommand);
 
-  disposables.push(approveCommand, denyCommand, showApprovalsCommand);
+  // Command: agent-studios.showApprovals (safe check if already registered by CommandsRegistry)
+  try {
+    const showApprovalsCommand = vscode.commands.registerCommand(
+      'agent-studios.showApprovals',
+      async () => {
+        await vscode.commands.executeCommand('agent-studios.approvals.focus');
+      }
+    );
+    disposables.push(showApprovalsCommand);
+  } catch {
+    // Already registered in CommandsRegistry
+  }
 
   const compositeDisposable = vscode.Disposable.from(...disposables);
   context.subscriptions.push(compositeDisposable);

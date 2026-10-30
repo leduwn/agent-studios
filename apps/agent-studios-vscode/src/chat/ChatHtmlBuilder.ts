@@ -24,6 +24,7 @@ import {
 import { CardRenderer } from '../cards/CardRenderer';
 import { escapeHtml } from '../webviews/markdownRenderer';
 import { CHAT_STYLES } from './styles.css';
+import { OnboardingWorkflow } from './OnboardingWorkflow';
 
 export interface ChatHtmlInitialState {
   session?: SessionInfo | null;
@@ -37,6 +38,7 @@ export interface ChatHtmlInitialState {
   composerDraft?: string;
   messages?: ChatMessage[];
   attachments?: ContextAttachment[];
+  hasSeenOnboarding?: boolean;
 }
 
 export class ChatHtmlBuilder {
@@ -64,6 +66,15 @@ export class ChatHtmlBuilder {
 
     const sessionTitle = session?.goalSummary || 'Agent Studios Assistant';
     const sessionId = session?.id || '';
+
+    const hasSeenOnboarding = Boolean(initialState?.hasSeenOnboarding);
+    const onboardingHtml = OnboardingWorkflow.renderOnboardingCard({
+      isConnected: connectionState === 'connected',
+      isPreview,
+      hasSeenOnboarding,
+      daemonEndpoint: 'ipc://agent-studios.sock',
+      activeSessionId: sessionId,
+    });
 
     // Model options HTML
     const modelOptionsHtml = ChatHtmlBuilder.renderModelOptions(
@@ -333,6 +344,77 @@ export class ChatHtmlBuilder {
       0%, 100% { opacity: 1; }
       50% { opacity: 0; }
     }
+
+    /* Onboarding State Cards */
+    .onboarding-card {
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin: 8px 12px;
+      font-size: 12px;
+      line-height: 1.4;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .onboarding-card--preview {
+      background: rgba(229, 192, 123, 0.12);
+      border: 1px solid var(--status-yellow);
+    }
+    .onboarding-card--disconnected {
+      background: rgba(224, 108, 117, 0.12);
+      border: 1px solid var(--status-red);
+    }
+    .onboarding-card--connected {
+      background: rgba(152, 195, 121, 0.12);
+      border: 1px solid var(--status-green);
+    }
+    .onboarding-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .onboarding-title-group {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .onboarding-title {
+      font-weight: 600;
+      color: var(--fg-primary);
+    }
+    .onboarding-subtitle {
+      font-size: 11px;
+      color: var(--fg-subtle);
+    }
+    .onboarding-dismiss-btn {
+      background: none;
+      border: none;
+      color: var(--fg-subtle);
+      cursor: pointer;
+      padding: 0 4px;
+      font-size: 14px;
+      line-height: 1;
+    }
+    .onboarding-dismiss-btn:hover {
+      color: var(--fg-primary);
+    }
+    .onboarding-security-note {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      font-size: 11px;
+      color: var(--fg-subtle);
+      background: rgba(0, 0, 0, 0.15);
+      padding: 4px 6px;
+      border-radius: 3px;
+      margin-top: 4px;
+    }
+    .onboarding-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+    }
   </style>
 </head>
 <body>
@@ -362,6 +444,9 @@ export class ChatHtmlBuilder {
         </div>
       </div>
     </header>
+
+    <!-- Onboarding / Status Banner -->
+    ${onboardingHtml}
 
     <!-- Conversation Stream Container -->
     <main id="conversationContainer" class="chat-messages" role="log" aria-live="polite">
@@ -881,6 +966,22 @@ export class ChatHtmlBuilder {
             break;
         }
       });
+
+      // Window helper actions for onboarding cards
+      window.enablePreviewMode = function() {
+        vscode.postMessage({ command: 'enablePreviewMode' });
+      };
+      window.connectToDaemon = function() {
+        vscode.postMessage({ command: 'connectDaemon' });
+      };
+      window.dismissOnboarding = function() {
+        vscode.postMessage({ command: 'dismissOnboarding' });
+        var banner = document.getElementById('onboardingBanner');
+        if (banner) { banner.remove(); }
+      };
+      window.openTaskGraph = function() {
+        vscode.postMessage({ command: 'openTaskGraph' });
+      };
 
       // Initial layout setup
       renderContextChips();
