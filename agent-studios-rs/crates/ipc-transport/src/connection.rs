@@ -621,12 +621,12 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                 s_id != &session.session_id
                                     || session.key_id.as_deref() != Some(k_id.as_str())
                             } else {
-                                false
+                                true
                             }
                         };
                         if is_foreign {
                             tx.send(IpcResponse::Error {
-                                message: "Permission denied: foreign approval resolution requires admin role"
+                                message: "Permission denied: foreign approval resolution requires admin role (untracked or cross-session origin)"
                                     .to_string(),
                             })
                             .await
@@ -1147,29 +1147,424 @@ async fn execute_task_lifecycle(
             Err(_) => return,
         };
 
-        let _ = cp.transition_run_state(run.id, RunState::Starting);
-        let _ = cp.transition_run_state(run.id, RunState::Running);
-        let _ = cp.transition_task_state(task_id, TaskState::Running);
+        if let Err(e) = cp.transition_run_state(run.id, RunState::Starting) {
+            let _ = cp.record_run_outcome(
+                run.id,
+                "failed",
+                Some(format!("Failed transition to Starting: {e}")),
+            );
+            let _ = cp.transition_run_state(run.id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            let envs = cp.drain_committed_events();
+            let _ = server_state.publish_control_plane_events(envs);
+            return;
+        }
+
+        if let Err(e) = cp.transition_run_state(run.id, RunState::Running) {
+            let _ = cp.record_run_outcome(
+                run.id,
+                "failed",
+                Some(format!("Failed transition to Running: {e}")),
+            );
+            let _ = cp.transition_run_state(run.id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            let envs = cp.drain_committed_events();
+            let _ = server_state.publish_control_plane_events(envs);
+            return;
+        }
+
+        if let Err(e) = cp.transition_task_state(task_id, TaskState::Running) {
+            let _ = cp.record_run_outcome(
+                run.id,
+                "failed",
+                Some(format!("Failed transition task to Running: {e}")),
+            );
+            let _ = cp.transition_run_state(run.id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            let envs = cp.drain_committed_events();
+            let _ = server_state.publish_control_plane_events(envs);
+            return;
+        }
 
         let envs = cp.drain_committed_events();
-        (run.id, envs)
+        (run.id, agent_id, envs)
     };
 
-    let (run_id, start_envs) = maybe_run;
+    let (run_id, agent_id, start_envs) = maybe_run;
     let _ = server_state.publish_control_plane_events(start_envs);
 
-    // Yield to allow task progress events to stream out
-    tokio::task::yield_now().await;
-
-    // Transition run and task to Succeeded
-    let complete_envs = {
-        let mut cp = server_state.control_plane.write().await;
-        let _ = cp.transition_run_state(run_id, RunState::Succeeded);
-        let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
-        cp.drain_committed_events()
+    let runtime = match server_state.runtime.as_ref() {
+        Some(r) => r.clone(),
+        None => {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some("No agent runtime configured for execution".to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
     };
 
-    let _ = server_state.publish_control_plane_events(complete_envs);
+    let instances = match runtime.discover().await {
+        Ok(inst) => inst,
+        Err(e) => {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!("Runtime discovery error: {e}")),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    };
+
+    let instance = match instances.into_iter().find(|i| i.is_available()) {
+        Some(inst) => inst,
+        None => {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some("No available runtime instance discovered".to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    };
+
+    let (wt_id, wt_root, wt_cwd) = {
+        let mut cp = server_state.control_plane.write().await;
+        let existing = cp
+            .state()
+            .worktrees
+            .values()
+            .find(|w| w.assigned_task_id == Some(task_id))
+            .cloned();
+        if let Some(w) = existing {
+            (w.id, w.root, w.cwd)
+        } else {
+            let temp_dir = std::env::temp_dir().join(format!("ags-ipc-wt-{}", task_id));
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let wt = cp
+                .create_worktree(
+                    studio_id,
+                    format!("worktree-{}", task_id),
+                    temp_dir.clone(),
+                    temp_dir.clone(),
+                    "0000000000000000000000000000000000000000",
+                )
+                .ok();
+            if let Some(ref w) = wt {
+                let _ = cp.transition_worktree_state(
+                    w.id,
+                    agent_studios_protocol::worktree::WorktreeState::Ready,
+                );
+                let _ = cp.assign_worktree(w.id, task_id, agent_id, Some(run_id));
+                let _ = cp.transition_worktree_state(
+                    w.id,
+                    agent_studios_protocol::worktree::WorktreeState::InUse,
+                );
+            }
+            wt.map(|w| (w.id, w.root, w.cwd)).unwrap_or_else(|| {
+                (
+                    agent_studios_protocol::id::WorktreeId::new(),
+                    temp_dir.clone(),
+                    temp_dir,
+                )
+            })
+        }
+    };
+
+    let workspace = agent_studios_protocol::worktree::ExecutionWorkspace::managed(
+        wt_id,
+        wt_root.clone(),
+        wt_cwd.clone(),
+        wt_root,
+        wt_cwd,
+        "0000000000000000000000000000000000000000",
+    );
+
+    let correlation = agent_studios_external_runtime::RuntimeCorrelation::new()
+        .with_studio_id(studio_id)
+        .with_task_id(task_id)
+        .with_run_id(run_id)
+        .with_agent_id(agent_id);
+
+    let instance_ref = agent_studios_external_runtime::RuntimeInstanceRef::new(
+        runtime.implementation_id().clone(),
+        instance.instance_id,
+    );
+
+    let prompt = {
+        let cp = server_state.control_plane.read().await;
+        cp.get_task(task_id)
+            .map(|t| {
+                if t.description.is_empty() {
+                    t.title.clone()
+                } else {
+                    format!("{}: {}", t.title, t.description)
+                }
+            })
+            .unwrap_or_default()
+    };
+
+    let start_req =
+        agent_studios_external_runtime::RuntimeStartRequest::new(instance_ref, workspace)
+            .with_workspace_access_mode(
+                agent_studios_external_runtime::WorkspaceAccessMode::Mutating,
+            )
+            .with_initial_prompt(prompt)
+            .with_correlation(correlation);
+
+    let handle = match runtime.start(start_req).await {
+        Ok(h) => h,
+        Err(e) => {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!("Failed to start runtime session: {e}")),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    };
+
+    let session_ref = handle.session_ref();
+
+    let mut sub = match runtime.events_after(&session_ref, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = runtime.stop(&session_ref).await;
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!("Failed to subscribe to runtime events: {e}")),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    };
+
+    let mut terminal_seen = false;
+    while let Ok(Some(ev)) = sub.next_event().await {
+        match &ev.kind {
+            agent_studios_external_runtime::RuntimeEventKind::OutputDelta { text } => {
+                let _ = server_state.emit_event(
+                    "output_delta",
+                    serde_json::json!({
+                        "studio_id": studio_id,
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "text": text
+                    }),
+                );
+            }
+            agent_studios_external_runtime::RuntimeEventKind::Diagnostic { level, message } => {
+                let _ = server_state.emit_event(
+                    "diagnostic",
+                    serde_json::json!({
+                        "studio_id": studio_id,
+                        "task_id": task_id,
+                        "run_id": run_id,
+                        "level": level,
+                        "message": message.as_str()
+                    }),
+                );
+            }
+            agent_studios_external_runtime::RuntimeEventKind::ToolStarted {
+                tool_name,
+                tool_call_id,
+            } => {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_tool_started(
+                    studio_id,
+                    agent_id,
+                    Some(task_id),
+                    Some(run_id),
+                    tool_name,
+                    tool_call_id,
+                    chrono::Utc::now(),
+                );
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+            }
+            agent_studios_external_runtime::RuntimeEventKind::ToolCompleted {
+                tool_name,
+                tool_call_id,
+                duration_ms,
+                success,
+            } => {
+                let mut cp = server_state.control_plane.write().await;
+                if *success {
+                    let _ = cp.record_tool_completed(
+                        studio_id,
+                        agent_id,
+                        Some(task_id),
+                        Some(run_id),
+                        tool_name,
+                        tool_call_id,
+                        *duration_ms,
+                        chrono::Utc::now(),
+                    );
+                } else {
+                    let _ = cp.record_tool_failed(
+                        studio_id,
+                        agent_id,
+                        Some(task_id),
+                        Some(run_id),
+                        tool_name,
+                        tool_call_id,
+                        "Tool execution failed",
+                        *duration_ms,
+                        chrono::Utc::now(),
+                    );
+                }
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+            }
+            agent_studios_external_runtime::RuntimeEventKind::ApprovalRequested {
+                approval_id,
+                description,
+                command,
+            } => {
+                let kind = if command.is_some() {
+                    agent_studios_protocol::approval::ApprovalKind::CommandExecution
+                } else {
+                    agent_studios_protocol::approval::ApprovalKind::Other
+                };
+                let mut cp = server_state.control_plane.write().await;
+                if let Ok(app) = cp.request_approval(
+                    studio_id,
+                    task_id,
+                    agent_id,
+                    kind,
+                    description.as_str().to_string(),
+                ) {
+                    let envs = cp.drain_committed_events();
+                    drop(cp);
+                    let _ = server_state.publish_control_plane_events(envs);
+                    let _ = server_state.emit_event(
+                        "approval_requested",
+                        serde_json::json!({
+                            "approval_id": app.id,
+                            "runtime_approval_id": approval_id,
+                            "task_id": task_id,
+                            "run_id": run_id
+                        }),
+                    );
+                }
+            }
+            agent_studios_external_runtime::RuntimeEventKind::Completed { summary } => {
+                terminal_seen = true;
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(run_id, "succeeded", summary.clone());
+                let _ = cp.transition_run_state(run_id, RunState::Succeeded);
+                let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+                break;
+            }
+            agent_studios_external_runtime::RuntimeEventKind::Failed {
+                safe_error_summary,
+            } => {
+                terminal_seen = true;
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(safe_error_summary.as_str().to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+                break;
+            }
+            agent_studios_external_runtime::RuntimeEventKind::Stopped => {
+                terminal_seen = true;
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "stopped",
+                    Some("Runtime session stopped".to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Cancelled);
+                let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+                break;
+            }
+            agent_studios_external_runtime::RuntimeEventKind::Interrupted { reason } => {
+                terminal_seen = true;
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "interrupted",
+                    Some(reason.as_str().to_string()),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Cancelled);
+                let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    if !terminal_seen {
+        let mut cp = server_state.control_plane.write().await;
+        if let Some(r) = cp.state().runs.get(&run_id)
+            && !r.state.is_terminal()
+        {
+            let _ = cp.record_run_outcome(
+                run_id,
+                "failed",
+                Some("Runtime event stream terminated before terminal outcome".to_string()),
+            );
+            let _ = cp.transition_run_state(run_id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            let envs = cp.drain_committed_events();
+            drop(cp);
+            let _ = server_state.publish_control_plane_events(envs);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2020,6 +2415,86 @@ mod tests {
             IpcResponse::Error { message } => {
                 assert!(message.contains("Permission denied"));
                 assert!(message.contains("foreign approval"));
+            }
+            other => panic!("Expected permission denied error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_untracked_approval_origin_fails_closed_for_standard_client() {
+        let secret = b"secret-untracked-origin-test-12";
+        let key_id = "std-client";
+        let server = IpcServerBuilder::new()
+            .with_auth_key(key_id, secret)
+            .build()
+            .unwrap();
+
+        let (mut stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let sstate = server.state();
+        let _h = tokio::spawn(async move { handle_connection(server_stream, sstate).await });
+
+        send_msg(
+            &mut stream,
+            &IpcCommand::NegotiateCapabilities {
+                protocol_version: ProtocolVersion::CURRENT,
+                capabilities: vec!["approval_routing".into()],
+            },
+        )
+        .await
+        .unwrap();
+        let _res_neg: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        let session = SessionId::generate();
+        let now = chrono::Utc::now().timestamp_millis();
+        let header = HmacSigner::sign_parts(
+            secret,
+            ProtocolVersion::CURRENT,
+            key_id,
+            &session,
+            "nonce-untracked-1",
+            now,
+            b"",
+            Some(vec!["approval_routing".into()]),
+        )
+        .unwrap();
+
+        send_msg(
+            &mut stream,
+            &IpcCommand::Authenticate {
+                header,
+                payload: None,
+            },
+        )
+        .await
+        .unwrap();
+        let _res_auth: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        // Attempt resolving untracked approval (missing in approval_origins map)
+        send_msg(
+            &mut stream,
+            &IpcCommand::ResolveApproval {
+                approval_id: ApprovalId::new("untracked-approval-id-999"),
+                decision: ApprovalDecision::Approved {
+                    modified_details: None,
+                    user_note: Some("Attempt on untracked approval".into()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+        match resp {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("Permission denied"));
+                assert!(message.contains("foreign approval"));
+                assert!(message.contains("untracked"));
             }
             other => panic!("Expected permission denied error, got {:?}", other),
         }

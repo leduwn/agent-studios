@@ -215,7 +215,7 @@ async fn test_ipc_approval_resolution() {
     let secret = b"secret-approval-res-123".to_vec();
 
     let server = IpcServer::builder()
-        .with_auth_key(key_id, secret.clone())
+        .with_admin_auth_key(key_id, secret.clone())
         .build()
         .expect("Server failed to build");
 
@@ -676,10 +676,82 @@ async fn test_ipc_multiple_subscriptions_no_duplicate_events() {
 }
 
 #[tokio::test]
-async fn test_ipc_task_auto_execution_lifecycle() {
-    let key_id = "test-key-auto-exec";
+async fn test_ipc_approval_resolution_rejected_for_standard_client_on_untracked_approval() {
+    let key_id = "test-key-approval-std-untracked";
+    let secret = b"secret-approval-std-123".to_vec();
+
+    // Standard client key (not admin)
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .build()
+        .expect("Server failed to build");
+
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+
+    let config = ClientConfig::new(key_id, secret);
+    let mut client = IpcClient::connect_stream(client_stream, config)
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client
+        .create_studio("Untracked Origin Studio")
+        .await
+        .expect("Create studio failed");
+
+    let cp_lock = server.control_plane();
+    let approval_id = {
+        let mut cp = cp_lock.write().await;
+        let agent = cp
+            .register_agent(studio.id, "worker-agent-std", AgentKind::Internal, None)
+            .expect("Register agent failed");
+        let task = cp
+            .create_task(
+                studio.id,
+                "Execute risky action",
+                "Risky action requiring approval",
+                None,
+                Some(agent.id),
+                Vec::new(),
+            )
+            .expect("Create task failed");
+        let approval = cp
+            .request_approval(
+                studio.id,
+                task.id,
+                agent.id,
+                ApprovalKind::CommandExecution,
+                "Operator authorization required",
+            )
+            .expect("Request approval failed");
+        approval.id
+    };
+
+    // Standard client attempting to resolve untracked control plane approval must fail closed
+    let err = client
+        .resolve_approval(
+            approval_id.to_string(),
+            ApprovalDecision::Approved {
+                modified_details: None,
+                user_note: Some("Unauthorized resolution attempt".to_string()),
+            },
+        )
+        .await
+        .expect_err("Standard client resolving untracked approval must fail");
+
+    assert!(
+        format!("{:?}", err).contains("Permission denied"),
+        "Expected permission denied error, got: {:?}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_ipc_task_auto_execution_fails_closed_when_unconfigured() {
+    let key_id = "test-key-auto-exec-unconfigured";
     let secret = b"secret-auto-exec-12345".to_vec();
 
+    // No runtime configured on builder
     let server = IpcServer::builder()
         .with_auth_key(key_id, secret.clone())
         .with_auto_execute(true)
@@ -695,14 +767,224 @@ async fn test_ipc_task_auto_execution_lifecycle() {
         .expect("Client handshake failed");
 
     let studio = client
-        .create_studio("Auto Execute Studio")
+        .create_studio("Auto Execute Fails Closed Studio")
         .await
         .expect("Create studio failed");
 
     let spec = BatchTaskSpec {
-        key: "auto-run-task".to_string(),
-        title: "Auto Execution Lifecycle Task".to_string(),
-        description: "Task executed automatically via lifecycle runner".to_string(),
+        key: "auto-run-unconfigured-task".to_string(),
+        title: "Auto Execution Lifecycle Unconfigured Task".to_string(),
+        description: "Task executed when runtime is absent".to_string(),
+        assigned_agent_id: None,
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client
+        .submit_task(studio.id, spec)
+        .await
+        .expect("Submit task failed");
+    assert_eq!(task_ids.len(), 1);
+    let task_id = task_ids[0];
+
+    // Wait for auto-execution lifecycle to fail closed
+    let cp_lock = server.control_plane();
+    let mut failed = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let cp = cp_lock.read().await;
+        if let Some(t) = cp.get_task(task_id)
+            && t.state == TaskState::Failed
+        {
+            failed = true;
+            break;
+        }
+    }
+    assert!(
+        failed,
+        "Expected unconfigured task auto-execution to fail closed truthfully"
+    );
+
+    let task = client
+        .get_task(studio.id, task_id)
+        .await
+        .expect("Get task failed")
+        .expect("Task should exist");
+    assert_eq!(task.state, TaskState::Failed);
+}
+
+struct MockSuccessfulRuntime {
+    impl_id: agent_studios_external_runtime::RuntimeImplementationId,
+    inst_id: agent_studios_external_runtime::RuntimeInstanceId,
+}
+
+impl MockSuccessfulRuntime {
+    fn new() -> Self {
+        Self {
+            impl_id: agent_studios_external_runtime::RuntimeImplementationId::new("mock-rt")
+                .unwrap(),
+            inst_id: agent_studios_external_runtime::RuntimeInstanceId::generate(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl agent_studios_external_runtime::AgentRuntime for MockSuccessfulRuntime {
+    fn implementation_id(&self) -> &agent_studios_external_runtime::RuntimeImplementationId {
+        &self.impl_id
+    }
+
+    async fn discover(
+        &self,
+    ) -> Result<
+        Vec<agent_studios_external_runtime::DiscoveredRuntimeInstance>,
+        agent_studios_external_runtime::RuntimeError,
+    > {
+        Ok(vec![
+            agent_studios_external_runtime::DiscoveredRuntimeInstance::available(
+                self.inst_id,
+                self.impl_id.clone(),
+                "Mock Instance",
+                agent_studios_external_runtime::RuntimeCapabilities::default(),
+            ),
+        ])
+    }
+
+    async fn capabilities(&self) -> agent_studios_external_runtime::RuntimeCapabilities {
+        agent_studios_external_runtime::RuntimeCapabilities::default()
+    }
+
+    async fn start(
+        &self,
+        request: agent_studios_external_runtime::RuntimeStartRequest,
+    ) -> Result<
+        agent_studios_external_runtime::RuntimeSessionHandle,
+        agent_studios_external_runtime::RuntimeError,
+    > {
+        let session_id = agent_studios_external_runtime::RuntimeSessionId::generate();
+        Ok(agent_studios_external_runtime::RuntimeSessionHandle::new(
+            session_id,
+            self.inst_id,
+            self.impl_id.clone(),
+            agent_studios_external_runtime::RuntimeLifecycleState::Running,
+            request.workspace,
+            request.workspace_access_mode,
+            agent_studios_external_runtime::RuntimeCapabilities::default(),
+            request.correlation,
+            chrono::Utc::now(),
+        ))
+    }
+
+    async fn send(
+        &self,
+        _session: &agent_studios_external_runtime::RuntimeSessionRef,
+        _input: agent_studios_external_runtime::RuntimeInput,
+    ) -> Result<(), agent_studios_external_runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn interrupt(
+        &self,
+        _session: &agent_studios_external_runtime::RuntimeSessionRef,
+    ) -> Result<(), agent_studios_external_runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn resume(
+        &self,
+        _session: &agent_studios_external_runtime::RuntimeSessionRef,
+        _input: Option<agent_studios_external_runtime::RuntimeInput>,
+    ) -> Result<(), agent_studios_external_runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn stop(
+        &self,
+        _session: &agent_studios_external_runtime::RuntimeSessionRef,
+    ) -> Result<(), agent_studios_external_runtime::RuntimeError> {
+        Ok(())
+    }
+
+    async fn status(
+        &self,
+        _session: &agent_studios_external_runtime::RuntimeSessionRef,
+    ) -> Result<
+        agent_studios_external_runtime::RuntimeLifecycleState,
+        agent_studios_external_runtime::RuntimeError,
+    > {
+        Ok(agent_studios_external_runtime::RuntimeLifecycleState::Running)
+    }
+
+    async fn events_after(
+        &self,
+        session: &agent_studios_external_runtime::RuntimeSessionRef,
+        _after_sequence: Option<u64>,
+    ) -> Result<
+        agent_studios_external_runtime::RuntimeEventSubscription,
+        agent_studios_external_runtime::RuntimeError,
+    > {
+        let hub = agent_studios_external_runtime::SessionEventHub::new(
+            session.session_id,
+            session.instance_id,
+            128,
+        );
+        hub.emit(
+            agent_studios_external_runtime::RuntimeEventKind::SessionStarted {
+                session_id: session.session_id,
+                instance_id: session.instance_id,
+            },
+        )
+        .await?;
+        hub.emit(
+            agent_studios_external_runtime::RuntimeEventKind::OutputDelta {
+                text: "Processing task...".into(),
+            },
+        )
+        .await?;
+        hub.emit(
+            agent_studios_external_runtime::RuntimeEventKind::Completed {
+                summary: Some("Task finished successfully".into()),
+            },
+        )
+        .await?;
+        hub.subscribe(None).await
+    }
+}
+
+#[tokio::test]
+async fn test_ipc_task_auto_execution_lifecycle_succeeds_with_runtime() {
+    let key_id = "test-key-auto-exec-success";
+    let secret = b"secret-auto-exec-success-123".to_vec();
+
+    let runtime = std::sync::Arc::new(MockSuccessfulRuntime::new());
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_auto_execute(true)
+        .with_runtime(runtime)
+        .build()
+        .expect("Server failed to build");
+
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+
+    let config = ClientConfig::new(key_id, secret);
+    let mut client = IpcClient::connect_stream(client_stream, config)
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client
+        .create_studio("Auto Execute Success Studio")
+        .await
+        .expect("Create studio failed");
+
+    let spec = BatchTaskSpec {
+        key: "auto-run-success-task".to_string(),
+        title: "Auto Execution Lifecycle Success Task".to_string(),
+        description: "Task executed with real runtime bridge".to_string(),
         assigned_agent_id: None,
         parent_task_key: None,
         parent_task_id: None,
@@ -733,7 +1015,7 @@ async fn test_ipc_task_auto_execution_lifecycle() {
     }
     assert!(
         succeeded,
-        "Expected task to transition to Succeeded via auto-execution lifecycle"
+        "Expected task to transition to Succeeded via auto-execution runtime bridge"
     );
 
     // Verify task via client query

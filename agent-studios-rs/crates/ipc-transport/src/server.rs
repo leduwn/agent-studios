@@ -37,9 +37,25 @@ pub struct ServerState {
     pub control_plane: Arc<tokio::sync::RwLock<ControlPlane>>,
     pub provider_catalog: Arc<tokio::sync::RwLock<ProviderCatalog>>,
     pub auto_execute: bool,
+    pub runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
 }
 
 impl ServerState {
+    pub fn register_approval_origin(
+        &self,
+        approval_id: impl Into<String>,
+        session_id: SessionId,
+        key_id: impl Into<String>,
+    ) {
+        self.approval_origins
+            .lock()
+            .unwrap()
+            .insert(
+                ApprovalId::new(approval_id.into()),
+                (session_id, key_id.into()),
+            );
+    }
+
     pub fn publish_event(&self, event: IpcEvent) -> Result<(), TransportError> {
         self.replay_buffer.lock().unwrap().push(event.clone())?;
         let _ = self.broadcast_tx.send(event);
@@ -95,6 +111,7 @@ pub struct IpcServerBuilder {
     control_plane: Option<ControlPlane>,
     provider_catalog: Option<ProviderCatalog>,
     auto_execute: bool,
+    runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
 }
 
 impl Default for IpcServerBuilder {
@@ -122,6 +139,7 @@ impl IpcServerBuilder {
             control_plane: None,
             provider_catalog: None,
             auto_execute: false,
+            runtime: None,
         }
     }
 
@@ -176,6 +194,14 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_runtime(
+        mut self,
+        runtime: Arc<dyn agent_studios_external_runtime::AgentRuntime>,
+    ) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -205,6 +231,7 @@ impl IpcServerBuilder {
             control_plane,
             provider_catalog,
             auto_execute: self.auto_execute,
+            runtime: self.runtime,
         });
 
         Ok(IpcServer { state })

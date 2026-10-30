@@ -32,10 +32,11 @@ impl DaemonBootstrapInfo {
     pub fn default_runtime_path() -> PathBuf {
         #[cfg(unix)]
         {
-            if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-                if !xdg.trim().is_empty() {
-                    return PathBuf::from(xdg).join("agent-studios").join("agsd.json");
-                }
+            if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                return xdg.join("agent-studios").join("agsd.json");
             }
             let uid = crate::unix::permissions::get_current_uid();
             PathBuf::from(format!("/tmp/agent-studios-{}/agsd.json", uid))
@@ -57,7 +58,23 @@ impl DaemonBootstrapInfo {
     }
 
     pub fn save_to_file(&self, path: &Path) -> Result<(), TransportError> {
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(TransportError::PermissionDenied(
+                "Bootstrap file path is a symlink: potential hijacking attack".into(),
+            ));
+        }
+
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        if let Ok(meta) = std::fs::symlink_metadata(parent)
+            && meta.file_type().is_symlink()
+        {
+            return Err(TransportError::PermissionDenied(
+                "Bootstrap parent directory is a symlink: potential hijacking attack".into(),
+            ));
+        }
+
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(TransportError::Io)?;
         }
@@ -73,26 +90,74 @@ impl DaemonBootstrapInfo {
 
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| TransportError::Serialization(e.to_string()))?;
-        std::fs::write(path, json.as_bytes()).map_err(TransportError::Io)?;
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut file_perms = std::fs::metadata(path)
-                .map_err(TransportError::Io)?
-                .permissions();
-            file_perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, file_perms);
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(TransportError::Io)?;
+            file.write_all(json.as_bytes()).map_err(TransportError::Io)?;
+            file.flush().map_err(TransportError::Io)?;
+        }
+
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            use std::os::windows::ffi::OsStrExt;
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::*;
+
+            let sa = crate::windows::security::UserOnlySecurityAttributes::new()?;
+            let wide_path: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let handle = unsafe {
+                CreateFileW(
+                    wide_path.as_ptr(),
+                    FILE_GENERIC_WRITE,
+                    0,
+                    sa.as_security_attributes_mut_ptr() as _,
+                    CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(TransportError::Io(std::io::Error::last_os_error()));
+            }
+            let mut file = unsafe { std::fs::File::from_raw_handle(handle as _) };
+            file.write_all(json.as_bytes()).map_err(TransportError::Io)?;
+            file.flush().map_err(TransportError::Io)?;
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            std::fs::write(path, json.as_bytes()).map_err(TransportError::Io)?;
         }
 
         Ok(())
     }
 
     pub fn load_from_file(path: &Path) -> Result<Self, TransportError> {
+        let metadata = std::fs::symlink_metadata(path).map_err(TransportError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(TransportError::PermissionDenied(
+                "Bootstrap file path is a symlink: potential hijacking attack".into(),
+            ));
+        }
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let metadata = std::fs::symlink_metadata(path).map_err(TransportError::Io)?;
             let mode = metadata.mode();
             let uid = metadata.uid();
             let cur_uid = crate::unix::permissions::get_current_uid();
