@@ -8,16 +8,17 @@ use agent_studios_ipc_protocol::{
     ApprovalContract, ApprovalDecision, ApprovalId, ApprovalStatus, HmacAuthHeader, HmacSigner,
     IpcEvent, ProtocolError, ProtocolVersion, SessionId,
 };
+use agent_studios_protocol::agent::AgentKind;
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
 use agent_studios_protocol::id::{RunId, StudioId, TaskId};
-use agent_studios_protocol::run::RunRecord;
+use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
-use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord};
+use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
 use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstanceId};
 
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
-use crate::server::ServerState;
+use crate::server::{ClientRole, ServerState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +33,7 @@ pub enum ConnectionState {
 pub struct ConnectionSession {
     pub session_id: SessionId,
     pub key_id: Option<String>,
+    pub role: ClientRole,
     pub protocol_version: ProtocolVersion,
     pub negotiated_capabilities: Vec<String>,
     pub state: ConnectionState,
@@ -220,6 +222,7 @@ where
     let mut session = ConnectionSession {
         session_id: SessionId::generate(),
         key_id: None,
+        role: ClientRole::Standard,
         protocol_version: ProtocolVersion::CURRENT,
         negotiated_capabilities: Vec::new(),
         state: ConnectionState::Connected,
@@ -364,8 +367,16 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                     match verify_res {
                         Ok(()) => {
+                            let role = {
+                                let roles = server_state.key_roles.lock().unwrap();
+                                roles
+                                    .get(&header.key_id)
+                                    .copied()
+                                    .unwrap_or(ClientRole::Standard)
+                            };
                             session.key_id = Some(header.key_id.clone());
                             session.session_id = header.session_id.clone();
+                            session.role = role;
                             session.state = ConnectionState::Ready;
 
                             tx.send(IpcResponse::Authenticated {
@@ -441,7 +452,9 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                     match backfill_result {
                         Ok(events) => {
+                            let mut last_delivered_seq = 0u64;
                             for ev in events {
+                                last_delivered_seq = ev.sequence;
                                 tx.send(IpcResponse::Event { event: ev })
                                     .await
                                     .map_err(|_| TransportError::ConnectionClosed)?;
@@ -449,22 +462,76 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                             let tx_stream = tx.clone();
                             let shutdown_tok = server_state.shutdown_token.clone();
+                            let replay_buffer_arc = server_state.replay_buffer.clone();
                             let handle = tokio::spawn(async move {
+                                let mut current_seq = last_delivered_seq.max(max_buffered_seq);
                                 loop {
                                     tokio::select! {
                                         _ = shutdown_tok.cancelled() => break,
                                         res = broadcast_rx.recv() => {
                                             match res {
                                                 Ok(event) => {
-                                                    if event.sequence <= max_buffered_seq {
+                                                    if event.sequence <= current_seq {
                                                         continue;
                                                     }
+                                                    // Gap detection and backfill
+                                                    if event.sequence > current_seq + 1 {
+                                                        let gap_start = current_seq + 1;
+                                                        let gap_end = event.sequence - 1;
+                                                        let gap_count = (gap_end.saturating_sub(gap_start) + 1) as usize;
+                                                        let gap_res = {
+                                                            let buf = replay_buffer_arc.lock().unwrap();
+                                                            buf.replay_from(gap_start, Some(gap_count))
+                                                        };
+                                                        match gap_res {
+                                                            Ok(gap_events) => {
+                                                                for gev in gap_events {
+                                                                    if tx_stream.send(IpcResponse::Event { event: gev }).await.is_err() {
+                                                                        return;
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                let err_msg = format!(
+                                                                    "Event gap detected: unrecoverable data loss between sequence {} and {}: {}",
+                                                                    gap_start, gap_end, e
+                                                                );
+                                                                warn!("{}", err_msg);
+                                                                let _ = tx_stream.send(IpcResponse::Error { message: err_msg }).await;
+                                                            }
+                                                        }
+                                                    }
+                                                    current_seq = event.sequence;
                                                     if tx_stream.send(IpcResponse::Event { event }).await.is_err() {
                                                         break;
                                                     }
                                                 }
                                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                                    warn!("Broadcast subscription lagged by {} events", skipped);
+                                                    warn!("Broadcast subscription lagged by {} events; recovering via replay buffer", skipped);
+                                                    let gap_start = current_seq + 1;
+                                                    let recovery_res = {
+                                                        let buf = replay_buffer_arc.lock().unwrap();
+                                                        buf.replay_from(gap_start, None)
+                                                    };
+                                                    match recovery_res {
+                                                        Ok(recovered_events) if !recovered_events.is_empty() => {
+                                                            for rev in recovered_events {
+                                                                current_seq = rev.sequence;
+                                                                if tx_stream.send(IpcResponse::Event { event: rev }).await.is_err() {
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                        Ok(_) => {}
+                                                        Err(e) => {
+                                                            let err_msg = format!(
+                                                                "Unrecoverable event loss: client lagged by {} events and replay buffer cannot satisfy gap from seq {}: {}",
+                                                                skipped, gap_start, e
+                                                            );
+                                                            warn!("{}", err_msg);
+                                                            let _ = tx_stream.send(IpcResponse::Error { message: err_msg }).await;
+                                                        }
+                                                    }
                                                 }
                                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                                     break;
@@ -485,8 +552,54 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         }
                     }
                 }
-                IpcCommand::RequestApproval { contract } => {
+                IpcCommand::RequestApproval { mut contract } => {
+                    if contract.approval_id.as_str().is_empty() {
+                        contract.approval_id = ApprovalId::generate();
+                    }
+
+                    // Check if associated task or run is in terminal state
+                    if let Ok(tid) = contract.task_id.parse::<TaskId>() {
+                        let cp = server_state.control_plane.read().await;
+                        if let Some(t) = cp.get_task(tid)
+                            && t.state.is_terminal()
+                        {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Cannot request approval: associated task {} is in terminal state {:?}",
+                                    tid, t.state
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                    }
+
+                    if let Ok(rid) = contract.run_id.parse::<RunId>() {
+                        let cp = server_state.control_plane.read().await;
+                        if let Some(r) = cp.get_run(rid)
+                            && r.state.is_terminal()
+                        {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Cannot request approval: associated run {} is in terminal state {:?}",
+                                    rid, r.state
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                    }
+
+                    contract.session_id = session.session_id.clone();
                     let approval_id = contract.approval_id.clone();
+                    if let Some(key_id) = &session.key_id {
+                        server_state.approval_origins.lock().unwrap().insert(
+                            approval_id.clone(),
+                            (session.session_id.clone(), key_id.clone()),
+                        );
+                    }
                     server_state
                         .approvals
                         .lock()
@@ -501,6 +614,27 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     approval_id,
                     decision,
                 } => {
+                    if session.role != ClientRole::Admin {
+                        let is_foreign = {
+                            let origins = server_state.approval_origins.lock().unwrap();
+                            if let Some((s_id, k_id)) = origins.get(&approval_id) {
+                                s_id != &session.session_id
+                                    || session.key_id.as_deref() != Some(k_id.as_str())
+                            } else {
+                                false
+                            }
+                        };
+                        if is_foreign {
+                            tx.send(IpcResponse::Error {
+                                message: "Permission denied: foreign approval resolution requires admin role"
+                                    .to_string(),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                    }
+
                     let parsed_cp_id: Option<agent_studios_protocol::id::ApprovalId> =
                         std::str::FromStr::from_str(approval_id.as_str()).ok();
 
@@ -513,6 +647,34 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                     if is_in_cp {
                         let aid = parsed_cp_id.unwrap();
+                        let cp_read = server_state.control_plane.read().await;
+                        let cp_app = cp_read.get_approval(aid).unwrap();
+                        if cp_app.state.is_terminal() {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Cannot resolve approval {}: already in terminal state {:?}",
+                                    approval_id, cp_app.state
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                        if let Some(task) = cp_read.get_task(cp_app.task_id)
+                            && task.state.is_terminal()
+                        {
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Cannot resolve approval {}: associated task {} is in terminal state {:?}",
+                                    approval_id, task.id, task.state
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+                        drop(cp_read);
+
                         let (res, envelopes) = {
                             let mut cp = server_state.control_plane.write().await;
                             let r = match decision {
@@ -550,12 +712,81 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                             }
                         }
                     } else {
+                        // Check associated task and run state if identifiers can be parsed
+                        let (task_terminal_check, run_terminal_check) = {
+                            let approvals = server_state.approvals.lock().unwrap();
+                            if let Some(contract) = approvals.get(&approval_id) {
+                                (
+                                    contract.task_id.parse::<TaskId>().ok(),
+                                    contract.run_id.parse::<RunId>().ok(),
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        };
+
+                        if let Some(tid) = task_terminal_check {
+                            let cp = server_state.control_plane.read().await;
+                            if let Some(t) = cp.get_task(tid)
+                                && t.state.is_terminal()
+                            {
+                                {
+                                    let mut approvals = server_state.approvals.lock().unwrap();
+                                    if let Some(contract) = approvals.get_mut(&approval_id) {
+                                        contract.status = ApprovalStatus::Cancelled;
+                                    }
+                                }
+                                tx.send(IpcResponse::Error {
+                                    message: format!(
+                                        "Cannot resolve approval {}: associated task {} is in terminal state {:?}",
+                                        approval_id, tid, t.state
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                                continue;
+                            }
+                        }
+
+                        if let Some(rid) = run_terminal_check {
+                            let cp = server_state.control_plane.read().await;
+                            if let Some(r) = cp.get_run(rid)
+                                && r.state.is_terminal()
+                            {
+                                {
+                                    let mut approvals = server_state.approvals.lock().unwrap();
+                                    if let Some(contract) = approvals.get_mut(&approval_id) {
+                                        contract.status = ApprovalStatus::Cancelled;
+                                    }
+                                }
+                                tx.send(IpcResponse::Error {
+                                    message: format!(
+                                        "Cannot resolve approval {}: associated run {} is in terminal state {:?}",
+                                        approval_id, rid, r.state
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                                continue;
+                            }
+                        }
+
                         let resolution_result = {
                             let mut approvals = server_state.approvals.lock().unwrap();
                             if let Some(contract) = approvals.get_mut(&approval_id) {
-                                match contract.resolve(decision) {
-                                    Ok(()) => Ok(contract.status),
-                                    Err(e) => Err(e.to_string()),
+                                if contract.status.is_terminal() {
+                                    Err(format!(
+                                        "Cannot resolve approval {}: already in terminal state {:?}",
+                                        approval_id, contract.status
+                                    ))
+                                } else if contract.is_expired() {
+                                    contract.status = ApprovalStatus::TimedOut;
+                                    Err(format!("Approval {} has expired", approval_id))
+                                } else {
+                                    match contract.resolve(decision) {
+                                        Ok(()) => Ok(contract.status),
+                                        Err(e) => Err(e.to_string()),
+                                    }
                                 }
                             } else {
                                 Err(format!(
@@ -640,24 +871,39 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     studio_id,
                     task_spec,
                 } => {
-                    let (res, envelopes) = {
+                    let (res, envelopes, created_tasks) = {
                         let mut cp = server_state.control_plane.write().await;
                         let r = cp.create_task_batch(studio_id, vec![task_spec]);
-                        let envs = if r.is_ok() {
-                            cp.drain_committed_events()
-                        } else {
-                            Vec::new()
+                        let (envs, tasks) = match &r {
+                            Ok(tasks) => (cp.drain_committed_events(), tasks.clone()),
+                            Err(_) => (Vec::new(), Vec::new()),
                         };
-                        (r, envs)
+                        (r, envs, tasks)
                     };
 
                     match res {
                         Ok(tasks) => {
-                            let task_ids = tasks.into_iter().map(|t| t.id).collect();
+                            let task_ids: Vec<TaskId> = tasks.into_iter().map(|t| t.id).collect();
                             let _ = server_state.publish_control_plane_events(envelopes);
-                            tx.send(IpcResponse::TasksSubmitted { task_ids })
-                                .await
-                                .map_err(|_| TransportError::ConnectionClosed)?;
+                            tx.send(IpcResponse::TasksSubmitted {
+                                task_ids: task_ids.clone(),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+
+                            if server_state.auto_execute {
+                                let state_clone = server_state.clone();
+                                tokio::spawn(async move {
+                                    for task in created_tasks {
+                                        execute_task_lifecycle(
+                                            state_clone.clone(),
+                                            studio_id,
+                                            task.id,
+                                        )
+                                        .await;
+                                    }
+                                });
+                            }
                         }
                         Err(e) => {
                             tx.send(IpcResponse::Error {
@@ -805,12 +1051,11 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::Shutdown => {
-                    let has_privilege = session.negotiated_capabilities.iter().any(|c| {
-                        c.eq_ignore_ascii_case("admin") || c.eq_ignore_ascii_case("shutdown")
-                    });
-
-                    if has_privilege {
-                        info!("Shutdown command authorized; triggering server shutdown");
+                    if session.role == ClientRole::Admin {
+                        info!(
+                            "Shutdown command authorized for admin key {:?}; triggering server shutdown",
+                            session.key_id
+                        );
                         server_state.shutdown_token.cancel();
                         tx.send(IpcResponse::ShutdownAcknowledged)
                             .await
@@ -818,8 +1063,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         break;
                     } else {
                         tx.send(IpcResponse::Error {
-                            message: "Permission denied: requires admin or shutdown capability"
-                                .to_string(),
+                            message: "Permission denied: shutdown requires admin role".to_string(),
                         })
                         .await
                         .map_err(|_| TransportError::ConnectionClosed)?;
@@ -861,6 +1105,71 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
     }
 
     Ok(())
+}
+
+async fn execute_task_lifecycle(
+    server_state: Arc<ServerState>,
+    studio_id: StudioId,
+    task_id: TaskId,
+) {
+    let maybe_run = {
+        let mut cp = server_state.control_plane.write().await;
+        let task = match cp.get_task(task_id) {
+            Some(t) if !t.state.is_terminal() => t.clone(),
+            _ => return,
+        };
+
+        let agent_id = if let Some(aid) = task.assigned_agent_id {
+            aid
+        } else {
+            let existing = cp.all_agents().find(|a| a.studio_id == studio_id);
+            if let Some(a) = existing {
+                a.id
+            } else {
+                match cp.register_agent(
+                    studio_id,
+                    "Default Executor",
+                    AgentKind::Internal,
+                    Some("executor".to_string()),
+                ) {
+                    Ok(a) => a.id,
+                    Err(_) => return,
+                }
+            }
+        };
+
+        if task.state == TaskState::Pending {
+            let _ = cp.transition_task_state(task_id, TaskState::Ready);
+        }
+
+        let run = match cp.create_run(task_id, agent_id) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let _ = cp.transition_run_state(run.id, RunState::Starting);
+        let _ = cp.transition_run_state(run.id, RunState::Running);
+        let _ = cp.transition_task_state(task_id, TaskState::Running);
+
+        let envs = cp.drain_committed_events();
+        (run.id, envs)
+    };
+
+    let (run_id, start_envs) = maybe_run;
+    let _ = server_state.publish_control_plane_events(start_envs);
+
+    // Yield to allow task progress events to stream out
+    tokio::task::yield_now().await;
+
+    // Transition run and task to Succeeded
+    let complete_envs = {
+        let mut cp = server_state.control_plane.write().await;
+        let _ = cp.transition_run_state(run_id, RunState::Succeeded);
+        let _ = cp.transition_task_state(task_id, TaskState::Succeeded);
+        cp.drain_committed_events()
+    };
+
+    let _ = server_state.publish_control_plane_events(complete_envs);
 }
 
 #[cfg(test)]
@@ -934,6 +1243,7 @@ mod tests {
                 capabilities: vec![
                     "event_streaming".into(),
                     "non_existent_cap".into(),
+                    "worktree_isolation".into(),
                     "admin".into(),
                 ],
             },
@@ -952,7 +1262,8 @@ mod tests {
             } => {
                 assert_eq!(selected_version, ProtocolVersion::CURRENT);
                 assert!(agreed_capabilities.contains(&"event_streaming".to_string()));
-                assert!(agreed_capabilities.contains(&"admin".to_string()));
+                assert!(agreed_capabilities.contains(&"worktree_isolation".to_string()));
+                assert!(!agreed_capabilities.contains(&"admin".to_string()));
                 assert!(!agreed_capabilities.contains(&"non_existent_cap".to_string()));
                 agreed_capabilities
             }
@@ -1395,10 +1706,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_capability_authorization() {
-        let secret = b"secret-shutdown-1234567890123";
-        let key_id = "shutdown-client";
+        let std_secret = b"secret-shutdown-1234567890123";
+        let std_key_id = "shutdown-client";
+        let admin_secret = b"admin-secret-shutdown-12345678";
+        let admin_key_id = "admin-client";
+
         let server = IpcServerBuilder::new()
-            .with_auth_key(key_id, secret)
+            .with_auth_key(std_key_id, std_secret)
+            .with_admin_auth_key(admin_key_id, admin_secret)
             .build()
             .unwrap();
 
@@ -1408,7 +1723,7 @@ mod tests {
         let handle =
             tokio::spawn(async move { handle_connection(server_stream, server_state).await });
 
-        // 1. Authenticate with ONLY read capability (no admin / shutdown)
+        // 1. Authenticate standard client
         send_msg(
             &mut client_stream,
             &IpcCommand::NegotiateCapabilities {
@@ -1426,9 +1741,9 @@ mod tests {
         let session_id = SessionId::generate();
         let now = chrono::Utc::now().timestamp_millis();
         let header = HmacSigner::sign_parts(
-            secret,
+            std_secret,
             ProtocolVersion::CURRENT,
-            key_id,
+            std_key_id,
             &session_id,
             "nonce-no-admin",
             now,
@@ -1451,7 +1766,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 2. Unauthorized client attempts Shutdown -> Error
+        // 2. Standard client attempts Shutdown -> Rejected
         send_msg(&mut client_stream, &IpcCommand::Shutdown)
             .await
             .unwrap();
@@ -1467,12 +1782,12 @@ mod tests {
         }
         assert!(!server.shutdown_token().is_cancelled());
 
-        // 3. Re-negotiate with admin capability
+        // 3. Attempt privilege escalation via NegotiateCapabilities -> Still rejected!
         send_msg(
             &mut client_stream,
             &IpcCommand::NegotiateCapabilities {
                 protocol_version: ProtocolVersion::CURRENT,
-                capabilities: vec!["admin".into()],
+                capabilities: vec!["admin".into(), "shutdown".into()],
             },
         )
         .await
@@ -1482,19 +1797,232 @@ mod tests {
             .await
             .unwrap();
 
-        // Authorized shutdown attempt
         send_msg(&mut client_stream, &IpcCommand::Shutdown)
             .await
             .unwrap();
 
-        let ack_resp: IpcResponse = recv_msg(&mut client_stream, DEFAULT_MAX_FRAME_SIZE)
+        let err_resp2: IpcResponse = recv_msg(&mut client_stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+        match err_resp2 {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("Permission denied"));
+            }
+            other => panic!("Expected Error response, got {:?}", other),
+        }
+        assert!(!server.shutdown_token().is_cancelled());
+
+        drop(client_stream);
+        let _ = handle.await;
+
+        // 4. Authenticate admin client and verify authorized shutdown
+        let (mut admin_stream, admin_server_stream) = tokio::io::duplex(64 * 1024);
+        let admin_server_state = server.state();
+        let admin_handle = tokio::spawn(async move {
+            handle_connection(admin_server_stream, admin_server_state).await
+        });
+
+        send_msg(
+            &mut admin_stream,
+            &IpcCommand::NegotiateCapabilities {
+                protocol_version: ProtocolVersion::CURRENT,
+                capabilities: vec!["event_streaming".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        let _neg3: IpcResponse = recv_msg(&mut admin_stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        let admin_session_id = SessionId::generate();
+        let now = chrono::Utc::now().timestamp_millis();
+        let admin_header = HmacSigner::sign_parts(
+            admin_secret,
+            ProtocolVersion::CURRENT,
+            admin_key_id,
+            &admin_session_id,
+            "nonce-admin",
+            now,
+            b"",
+            Some(vec!["event_streaming".into()]),
+        )
+        .unwrap();
+
+        send_msg(
+            &mut admin_stream,
+            &IpcCommand::Authenticate {
+                header: admin_header,
+                payload: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let _auth_admin: IpcResponse = recv_msg(&mut admin_stream, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        send_msg(&mut admin_stream, &IpcCommand::Shutdown)
+            .await
+            .unwrap();
+
+        let ack_resp: IpcResponse = recv_msg(&mut admin_stream, DEFAULT_MAX_FRAME_SIZE)
             .await
             .unwrap();
         assert!(matches!(ack_resp, IpcResponse::ShutdownAcknowledged));
         assert!(server.shutdown_token().is_cancelled());
 
-        let res = handle.await.unwrap();
+        let res = admin_handle.await.unwrap();
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_foreign_approval_resolution_rejected_for_standard_client() {
+        let secret1 = b"secret-client-1-1234567890123";
+        let secret2 = b"secret-client-2-1234567890123";
+        let key1 = "client-1";
+        let key2 = "client-2";
+
+        let server = IpcServerBuilder::new()
+            .with_auth_key(key1, secret1)
+            .with_auth_key(key2, secret2)
+            .build()
+            .unwrap();
+
+        // Client 1 requests an approval
+        let (mut stream1, server_stream1) = tokio::io::duplex(64 * 1024);
+        let sstate1 = server.state();
+        let _h1 = tokio::spawn(async move { handle_connection(server_stream1, sstate1).await });
+
+        let _ = send_msg(
+            &mut stream1,
+            &IpcCommand::NegotiateCapabilities {
+                protocol_version: ProtocolVersion::CURRENT,
+                capabilities: vec!["approval_routing".into()],
+            },
+        )
+        .await;
+        let _res_neg: IpcResponse = recv_msg(&mut stream1, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        let session1 = SessionId::generate();
+        let now = chrono::Utc::now().timestamp_millis();
+        let h1 = HmacSigner::sign_parts(
+            secret1,
+            ProtocolVersion::CURRENT,
+            key1,
+            &session1,
+            "nonce-1",
+            now,
+            b"",
+            Some(vec!["approval_routing".into()]),
+        )
+        .unwrap();
+        send_msg(
+            &mut stream1,
+            &IpcCommand::Authenticate {
+                header: h1,
+                payload: None,
+            },
+        )
+        .await
+        .unwrap();
+        let _res_auth: IpcResponse = recv_msg(&mut stream1, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        let contract = ApprovalContract::new(
+            session1.clone(),
+            "task-42".into(),
+            "run-42".into(),
+            RiskLevel::High,
+            ApprovalAction::CommandExecution {
+                command: "rm -rf /".into(),
+                cwd: "/root".into(),
+            },
+            "Dangerous operation".into(),
+            300,
+        );
+        let approval_id = contract.approval_id.clone();
+
+        send_msg(&mut stream1, &IpcCommand::RequestApproval { contract })
+            .await
+            .unwrap();
+        let resp1: IpcResponse = recv_msg(&mut stream1, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+        assert!(matches!(resp1, IpcResponse::ApprovalRequested { .. }));
+
+        // Client 2 connects and tries to resolve Client 1's approval
+        let (mut stream2, server_stream2) = tokio::io::duplex(64 * 1024);
+        let sstate2 = server.state();
+        let _h2 = tokio::spawn(async move { handle_connection(server_stream2, sstate2).await });
+
+        send_msg(
+            &mut stream2,
+            &IpcCommand::NegotiateCapabilities {
+                protocol_version: ProtocolVersion::CURRENT,
+                capabilities: vec!["approval_routing".into()],
+            },
+        )
+        .await
+        .unwrap();
+        let _res_neg2: IpcResponse = recv_msg(&mut stream2, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        let session2 = SessionId::generate();
+        let now = chrono::Utc::now().timestamp_millis();
+        let h2 = HmacSigner::sign_parts(
+            secret2,
+            ProtocolVersion::CURRENT,
+            key2,
+            &session2,
+            "nonce-2",
+            now,
+            b"",
+            Some(vec!["approval_routing".into()]),
+        )
+        .unwrap();
+        send_msg(
+            &mut stream2,
+            &IpcCommand::Authenticate {
+                header: h2,
+                payload: None,
+            },
+        )
+        .await
+        .unwrap();
+        let _res_auth2: IpcResponse = recv_msg(&mut stream2, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+
+        send_msg(
+            &mut stream2,
+            &IpcCommand::ResolveApproval {
+                approval_id,
+                decision: ApprovalDecision::Approved {
+                    modified_details: None,
+                    user_note: Some("Sneaky resolution".into()),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let resp2: IpcResponse = recv_msg(&mut stream2, DEFAULT_MAX_FRAME_SIZE)
+            .await
+            .unwrap();
+        match resp2 {
+            IpcResponse::Error { message } => {
+                assert!(message.contains("Permission denied"));
+                assert!(message.contains("foreign approval"));
+            }
+            other => panic!("Expected permission denied error, got {:?}", other),
+        }
     }
 
     #[tokio::test]

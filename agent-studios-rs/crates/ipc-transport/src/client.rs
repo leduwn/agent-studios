@@ -53,7 +53,11 @@ impl ClientConfig {
             client_id: format!("client_{}", uuid::Uuid::new_v4().simple()),
             key_id: key_id.into(),
             secret: secret.into(),
-            capabilities: vec!["admin".to_string(), "shutdown".to_string()],
+            capabilities: vec![
+                "worktree_isolation".to_string(),
+                "approval_routing".to_string(),
+                "event_streaming".to_string(),
+            ],
             protocol_version: ProtocolVersion::CURRENT,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
         }

@@ -13,24 +13,21 @@ struct Cli {
     socket_path: Option<PathBuf>,
 
     #[arg(long)]
-    auth_key: Option<String>,
+    runtime_info_path: Option<PathBuf>,
 
     #[arg(long, default_value = "ags-client")]
     key_id: String,
 
     #[arg(long, default_value_t = 1000)]
     capacity: usize,
+
+    #[arg(long, default_value_t = true)]
+    auto_execute: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    let auth_key = cli.auth_key.unwrap_or_else(|| {
-        let generated = uuid::Uuid::new_v4().to_string();
-        eprintln!("Generated ephemeral auth key: {}", generated);
-        generated
-    });
 
     let socket_path = cli.socket_path.unwrap_or_else(|| {
         std::env::var("XDG_RUNTIME_DIR")
@@ -41,9 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = DaemonConfig {
         pipe_name: cli.pipe_name,
         socket_path,
-        auth_key: auth_key.into_bytes(),
+        runtime_info_path: cli.runtime_info_path,
         key_id: cli.key_id,
         capacity: cli.capacity,
+        auto_execute: cli.auto_execute,
     };
 
     run_daemon(config).await?;

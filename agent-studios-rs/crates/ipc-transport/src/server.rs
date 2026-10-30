@@ -6,12 +6,20 @@ use tokio_util::sync::CancellationToken;
 
 use agent_studios_control_plane::ControlPlane;
 use agent_studios_ipc_protocol::{
-    ApprovalContract, ApprovalId, HmacSigner, IpcEvent, NonceTracker, ReplayBuffer,
+    ApprovalContract, ApprovalId, HmacSigner, IpcEvent, NonceTracker, ReplayBuffer, SessionId,
 };
 use agent_studios_protocol::event::EventEnvelope;
 use agent_studios_provider::ProviderCatalog;
 
 use crate::error::TransportError;
+
+/// Client authorization role associated with an authenticated key identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientRole {
+    Admin,
+    Standard,
+}
 
 pub struct ServerState {
     pub auth_signer: Arc<HmacSigner>,
@@ -22,10 +30,13 @@ pub struct ServerState {
     pub shutdown_token: CancellationToken,
     pub start_time: i64,
     pub approvals: Arc<Mutex<HashMap<ApprovalId, ApprovalContract>>>,
+    pub approval_origins: Arc<Mutex<HashMap<ApprovalId, (SessionId, String)>>>,
     pub auth_keys: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    pub key_roles: Arc<Mutex<HashMap<String, ClientRole>>>,
     pub supported_capabilities: Vec<String>,
     pub control_plane: Arc<tokio::sync::RwLock<ControlPlane>>,
     pub provider_catalog: Arc<tokio::sync::RwLock<ProviderCatalog>>,
+    pub auto_execute: bool,
 }
 
 impl ServerState {
@@ -78,10 +89,12 @@ impl ServerState {
 
 pub struct IpcServerBuilder {
     auth_keys: HashMap<String, Vec<u8>>,
+    key_roles: HashMap<String, ClientRole>,
     replay_capacity: usize,
     supported_capabilities: Vec<String>,
     control_plane: Option<ControlPlane>,
     provider_catalog: Option<ProviderCatalog>,
+    auto_execute: bool,
 }
 
 impl Default for IpcServerBuilder {
@@ -94,6 +107,7 @@ impl IpcServerBuilder {
     pub fn new() -> Self {
         Self {
             auth_keys: HashMap::new(),
+            key_roles: HashMap::new(),
             replay_capacity: 1000,
             supported_capabilities: vec![
                 "worktree_isolation".to_string(),
@@ -104,16 +118,36 @@ impl IpcServerBuilder {
                 "hmac_auth".to_string(),
                 "tool_execution".to_string(),
                 "diff_inspection".to_string(),
-                "admin".to_string(),
-                "shutdown".to_string(),
             ],
             control_plane: None,
             provider_catalog: None,
+            auto_execute: false,
         }
     }
 
     pub fn with_auth_key(mut self, id: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
-        self.auth_keys.insert(id.into(), key.into());
+        let id_str = id.into();
+        self.auth_keys.insert(id_str.clone(), key.into());
+        self.key_roles.insert(id_str, ClientRole::Standard);
+        self
+    }
+
+    pub fn with_admin_auth_key(mut self, id: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
+        let id_str = id.into();
+        self.auth_keys.insert(id_str.clone(), key.into());
+        self.key_roles.insert(id_str, ClientRole::Admin);
+        self
+    }
+
+    pub fn with_auth_key_role(
+        mut self,
+        id: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+        role: ClientRole,
+    ) -> Self {
+        let id_str = id.into();
+        self.auth_keys.insert(id_str.clone(), key.into());
+        self.key_roles.insert(id_str, role);
         self
     }
 
@@ -134,6 +168,11 @@ impl IpcServerBuilder {
 
     pub fn with_provider_catalog(mut self, provider_catalog: ProviderCatalog) -> Self {
         self.provider_catalog = Some(provider_catalog);
+        self
+    }
+
+    pub fn with_auto_execute(mut self, auto_execute: bool) -> Self {
+        self.auto_execute = auto_execute;
         self
     }
 
@@ -159,10 +198,13 @@ impl IpcServerBuilder {
             shutdown_token: CancellationToken::new(),
             start_time: chrono::Utc::now().timestamp(),
             approvals: Arc::new(Mutex::new(HashMap::new())),
+            approval_origins: Arc::new(Mutex::new(HashMap::new())),
             auth_keys: Arc::new(Mutex::new(self.auth_keys)),
+            key_roles: Arc::new(Mutex::new(self.key_roles)),
             supported_capabilities: self.supported_capabilities,
             control_plane,
             provider_catalog,
+            auto_execute: self.auto_execute,
         });
 
         Ok(IpcServer { state })

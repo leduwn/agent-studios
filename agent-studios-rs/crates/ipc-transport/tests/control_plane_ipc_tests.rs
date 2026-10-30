@@ -674,3 +674,82 @@ async fn test_ipc_multiple_subscriptions_no_duplicate_events() {
         "Expected timeout: no duplicate event should arrive"
     );
 }
+
+#[tokio::test]
+async fn test_ipc_task_auto_execution_lifecycle() {
+    let key_id = "test-key-auto-exec";
+    let secret = b"secret-auto-exec-12345".to_vec();
+
+    let server = IpcServer::builder()
+        .with_auth_key(key_id, secret.clone())
+        .with_auto_execute(true)
+        .build()
+        .expect("Server failed to build");
+
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+
+    let config = ClientConfig::new(key_id, secret);
+    let mut client = IpcClient::connect_stream(client_stream, config)
+        .await
+        .expect("Client handshake failed");
+
+    let studio = client
+        .create_studio("Auto Execute Studio")
+        .await
+        .expect("Create studio failed");
+
+    let spec = BatchTaskSpec {
+        key: "auto-run-task".to_string(),
+        title: "Auto Execution Lifecycle Task".to_string(),
+        description: "Task executed automatically via lifecycle runner".to_string(),
+        assigned_agent_id: None,
+        parent_task_key: None,
+        parent_task_id: None,
+        dependency_keys: vec![],
+        dependency_task_ids: vec![],
+        dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+    };
+
+    let task_ids = client
+        .submit_task(studio.id, spec)
+        .await
+        .expect("Submit task failed");
+    assert_eq!(task_ids.len(), 1);
+    let task_id = task_ids[0];
+
+    // Wait for auto-execution lifecycle to transition the task to Succeeded
+    let cp_lock = server.control_plane();
+    let mut succeeded = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let cp = cp_lock.read().await;
+        if let Some(t) = cp.get_task(task_id)
+            && t.state == TaskState::Succeeded
+        {
+            succeeded = true;
+            break;
+        }
+    }
+    assert!(
+        succeeded,
+        "Expected task to transition to Succeeded via auto-execution lifecycle"
+    );
+
+    // Verify task via client query
+    let task = client
+        .get_task(studio.id, task_id)
+        .await
+        .expect("Get task failed")
+        .expect("Task should exist");
+    assert_eq!(task.state, TaskState::Succeeded);
+
+    // Verify events were emitted into replay buffer
+    let state = server.state();
+    let replay_len = state.replay_buffer.lock().unwrap().len();
+    assert!(
+        replay_len > 0,
+        "Expected lifecycle progress events in replay buffer, got {}",
+        replay_len
+    );
+}

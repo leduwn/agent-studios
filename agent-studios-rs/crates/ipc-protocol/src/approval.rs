@@ -73,6 +73,8 @@ pub struct ApprovalContract {
     pub session_id: SessionId,
     pub task_id: String,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     pub risk_level: RiskLevel,
     pub action: ApprovalAction,
     pub description: String,
@@ -105,6 +107,29 @@ impl ApprovalContract {
         description: String,
         timeout_seconds: i64,
     ) -> Self {
+        Self::with_tool_call(
+            session_id,
+            task_id,
+            run_id,
+            None,
+            risk_level,
+            action,
+            description,
+            timeout_seconds,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_tool_call(
+        session_id: SessionId,
+        task_id: String,
+        run_id: String,
+        tool_call_id: Option<String>,
+        risk_level: RiskLevel,
+        action: ApprovalAction,
+        description: String,
+        timeout_seconds: i64,
+    ) -> Self {
         let now = Utc::now();
         let expires_at = now + Duration::seconds(timeout_seconds);
 
@@ -113,6 +138,7 @@ impl ApprovalContract {
             session_id,
             task_id,
             run_id,
+            tool_call_id,
             risk_level,
             action,
             description,
