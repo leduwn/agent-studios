@@ -37,6 +37,49 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout pinned Rust backend (M13 IPC agsd)
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          PINNED_SHA="ce0396c1f165760ea271110eaf9bfd6dc84a67a7"
+          echo "Fetching pinned backend commit: $PINNED_SHA"
+          git fetch --depth=1 --force origin "$PINNED_SHA":backend-pin || {
+            echo "::error::Failed to fetch pinned backend commit $PINNED_SHA. Branch fallback disabled."
+            exit 1
+          }
+          ACTUAL_SHA=$(git rev-parse backend-pin)
+          echo "Verified fetched backend commit: $ACTUAL_SHA"
+          if [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
+            echo "::error::Backend commit mismatch: expected $PINNED_SHA but got $ACTUAL_SHA"
+            exit 1
+          fi
+          rm -rf agent-studios-rs
+          git checkout backend-pin -- agent-studios-rs/
+          echo "Successfully extracted agent-studios-rs/ from pinned commit $ACTUAL_SHA"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-studios-rs
+          key: ce0396c1f165760ea271110eaf9bfd6dc84a67a7
+
+      - name: Build agsd native daemon
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          cargo build --manifest-path agent-studios-rs/Cargo.toml --bin agsd -p agent-studios-ipc-transport
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            test -f "agent-studios-rs/target/debug/agsd.exe" || { echo "::error::agsd.exe not found"; exit 1; }
+            echo "AGSD_BIN_PATH=${{ github.workspace }}\\agent-studios-rs\\target\\debug\\agsd.exe" >> "$GITHUB_ENV"
+          else
+            test -f "agent-studios-rs/target/debug/agsd" || { echo "::error::agsd not found"; exit 1; }
+            chmod +x "agent-studios-rs/target/debug/agsd"
+            echo "AGSD_BIN_PATH=${{ github.workspace }}/agent-studios-rs/target/debug/agsd" >> "$GITHUB_ENV"
+          fi
+
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
@@ -58,6 +101,18 @@ jobs:
 
       - name: Run pure unit test suite
         run: npm run test:unit
+
+      - name: Run real daemon E2E tests (Linux)
+        if: runner.os == 'Linux'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}/agent-studios-rs/target/debug/agsd
+        run: npm run test:e2e
+
+      - name: Run real daemon E2E tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}\agent-studios-rs\target\debug\agsd.exe
+        run: npm run test:e2e
 
       - name: Run VS Code extension host integration tests (Linux)
         if: runner.os == 'Linux'

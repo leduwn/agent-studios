@@ -68,6 +68,15 @@ export class TimelineTreeItem extends vscode.TreeItem {
       case 'task_started':
         return new vscode.ThemeIcon('play');
 
+      case 'task_submitted':
+        return new vscode.ThemeIcon('plus');
+
+      case 'task_cancelled':
+        return new vscode.ThemeIcon(
+          'circle-slash',
+          new vscode.ThemeColor('testing.iconSkipped')
+        );
+
       case 'session_ended':
       case 'run_completed':
       case 'task_completed':
@@ -78,6 +87,7 @@ export class TimelineTreeItem extends vscode.TreeItem {
 
       case 'run_failed':
       case 'task_failed':
+      case 'tool_failed':
         return new vscode.ThemeIcon(
           'error',
           new vscode.ThemeColor('testing.iconFailed')
@@ -102,6 +112,9 @@ export class TimelineTreeItem extends vscode.TreeItem {
 
       case 'artifact_created':
         return new vscode.ThemeIcon('diff');
+
+      case 'runtime_output_delta':
+        return new vscode.ThemeIcon('output');
 
       default:
         return new vscode.ThemeIcon('circle-outline');

@@ -13,6 +13,7 @@ import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import { BridgeManager } from '../bridge/BridgeManager';
 import {
   AgentMode,
+  ApprovalDecisionResult,
   ApprovalRequest,
   ChatMessage,
   ChatSendRequest,
@@ -354,12 +355,16 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       return;
     }
     try {
-      await vscode.commands.executeCommand('agent-studios.approveAction', approvalId);
+      const res = await vscode.commands.executeCommand<ApprovalDecisionResult>(
+        'agent-studios.approveAction',
+        approvalId
+      );
       await this.postMessage({
         type: 'approvalResult',
         approvalId,
         decision: 'approved',
-        applied: true,
+        applied: res ? res.applied : true,
+        message: res?.message,
       });
     } catch {
       try {
@@ -369,6 +374,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           approvalId,
           decision: 'approved',
           applied: res.applied,
+          message: res.message,
         });
       } catch (err: unknown) {
         await this.postMessage({
@@ -387,12 +393,16 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       return;
     }
     try {
-      await vscode.commands.executeCommand('agent-studios.denyAction', approvalId);
+      const res = await vscode.commands.executeCommand<ApprovalDecisionResult>(
+        'agent-studios.denyAction',
+        approvalId
+      );
       await this.postMessage({
         type: 'approvalResult',
         approvalId,
         decision: 'denied',
-        applied: true,
+        applied: res ? res.applied : true,
+        message: res?.message,
       });
     } catch {
       try {
@@ -402,6 +412,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           approvalId,
           decision: 'denied',
           applied: res.applied,
+          message: res.message,
         });
       } catch (err: unknown) {
         await this.postMessage({

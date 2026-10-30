@@ -18,7 +18,7 @@ describe('Extension Host: Activation & Commands Integration Tests', () => {
     assert.strictEqual(ext.isActive, true, 'Extension should be active after calling activate()');
   });
 
-  it('registers all 14 workbench and editor commands in vscode.commands', async () => {
+  it('registers all workbench and editor commands in vscode.commands', async () => {
     const commands = await vscode.commands.getCommands(true);
 
     const requiredCommands = [
@@ -36,6 +36,7 @@ describe('Extension Host: Activation & Commands Integration Tests', () => {
       'agent-studios.explainSelection',
       'agent-studios.refactorSelection',
       'agent-studios.generateTests',
+      'agent-studios.openMissionControl',
     ];
 
     for (const cmd of requiredCommands) {

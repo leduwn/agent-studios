@@ -8,6 +8,7 @@
 
 import * as assert from 'assert';
 import { RustIpcCodec } from '../../bridge/ipc/RustIpcCodec';
+import { RustHmacSigner } from '../../bridge/ipc/RustHmacSigner';
 import {
   RustIpcCommand,
   RustApprovalContract,
@@ -22,6 +23,14 @@ import {
 } from '../../bridge/ipc/RustIpcProtocolTypes';
 
 describe('Rust vs TypeScript IPC Contract Fixtures', () => {
+  function createWireFrame(payload: unknown): Buffer {
+    const json = JSON.stringify(payload);
+    const jsonBytes = Buffer.from(json, 'utf8');
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(jsonBytes.length, 0);
+    return Buffer.concat([header, jsonBytes]);
+  }
+
   describe('IpcCommand Serde Serialization Fixtures', () => {
     it('serializes negotiate_capabilities matching Rust Serde', () => {
       const cmd: RustIpcCommand = {
@@ -205,14 +214,6 @@ describe('Rust vs TypeScript IPC Contract Fixtures', () => {
   });
 
   describe('IpcResponse Serde Deserialization Fixtures', () => {
-    function createWireFrame(payload: unknown): Buffer {
-      const json = JSON.stringify(payload);
-      const jsonBytes = Buffer.from(json, 'utf8');
-      const header = Buffer.alloc(4);
-      header.writeUInt32BE(jsonBytes.length, 0);
-      return Buffer.concat([header, jsonBytes]);
-    }
-
     it('deserializes capabilities_negotiated and authenticated', () => {
       const rawNegotiated = {
         type: 'capabilities_negotiated',
@@ -392,6 +393,233 @@ describe('Rust vs TypeScript IPC Contract Fixtures', () => {
       const rawShutdown = { type: 'shutdown_acknowledged' };
       const { responses: [rShutdown] } = RustIpcCodec.decodeResponses(createWireFrame(rawShutdown));
       assert.strictEqual(rShutdown.type, 'shutdown_acknowledged');
+    });
+  });
+
+  describe('Authoritative M13 Golden Fixtures (PROTOCOL_GOLDEN_FIXTURES.md)', () => {
+    it('computes exact HMAC canonical digest matching Rust auth.rs golden vector', () => {
+      const protocolVersion = { major: 1, minor: 0, patch: 0 };
+      const keyId = 'test-client-1';
+      const sessionId = 'sess-9a7c0000-0000-0000-0000-000000000001';
+      const nonce = 'nonce-abcd-1234';
+      const timestampMillis = 1793400000000;
+      const capabilities = ['event_streaming', 'linearizable_replay'];
+      const payload = '';
+
+      const digest = RustHmacSigner.computeCanonicalDigest(
+        protocolVersion,
+        keyId,
+        sessionId,
+        nonce,
+        timestampMillis,
+        capabilities,
+        payload
+      );
+
+      const expectedDigest =
+        '1.0.0:test-client-1:sess-9a7c0000-0000-0000-0000-000000000001:nonce-abcd-1234:1793400000000:event_streaming,linearizable_replay:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+      assert.strictEqual(digest, expectedDigest);
+    });
+
+    it('validates golden negotiate_capabilities command and response', () => {
+      const goldenCommand = {
+        type: 'negotiate_capabilities',
+        protocol_version: { major: 1, minor: 0, patch: 0 },
+        capabilities: ['event_streaming', 'linearizable_replay'],
+      };
+      const wire = RustIpcCodec.encodeCommand(goldenCommand as any);
+      assert.strictEqual(wire.readUInt32BE(0), Buffer.byteLength(JSON.stringify(goldenCommand)));
+
+      const goldenResponse = {
+        type: 'capabilities_negotiated',
+        selected_version: { major: 1, minor: 0, patch: 0 },
+        agreed_capabilities: ['event_streaming', 'linearizable_replay'],
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenResponse));
+      assert.strictEqual(responses.length, 1);
+      assert.strictEqual(responses[0].type, 'capabilities_negotiated');
+      if (responses[0].type === 'capabilities_negotiated') {
+        assert.deepStrictEqual(responses[0].selected_version, { major: 1, minor: 0, patch: 0 });
+        assert.deepStrictEqual(responses[0].agreed_capabilities, ['event_streaming', 'linearizable_replay']);
+      }
+    });
+
+    it('validates golden authenticate command with HmacAuthHeader and authenticated response', () => {
+      const goldenAuthCommand = {
+        type: 'authenticate',
+        header: {
+          protocol_version: { major: 1, minor: 0, patch: 0 },
+          key_id: 'test-client-1',
+          session_id: 'sess-9a7c0000-0000-0000-0000-000000000001',
+          nonce: 'nonce-abcd-1234',
+          timestamp_millis: 1793400000000,
+          signature: '8f3b25a1b0c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e',
+        },
+        payload: null,
+      };
+      const wire = RustIpcCodec.encodeCommand(goldenAuthCommand as any);
+      assert.ok(wire.length > 4);
+
+      const goldenAuthResponse = {
+        type: 'authenticated',
+        session_id: 'sess-9a7c0000-0000-0000-0000-000000000001',
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenAuthResponse));
+      assert.strictEqual(responses[0].type, 'authenticated');
+      if (responses[0].type === 'authenticated') {
+        assert.strictEqual(responses[0].session_id, 'sess-9a7c0000-0000-0000-0000-000000000001');
+      }
+    });
+
+    it('validates golden submit_task and tasks_submitted response vector', () => {
+      const goldenSubmit = {
+        type: 'submit_task',
+        studio_id: 'c0a80101-0000-0000-0000-000000000001',
+        task_spec: {
+          key: 'task-test-spec',
+          title: 'Test Task Spec',
+          description: 'Verify golden fixture serialization',
+          assigned_agent_id: null,
+          parent_task_key: null,
+          parent_task_id: null,
+          dependency_keys: [],
+          dependency_task_ids: [],
+          dependency_output_policy: 'task_success',
+        },
+      };
+      const wire = RustIpcCodec.encodeCommand(goldenSubmit as any);
+      const json = JSON.parse(wire.subarray(4).toString('utf8'));
+      assert.strictEqual(json.type, 'submit_task');
+      assert.ok(json.task_spec, 'Payload must be under key "task_spec", not "spec"');
+      assert.strictEqual(json.task_spec.key, 'task-test-spec');
+
+      const goldenSubmitted = {
+        type: 'tasks_submitted',
+        task_ids: ['d0a80101-0000-0000-0000-000000000001'],
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenSubmitted));
+      assert.strictEqual(responses[0].type, 'tasks_submitted');
+      if (responses[0].type === 'tasks_submitted') {
+        assert.deepStrictEqual(responses[0].task_ids, ['d0a80101-0000-0000-0000-000000000001']);
+      }
+    });
+
+    it('validates golden cancel_task and task_cancelled with CancellationSummary', () => {
+      const goldenCancel = {
+        type: 'cancel_task',
+        studio_id: 'c0a80101-0000-0000-0000-000000000001',
+        task_id: 'd0a80101-0000-0000-0000-000000000001',
+        reason: 'Manual abort by operator',
+      };
+      const wire = RustIpcCodec.encodeCommand(goldenCancel as any);
+      const json = JSON.parse(wire.subarray(4).toString('utf8'));
+      assert.strictEqual(json.type, 'cancel_task');
+      assert.strictEqual(json.reason, 'Manual abort by operator');
+
+      const goldenCancelled = {
+        type: 'task_cancelled',
+        summary: {
+          cancelled_tasks: ['d0a80101-0000-0000-0000-000000000001'],
+          cancelled_runs: ['e0a80101-0000-0000-0000-000000000001'],
+          cancelled_approvals: [],
+        },
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenCancelled));
+      assert.strictEqual(responses[0].type, 'task_cancelled');
+      if (responses[0].type === 'task_cancelled') {
+        assert.deepStrictEqual(responses[0].summary.cancelled_tasks, ['d0a80101-0000-0000-0000-000000000001']);
+        assert.deepStrictEqual(responses[0].summary.cancelled_runs, ['e0a80101-0000-0000-0000-000000000001']);
+        assert.deepStrictEqual(responses[0].summary.cancelled_approvals, []);
+      }
+    });
+
+    it('validates golden resolve_approval variants (approved / rejected)', () => {
+      const goldenApproved = {
+        type: 'resolve_approval',
+        approval_id: 'f0a80101-0000-0000-0000-000000000001',
+        decision: {
+          decision: 'approved',
+          modified_details: null,
+          user_note: 'Operator confirmed action',
+        },
+      };
+      const wireAppr = RustIpcCodec.encodeCommand(goldenApproved as any);
+      const jsonAppr = JSON.parse(wireAppr.subarray(4).toString('utf8'));
+      assert.strictEqual(jsonAppr.decision.decision, 'approved');
+      assert.strictEqual(jsonAppr.decision.user_note, 'Operator confirmed action');
+
+      const goldenRejected = {
+        type: 'resolve_approval',
+        approval_id: 'f0a80101-0000-0000-0000-000000000001',
+        decision: {
+          decision: 'rejected',
+          reason: 'Access denied by security policy',
+        },
+      };
+      const wireRej = RustIpcCodec.encodeCommand(goldenRejected as any);
+      const jsonRej = JSON.parse(wireRej.subarray(4).toString('utf8'));
+      assert.strictEqual(jsonRej.decision.decision, 'rejected');
+      assert.strictEqual(jsonRej.decision.reason, 'Access denied by security policy');
+
+      const goldenResolved = {
+        type: 'approval_resolved',
+        approval_id: 'f0a80101-0000-0000-0000-000000000001',
+        status: 'authorized',
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenResolved));
+      assert.strictEqual(responses[0].type, 'approval_resolved');
+    });
+
+    it('validates golden subscribe_events with from_sequence', () => {
+      const goldenSub = {
+        type: 'subscribe_events',
+        from_sequence: 42,
+      };
+      const wire = RustIpcCodec.encodeCommand(goldenSub as any);
+      const json = JSON.parse(wire.subarray(4).toString('utf8'));
+      assert.strictEqual(json.type, 'subscribe_events');
+      assert.strictEqual(json.from_sequence, 42);
+
+      const goldenEvent = {
+        type: 'event',
+        event: {
+          sequence: 42,
+          timestamp: '2026-10-30T00:00:00Z',
+          event_type: 'task_state_transitioned',
+          payload: {
+            task_id: 'c0a80101-0000-0000-0000-000000000001',
+            from: 'pending',
+            to: 'ready',
+          },
+        },
+      };
+      const { responses } = RustIpcCodec.decodeResponses(createWireFrame(goldenEvent));
+      assert.strictEqual(responses[0].type, 'event');
+      if (responses[0].type === 'event') {
+        assert.strictEqual(responses[0].event.sequence, 42);
+        assert.strictEqual(responses[0].event.event_type, 'task_state_transitioned');
+      }
+    });
+
+    it('rejects foreign JSON-RPC 2.0 payloads and un-tagged wire contracts', () => {
+      const foreignJsonRpc = {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'submit_task',
+        params: { text: 'hello' },
+      };
+      assert.throws(() => {
+        RustIpcCodec.encodeCommand(foreignJsonRpc as any);
+      });
+
+      const missingType = {
+        status: 'ok',
+        result: 123,
+      };
+      assert.throws(() => {
+        RustIpcCodec.decodeResponses(createWireFrame(missingType));
+      });
     });
   });
 });

@@ -1,52 +1,67 @@
 /**
  * Agent Studios — Standalone Daemon Process for Cross-Process E2E Testing
- * Milestone M14-IPC-03: Real ConnectedClient Vertical Slice
+ * Milestone M14-IPC-03 & M14 Mission Control Live Projection
  *
  * Runs as an independent OS child process with separate PID and memory space.
  * Binds to real Windows Named Pipe or Unix Domain Socket.
  * Implements authoritative Rust agsd wire protocol framing, HMAC authentication,
- * and Serde tagged command/response dispatch.
+ * Serde tagged command/response dispatch, and seeded control plane mutations.
  */
 
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import { RustHmacSigner } from '../../bridge/ipc/RustHmacSigner';
-import { RustIpcCommand, RustIpcResponse } from '../../bridge/ipc/RustIpcProtocolTypes';
+import {
+  RustIpcCommand,
+  RustIpcResponse,
+  RustStudio,
+  RustTaskRecord,
+  RustTaskState,
+  RustIpcEvent,
+} from '../../bridge/ipc/RustIpcProtocolTypes';
 
 function parseArgs(): {
   bootstrapPath: string;
+  adminBootstrapPath?: string;
   pipeName?: string;
   socketPath?: string;
   keyId: string;
   clientKey: string;
+  adminKey: string;
 } {
   const args = process.argv.slice(2);
   let bootstrapPath = '';
+  let adminBootstrapPath: string | undefined;
   let pipeName: string | undefined;
   let socketPath: string | undefined;
   let keyId = 'ags-client';
   let clientKey = 'synthetic-client-key-1234567890123456';
+  let adminKey = 'synthetic-admin-key-9876543210654321';
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--bootstrap-path' && i + 1 < args.length) {
+    if (args[i] === '--bootstrap-path' || args[i] === '--runtime-info-path' || args[i] === '--runtime_info_path') {
       bootstrapPath = args[++i];
-    } else if (args[i] === '--pipe-name' && i + 1 < args.length) {
+    } else if (args[i] === '--admin-bootstrap-path' || args[i] === '--admin-runtime-info-path' || args[i] === '--admin_runtime_info_path') {
+      adminBootstrapPath = args[++i];
+    } else if (args[i] === '--pipe-name' || args[i] === '--pipe_name') {
       pipeName = args[++i];
-    } else if (args[i] === '--socket-path' && i + 1 < args.length) {
+    } else if (args[i] === '--socket-path' || args[i] === '--socket_path') {
       socketPath = args[++i];
-    } else if (args[i] === '--key-id' && i + 1 < args.length) {
+    } else if (args[i] === '--key-id' || args[i] === '--key_id') {
       keyId = args[++i];
-    } else if (args[i] === '--client-key' && i + 1 < args.length) {
+    } else if (args[i] === '--client-key' || args[i] === '--client_key') {
       clientKey = args[++i];
+    } else if (args[i] === '--admin-key' || args[i] === '--admin_key') {
+      adminKey = args[++i];
     }
   }
 
   if (!bootstrapPath) {
-    throw new Error('Missing required --bootstrap-path argument.');
+    throw new Error('Missing required --bootstrap-path / --runtime-info-path argument.');
   }
 
-  return { bootstrapPath, pipeName, socketPath, keyId, clientKey };
+  return { bootstrapPath, adminBootstrapPath, pipeName, socketPath, keyId, clientKey, adminKey };
 }
 
 async function main(): Promise<void> {
@@ -65,11 +80,36 @@ async function main(): Promise<void> {
 
   // Active connected sockets
   const clientSockets = new Set<net.Socket>();
+  const subscribedSockets = new Set<net.Socket>();
   let eventSequence = 1;
+
+  // In-memory seeded Control Plane state
+  const studios: RustStudio[] = [
+    {
+      id: 'studio-e2e-01',
+      name: 'E2E Cross-Process Studio',
+      created_at: new Date().toISOString(),
+    },
+  ];
+
+  const tasks: RustTaskRecord[] = [
+    {
+      id: 'task-e2e-01',
+      studio_id: 'studio-e2e-01',
+      title: 'Cross-Process Verification Task',
+      description: 'Validate IPC transport over native socket',
+      state: 'succeeded',
+      dependencies: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      retry_count: 0,
+    },
+  ];
 
   const server = net.createServer((socket) => {
     clientSockets.add(socket);
     let state: 'unauthenticated' | 'negotiated' | 'ready' = 'unauthenticated';
+    let clientRole: 'standard' | 'admin' = 'standard';
     let agreedCapabilities: string[] = [];
     let buffer = Buffer.alloc(0);
 
@@ -120,8 +160,11 @@ async function main(): Promise<void> {
               break;
             }
 
+            const isAdmin = command.header.key_id === 'ags-admin' || command.header.key_id === 'ags-client-admin';
+            const expectedKey = isAdmin ? config.adminKey : config.clientKey;
+
             const verifyRes = RustHmacSigner.verify(
-              config.clientKey,
+              expectedKey,
               command.header,
               null,
               agreedCapabilities
@@ -133,6 +176,7 @@ async function main(): Promise<void> {
             }
 
             state = 'ready';
+            clientRole = isAdmin ? 'admin' : 'standard';
             sendResponse({
               type: 'authenticated',
               session_id: `daemon-session-${process.pid}`,
@@ -161,10 +205,29 @@ async function main(): Promise<void> {
             }
             sendResponse({
               type: 'health',
-              status: 'ok',
+              status: config.adminBootstrapPath ? 'healthy' : 'ok',
               active_clients: clientSockets.size,
               uptime_secs: Math.floor(process.uptime()),
               memory_events_count: eventSequence,
+            });
+            break;
+          }
+
+          case 'create_studio': {
+            if (state !== 'ready') {
+              sendResponse({ type: 'error', message: 'Unauthorized' });
+              break;
+            }
+            const studioId = `studio-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+            const newStudio: RustStudio = {
+              id: studioId,
+              name: command.name,
+              created_at: new Date().toISOString(),
+            };
+            studios.unshift(newStudio);
+            sendResponse({
+              type: 'studio_created',
+              studio: newStudio,
             });
             break;
           }
@@ -176,13 +239,7 @@ async function main(): Promise<void> {
             }
             sendResponse({
               type: 'studios',
-              studios: [
-                {
-                  id: 'studio-e2e-01',
-                  name: 'E2E Cross-Process Studio',
-                  created_at: new Date().toISOString(),
-                },
-              ],
+              studios: [...studios],
             });
             break;
           }
@@ -192,13 +249,51 @@ async function main(): Promise<void> {
               sendResponse({ type: 'error', message: 'Unauthorized' });
               break;
             }
+            const studio = studios.find((s) => s.id === command.studio_id) || studios[0] || null;
             sendResponse({
               type: 'studio',
-              studio: {
-                id: command.studio_id,
-                name: 'E2E Cross-Process Studio',
-                created_at: new Date().toISOString(),
-              },
+              studio,
+            });
+            break;
+          }
+
+          case 'submit_task': {
+            if (state !== 'ready') {
+              sendResponse({ type: 'error', message: 'Unauthorized' });
+              break;
+            }
+            const spec = command.task_spec;
+            const taskId = spec.key || `task-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+            let taskState: RustTaskState = 'running';
+            if ((spec as unknown as { state?: RustTaskState }).state) {
+              taskState = (spec as unknown as { state: RustTaskState }).state;
+            } else if (
+              spec.title.toLowerCase().includes('compile') ||
+              spec.title.toLowerCase().includes('succeed')
+            ) {
+              taskState = 'succeeded';
+            } else if (
+              spec.title.toLowerCase().includes('run') ||
+              spec.title.toLowerCase().includes('suite')
+            ) {
+              taskState = 'running';
+            }
+
+            const newTask: RustTaskRecord = {
+              id: taskId,
+              studio_id: command.studio_id,
+              title: spec.title,
+              description: spec.description,
+              state: taskState,
+              dependencies: spec.dependency_task_ids || spec.dependency_keys || [],
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              retry_count: 0,
+            };
+            tasks.push(newTask);
+            sendResponse({
+              type: 'tasks_submitted',
+              task_ids: [taskId],
             });
             break;
           }
@@ -208,21 +303,25 @@ async function main(): Promise<void> {
               sendResponse({ type: 'error', message: 'Unauthorized' });
               break;
             }
+            const matchingTasks = command.studio_id
+              ? tasks.filter((t) => t.studio_id === command.studio_id)
+              : tasks;
             sendResponse({
               type: 'tasks',
-              tasks: [
-                {
-                  id: 'task-e2e-01',
-                  studio_id: command.studio_id,
-                  title: 'Cross-Process Verification Task',
-                  description: 'Validate IPC transport over native socket',
-                  state: 'succeeded',
-                  dependencies: [],
-                  created_at: new Date().toISOString(),
-                  updated_at: new Date().toISOString(),
-                  retry_count: 0,
-                },
-              ],
+              tasks: matchingTasks,
+            });
+            break;
+          }
+
+          case 'get_task': {
+            if (state !== 'ready') {
+              sendResponse({ type: 'error', message: 'Unauthorized' });
+              break;
+            }
+            const foundTask = tasks.find((t) => t.id === command.task_id) || null;
+            sendResponse({
+              type: 'task',
+              task: foundTask,
             });
             break;
           }
@@ -232,17 +331,37 @@ async function main(): Promise<void> {
               sendResponse({ type: 'error', message: 'Unauthorized' });
               break;
             }
-            sendResponse({
-              type: 'providers',
-              providers: [
-                {
-                  id: 'prov-mock',
-                  provider_id: 'mock-provider',
-                  display_name: 'Mock Test Provider',
-                  enabled: true,
-                },
-              ],
-            });
+            if (config.adminBootstrapPath) {
+              sendResponse({
+                type: 'providers',
+                providers: [
+                  {
+                    id: 'prov-anthropic',
+                    provider_id: 'anthropic',
+                    display_name: 'Anthropic Claude',
+                    enabled: true,
+                  },
+                  {
+                    id: 'prov-openai',
+                    provider_id: 'openai',
+                    display_name: 'OpenAI GPT',
+                    enabled: true,
+                  },
+                ],
+              });
+            } else {
+              sendResponse({
+                type: 'providers',
+                providers: [
+                  {
+                    id: 'prov-mock',
+                    provider_id: 'mock-provider',
+                    display_name: 'Mock Test Provider',
+                    enabled: true,
+                  },
+                ],
+              });
+            }
             break;
           }
 
@@ -251,17 +370,36 @@ async function main(): Promise<void> {
               sendResponse({ type: 'error', message: 'Unauthorized' });
               break;
             }
-            sendResponse({
-              type: 'models',
-              models: [
-                {
-                  provider_instance_id: command.instance_id ?? 'prov-mock',
-                  id: 'mock-model-01',
-                  display_name: 'Mock Model v1',
-                  limits: { context_window_tokens: 128000, max_output_tokens: 4096 },
-                },
-              ],
-            });
+            if (config.adminBootstrapPath) {
+              const instanceId = command.instance_id || 'prov-anthropic';
+              const isOai = instanceId === 'prov-openai';
+              sendResponse({
+                type: 'models',
+                models: [
+                  {
+                    provider_instance_id: instanceId,
+                    id: isOai ? 'gpt-4o' : 'claude-3-7-sonnet',
+                    display_name: isOai ? 'GPT-4o' : 'Claude 3.7 Sonnet',
+                    limits: {
+                      context_window_tokens: isOai ? 128000 : 200000,
+                      max_output_tokens: 8192,
+                    },
+                  },
+                ],
+              });
+            } else {
+              sendResponse({
+                type: 'models',
+                models: [
+                  {
+                    provider_instance_id: command.instance_id ?? 'prov-mock',
+                    id: 'mock-model-01',
+                    display_name: 'Mock Model v1',
+                    limits: { context_window_tokens: 128000, max_output_tokens: 4096 },
+                  },
+                ],
+              });
+            }
             break;
           }
 
@@ -270,7 +408,7 @@ async function main(): Promise<void> {
               sendResponse({ type: 'error', message: 'Unauthorized' });
               break;
             }
-
+            subscribedSockets.add(socket);
             // Immediately emit a task_started event as proof of event streaming
             const evtResponse: RustIpcResponse = {
               type: 'event',
@@ -289,6 +427,13 @@ async function main(): Promise<void> {
           }
 
           case 'shutdown': {
+            if (clientRole !== 'admin') {
+              sendResponse({
+                type: 'error',
+                message: 'Permission denied: shutdown requires admin role',
+              });
+              break;
+            }
             sendResponse({ type: 'shutdown_acknowledged' });
             setTimeout(() => {
               cleanupAndExit(0);
@@ -296,22 +441,51 @@ async function main(): Promise<void> {
             break;
           }
 
-          default:
+          default: {
+            // Handle custom test-only command to broadcast events
+            const cmdAny = command as unknown as { type: string; event_type?: string; payload?: unknown };
+            if (cmdAny.type === 'emit_test_event') {
+              const evt: RustIpcEvent = {
+                sequence: eventSequence++,
+                timestamp: new Date().toISOString(),
+                event_type: cmdAny.event_type || 'task_failed',
+                payload: cmdAny.payload ?? { summary: 'Broadcasted test event' },
+              };
+              for (const sub of subscribedSockets) {
+                if (!sub.destroyed) {
+                  const jsonBytes = Buffer.from(JSON.stringify({ type: 'event', event: evt }), 'utf8');
+                  const hdr = Buffer.alloc(4);
+                  hdr.writeUInt32BE(jsonBytes.length, 0);
+                  sub.write(Buffer.concat([hdr, jsonBytes]));
+                }
+              }
+              sendResponse({
+                type: 'pong',
+                payload: 'emitted',
+                client_timestamp: 0,
+                server_timestamp: Date.now(),
+              });
+              break;
+            }
+
             sendResponse({
               type: 'error',
-              message: `Unsupported command in mock daemon: ${(command as { type: string }).type}`,
+              message: `Unsupported command in mock daemon: ${cmdAny.type}`,
             });
             break;
+          }
         }
       }
     });
 
     socket.on('close', () => {
       clientSockets.delete(socket);
+      subscribedSockets.delete(socket);
     });
 
     socket.on('error', () => {
       clientSockets.delete(socket);
+      subscribedSockets.delete(socket);
     });
   });
 
@@ -319,6 +493,9 @@ async function main(): Promise<void> {
     try {
       if (fs.existsSync(config.bootstrapPath)) {
         fs.unlinkSync(config.bootstrapPath);
+      }
+      if (config.adminBootstrapPath && fs.existsSync(config.adminBootstrapPath)) {
+        fs.unlinkSync(config.adminBootstrapPath);
       }
       if (!isWindows && fs.existsSync(endpoint)) {
         fs.unlinkSync(endpoint);
@@ -346,6 +523,22 @@ async function main(): Promise<void> {
     };
 
     fs.writeFileSync(config.bootstrapPath, JSON.stringify(bootstrapInfo, null, 2), 'utf8');
+
+    // Write agsd-admin.json bootstrap file if path provided
+    if (config.adminBootstrapPath) {
+      const adminParentDir = path.dirname(config.adminBootstrapPath);
+      if (!fs.existsSync(adminParentDir)) {
+        fs.mkdirSync(adminParentDir, { recursive: true });
+      }
+      const adminInfo = {
+        endpoint,
+        key_id: 'ags-client-admin',
+        admin_key: config.adminKey,
+        pid: process.pid,
+        created_at: Date.now(),
+      };
+      fs.writeFileSync(config.adminBootstrapPath, JSON.stringify(adminInfo, null, 2), 'utf8');
+    }
 
     // Notify parent process on stdout
     process.stdout.write(`DAEMON_READY:${process.pid}:${endpoint}\n`);

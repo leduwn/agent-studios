@@ -72,6 +72,12 @@
     },
     "commands": [
       {
+        "command": "agent-studios.openMissionControl",
+        "title": "Agent Studios: Open Mission Control Workbench",
+        "category": "Agent Studios",
+        "icon": "$(dashboard)"
+      },
+      {
         "command": "agent-studios.openAgents",
         "title": "Agent Studios: Open Agents Workbench",
         "category": "Agent Studios"
@@ -168,6 +174,16 @@
       ],
       "view/title": [
         {
+          "view": "agent-studios.chat",
+          "command": "agent-studios.openMissionControl",
+          "group": "navigation@1"
+        },
+        {
+          "view": "agent-studios.session",
+          "command": "agent-studios.openMissionControl",
+          "group": "navigation@0"
+        },
+        {
           "view": "agent-studios.tasks",
           "command": "agent-studios.showTaskGraph",
           "group": "navigation@1"
@@ -241,8 +257,9 @@
     "lint": "eslint src --ext ts",
     "test": "node out/test/unit/runner.js",
     "test:unit": "node out/test/unit/runner.js",
+    "test:e2e": "node out/test/e2e/runner.js",
     "test:integration": "node out/test/integration/runTest.js",
-    "test:all": "npm run test:unit && npm run test:integration",
+    "test:all": "npm run test:unit && npm run test:e2e && npm run test:integration",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {

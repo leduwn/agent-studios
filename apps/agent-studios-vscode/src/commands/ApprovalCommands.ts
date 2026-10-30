@@ -145,10 +145,11 @@ export function registerApprovalCommands(
             result.message || `Failed to approve action '${approval.id}'.`
           );
         }
+        return result;
       } catch (err: unknown) {
-        vscode.window.showErrorMessage(
-          `Cannot approve action: ${err instanceof Error ? err.message : String(err)}`
-        );
+        const message = `Cannot approve action: ${err instanceof Error ? err.message : String(err)}`;
+        vscode.window.showErrorMessage(message);
+        return { id: approval.id, decision: 'approved' as const, applied: false, message };
       }
     }
   );
@@ -189,10 +190,11 @@ export function registerApprovalCommands(
             result.message || `Failed to deny action '${approval.id}'.`
           );
         }
+        return result;
       } catch (err: unknown) {
-        vscode.window.showErrorMessage(
-          `Cannot deny action: ${err instanceof Error ? err.message : String(err)}`
-        );
+        const message = `Cannot deny action: ${err instanceof Error ? err.message : String(err)}`;
+        vscode.window.showErrorMessage(message);
+        return { id: approval.id, decision: 'denied' as const, applied: false, message };
       }
     }
   );

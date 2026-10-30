@@ -26,6 +26,9 @@ import {
 import { SessionDetailWebview } from './webviews/SessionDetailWebview';
 import { TaskGraphWebview } from './webviews/TaskGraphWebview';
 import { ChatWebviewViewProvider } from './chat/ChatWebviewViewProvider';
+import { DiffReviewManager } from './cards/DiffReviewManager';
+import { MissionControlProjection } from './mission-control/state/MissionControlProjection';
+import { registerMissionControlCommands } from './mission-control/MissionControlCommands';
 
 let statusBarItem: vscode.StatusBarItem;
 
@@ -137,6 +140,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerAllCommands(context, bridgeManager, views, webviews);
   registerApprovalCommands(context, dynamicBridge, projection);
   registerArtifactCommands(context, dynamicBridge);
+
+  // 3b. Register Mission Control Workbench (Milestone M14)
+  const diffReviewManager = new DiffReviewManager(dynamicBridge);
+  context.subscriptions.push(diffReviewManager);
+  const missionControlProjection = new MissionControlProjection(bridgeManager);
+  context.subscriptions.push(missionControlProjection);
+  registerMissionControlCommands(context, missionControlProjection, diffReviewManager);
 
   // 4. Create and update status bar item
   statusBarItem = vscode.window.createStatusBarItem(
