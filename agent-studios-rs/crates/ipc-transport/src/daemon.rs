@@ -102,7 +102,8 @@ impl DaemonBootstrapInfo {
                 .mode(0o600)
                 .open(path)
                 .map_err(TransportError::Io)?;
-            file.write_all(json.as_bytes()).map_err(TransportError::Io)?;
+            file.write_all(json.as_bytes())
+                .map_err(TransportError::Io)?;
             file.flush().map_err(TransportError::Io)?;
         }
 
@@ -135,7 +136,8 @@ impl DaemonBootstrapInfo {
                 return Err(TransportError::Io(std::io::Error::last_os_error()));
             }
             let mut file = unsafe { std::fs::File::from_raw_handle(handle as _) };
-            file.write_all(json.as_bytes()).map_err(TransportError::Io)?;
+            file.write_all(json.as_bytes())
+                .map_err(TransportError::Io)?;
             file.flush().map_err(TransportError::Io)?;
         }
 

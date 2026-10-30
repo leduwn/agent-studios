@@ -47,13 +47,10 @@ impl ServerState {
         session_id: SessionId,
         key_id: impl Into<String>,
     ) {
-        self.approval_origins
-            .lock()
-            .unwrap()
-            .insert(
-                ApprovalId::new(approval_id.into()),
-                (session_id, key_id.into()),
-            );
+        self.approval_origins.lock().unwrap().insert(
+            ApprovalId::new(approval_id.into()),
+            (session_id, key_id.into()),
+        );
     }
 
     pub fn publish_event(&self, event: IpcEvent) -> Result<(), TransportError> {

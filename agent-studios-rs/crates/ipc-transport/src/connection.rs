@@ -1497,9 +1497,7 @@ async fn execute_task_lifecycle(
                 let _ = server_state.publish_control_plane_events(envs);
                 break;
             }
-            agent_studios_external_runtime::RuntimeEventKind::Failed {
-                safe_error_summary,
-            } => {
+            agent_studios_external_runtime::RuntimeEventKind::Failed { safe_error_summary } => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
                 let _ = cp.record_run_outcome(
@@ -1532,11 +1530,8 @@ async fn execute_task_lifecycle(
             agent_studios_external_runtime::RuntimeEventKind::Interrupted { reason } => {
                 terminal_seen = true;
                 let mut cp = server_state.control_plane.write().await;
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "interrupted",
-                    Some(reason.as_str().to_string()),
-                );
+                let _ =
+                    cp.record_run_outcome(run_id, "interrupted", Some(reason.as_str().to_string()));
                 let _ = cp.transition_run_state(run_id, RunState::Cancelled);
                 let _ = cp.transition_task_state(task_id, TaskState::Cancelled);
                 let envs = cp.drain_committed_events();
@@ -2442,9 +2437,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let _res_neg: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
-            .await
-            .unwrap();
+        let _res_neg: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE).await.unwrap();
 
         let session = SessionId::generate();
         let now = chrono::Utc::now().timestamp_millis();
@@ -2469,9 +2462,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let _res_auth: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
-            .await
-            .unwrap();
+        let _res_auth: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE).await.unwrap();
 
         // Attempt resolving untracked approval (missing in approval_origins map)
         send_msg(
@@ -2487,9 +2478,7 @@ mod tests {
         .await
         .unwrap();
 
-        let resp: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE)
-            .await
-            .unwrap();
+        let resp: IpcResponse = recv_msg(&mut stream, DEFAULT_MAX_FRAME_SIZE).await.unwrap();
         match resp {
             IpcResponse::Error { message } => {
                 assert!(message.contains("Permission denied"));
