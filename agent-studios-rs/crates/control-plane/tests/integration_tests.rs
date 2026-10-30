@@ -1307,6 +1307,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "task_b".to_string(),
@@ -1318,6 +1319,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec!["task_a".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "task_c".to_string(),
@@ -1329,6 +1331,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec!["task_b".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 
@@ -1374,6 +1377,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t2".to_string(),
@@ -1385,6 +1389,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["t1".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t3".to_string(),
@@ -1396,6 +1401,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["t2".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t4".to_string(),
@@ -1407,6 +1413,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["non_existent_key".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 
@@ -1440,6 +1447,7 @@ fn test_create_task_batch_duplicate_key_rejected() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "same_key".to_string(),
@@ -1451,6 +1459,7 @@ fn test_create_task_batch_duplicate_key_rejected() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 

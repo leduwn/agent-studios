@@ -6,8 +6,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use agent_studios_ipc_protocol::{
-    ApprovalContract, ApprovalDecision, ApprovalId, ApprovalStatus, HmacAuthHeader, HmacSigner,
-    IpcEvent, ProtocolError, ProtocolVersion, SessionId,
+    ApprovalContract, ApprovalDecision, ApprovalId, ApprovalStatus, ExecutionDefaultsReadiness,
+    ExecutionReadinessReport, HmacAuthHeader, HmacSigner, IpcEvent, ModelReadiness, ProtocolError,
+    ProtocolVersion, RuntimeInstanceReadiness, SessionId,
 };
 use agent_studios_protocol::agent::AgentKind;
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
@@ -133,6 +134,7 @@ pub enum IpcCommand {
         #[serde(default)]
         instance_id: Option<ProviderInstanceId>,
     },
+    GetExecutionReadiness,
     Shutdown,
 }
 
@@ -203,6 +205,9 @@ pub enum IpcResponse {
     },
     Models {
         models: Vec<ModelDescriptor>,
+    },
+    ExecutionReadiness {
+        readiness: ExecutionReadinessReport,
     },
     ShutdownAcknowledged,
     Error {
@@ -1299,6 +1304,12 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         .await
                         .map_err(|_| TransportError::ConnectionClosed)?;
                 }
+                IpcCommand::GetExecutionReadiness => {
+                    let readiness = build_execution_readiness_report(server_state).await;
+                    tx.send(IpcResponse::ExecutionReadiness { readiness })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
                 IpcCommand::Shutdown => {
                     if session.role == ClientRole::Admin {
                         info!(
@@ -1356,6 +1367,167 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
     Ok(())
 }
 
+async fn build_execution_readiness_report(
+    server_state: &Arc<ServerState>,
+) -> ExecutionReadinessReport {
+    let mut blocking_reasons = Vec::new();
+    let mut available_runtimes = Vec::new();
+    let mut runtime_instances = Vec::new();
+
+    // 1. Runtime availability check
+    if let Some(ref runtime) = server_state.runtime {
+        available_runtimes.push(runtime.implementation_id().to_string());
+        match runtime.discover().await {
+            Ok(instances) => {
+                for inst in instances {
+                    let healthy = inst.availability.is_available();
+                    runtime_instances.push(RuntimeInstanceReadiness {
+                        instance_id: inst.instance_id.to_string(),
+                        implementation: inst.implementation_id.to_string(),
+                        healthy,
+                    });
+                }
+            }
+            Err(e) => {
+                blocking_reasons.push(format!("Failed to discover runtime instances: {e}"));
+            }
+        }
+    } else {
+        blocking_reasons.push("No agent runtime configured on daemon".to_string());
+    }
+
+    // Check runtime instance availability
+    if let Some(ref target_id) = server_state.configured_instance_id {
+        if !runtime_instances
+            .iter()
+            .any(|r| r.instance_id == target_id.to_string() && r.healthy)
+        {
+            blocking_reasons.push(format!(
+                "Configured runtime instance '{target_id}' is not available or unhealthy"
+            ));
+        }
+    } else if !runtime_instances.iter().any(|r| r.healthy) && server_state.runtime.is_some() {
+        blocking_reasons.push("No healthy runtime instances available".to_string());
+    }
+
+    // 2. Model catalog check
+    let available_models = {
+        let catalog = server_state.provider_catalog.read().await;
+        catalog
+            .list_models()
+            .into_iter()
+            .map(|m| ModelReadiness {
+                provider_instance_id: m.provider_instance_id.to_string(),
+                model_id: m.id.to_string(),
+                display_name: Some(m.display_name.clone()),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    if available_models.is_empty() {
+        blocking_reasons.push("No models available in provider catalog".to_string());
+    } else if let Some(ref configured_ref) = server_state.default_model_ref {
+        let found = available_models.iter().any(|m| {
+            m.provider_instance_id == configured_ref.provider_instance_id.to_string()
+                && m.model_id == configured_ref.model_id.as_str()
+        });
+        if !found {
+            blocking_reasons.push(format!(
+                "Configured default model '{}' not found in provider catalog",
+                configured_ref
+            ));
+        }
+    } else if available_models.len() > 1 {
+        blocking_reasons.push(format!(
+            "Multiple models available ({}) in catalog but no default model configured. Configure default model via IpcServerBuilder::with_default_model_ref or AGENT_STUDIOS_DEFAULT_MODEL",
+            available_models.len()
+        ));
+    }
+
+    // 3. Workspace authorization & repository validity check
+    let authorized_workspaces = {
+        let list = server_state.authorized_workspaces.lock().unwrap();
+        let mut paths = Vec::new();
+        if let Some(ref def) = server_state.default_repo_path {
+            if let Ok(canon) = dunce::canonicalize(def) {
+                paths.push(canon.to_string_lossy().to_string());
+            } else {
+                paths.push(def.to_string_lossy().to_string());
+            }
+        }
+        for p in list.iter() {
+            let s = dunce::canonicalize(p)
+                .map(|c| c.to_string_lossy().to_string())
+                .unwrap_or_else(|_| p.to_string_lossy().to_string());
+            if !paths.contains(&s) {
+                paths.push(s);
+            }
+        }
+        paths
+    };
+
+    if let Some(ref def) = server_state.default_repo_path {
+        match dunce::canonicalize(def) {
+            Ok(canon) => {
+                if !canon.join(".git").exists() {
+                    blocking_reasons.push(format!(
+                        "Default workspace path '{}' is not a valid Git repository (.git not found)",
+                        canon.display()
+                    ));
+                } else if let Err(err) =
+                    server_state.verify_workspace_authorization(&canon.to_string_lossy())
+                {
+                    blocking_reasons.push(format!(
+                        "Default workspace path '{}' is not authorized: {err}",
+                        canon.display()
+                    ));
+                }
+            }
+            Err(e) => {
+                blocking_reasons.push(format!(
+                    "Default workspace path '{}' cannot be canonicalized: {e}",
+                    def.display()
+                ));
+            }
+        }
+    } else if authorized_workspaces.is_empty() {
+        blocking_reasons.push("No authorized workspaces configured on daemon".to_string());
+    } else {
+        blocking_reasons.push("No default repository path configured on daemon".to_string());
+    }
+
+    let defaults = ExecutionDefaultsReadiness {
+        default_repo_path: server_state
+            .default_repo_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
+        default_provider_instance_id: server_state
+            .default_model_ref
+            .as_ref()
+            .map(|r| r.provider_instance_id.to_string()),
+        default_model_id: server_state
+            .default_model_ref
+            .as_ref()
+            .map(|r| r.model_id.to_string()),
+        configured_instance_id: server_state
+            .configured_instance_id
+            .as_ref()
+            .map(|id| id.to_string()),
+    };
+
+    let is_ready = blocking_reasons.is_empty();
+
+    ExecutionReadinessReport {
+        is_ready,
+        available_runtimes,
+        runtime_instances,
+        available_models,
+        authorized_workspaces,
+        defaults,
+        blocking_reasons,
+    }
+}
+
 async fn execute_task_lifecycle(
     server_state: Arc<ServerState>,
     studio_id: StudioId,
@@ -1367,6 +1539,7 @@ async fn execute_task_lifecycle(
             Some(t) if !t.state.is_terminal() => t.clone(),
             _ => return,
         };
+        let exec_spec = task.execution.clone();
 
         let agent_id = if let Some(aid) = task.assigned_agent_id {
             aid
@@ -1436,10 +1609,10 @@ async fn execute_task_lifecycle(
         }
 
         let envs = cp.drain_committed_events();
-        (run.id, agent_id, envs)
+        (run.id, agent_id, exec_spec, envs)
     };
 
-    let (run_id, agent_id, start_envs) = maybe_run;
+    let (run_id, agent_id, exec_spec, start_envs) = maybe_run;
     let _ = server_state.publish_control_plane_events(start_envs);
 
     let runtime = match server_state.runtime.as_ref() {
@@ -1461,6 +1634,29 @@ async fn execute_task_lifecycle(
         }
     };
 
+    if let Some(pref) = exec_spec
+        .as_ref()
+        .and_then(|e| e.runtime_preference.as_ref())
+        .filter(|pref| runtime.implementation_id().as_str() != pref.as_str())
+    {
+        let fail_envs = {
+            let mut cp = server_state.control_plane.write().await;
+            let _ = cp.record_run_outcome(
+                run_id,
+                "failed",
+                Some(format!(
+                    "Requested runtime preference '{pref}' does not match available runtime implementation '{}'",
+                    runtime.implementation_id()
+                )),
+            );
+            let _ = cp.transition_run_state(run_id, RunState::Failed);
+            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+            cp.drain_committed_events()
+        };
+        let _ = server_state.publish_control_plane_events(fail_envs);
+        return;
+    }
+
     let instances = match runtime.discover().await {
         Ok(inst) => inst,
         Err(e) => {
@@ -1480,7 +1676,51 @@ async fn execute_task_lifecycle(
         }
     };
 
-    let instance = if let Some(target_id) = server_state.configured_instance_id {
+    let instance = if let Some(req_inst) = exec_spec
+        .as_ref()
+        .and_then(|e| e.runtime_instance_id.as_deref())
+    {
+        match instances
+            .into_iter()
+            .find(|i| i.instance_id.to_string() == req_inst)
+        {
+            Some(inst) => {
+                if !inst.is_available() {
+                    let fail_envs = {
+                        let mut cp = server_state.control_plane.write().await;
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "failed",
+                            Some(format!(
+                                "Requested runtime instance '{req_inst}' is not available"
+                            )),
+                        );
+                        let _ = cp.transition_run_state(run_id, RunState::Failed);
+                        let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                        cp.drain_committed_events()
+                    };
+                    let _ = server_state.publish_control_plane_events(fail_envs);
+                    return;
+                }
+                inst
+            }
+            None => {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!("Requested runtime instance '{req_inst}' not found")),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+        }
+    } else if let Some(target_id) = server_state.configured_instance_id {
         match instances
             .into_iter()
             .find(|i| i.instance_id == target_id && i.is_available())
@@ -1565,7 +1805,28 @@ async fn execute_task_lifecycle(
                 w.base_commit,
             )
         } else if let Some(ref orchestrator) = server_state.workspace_orchestrator {
-            let source_cwd = if let Some(ref p) = server_state.default_repo_path {
+            let source_cwd = if let Some(req_repo) =
+                exec_spec.as_ref().and_then(|e| e.repository_path.as_ref())
+            {
+                match server_state.verify_workspace_authorization(req_repo) {
+                    Ok(canon) => canon,
+                    Err(err) => {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!("Workspace authorization error: {err}")),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                        return;
+                    }
+                }
+            } else if let Some(ref p) = server_state.default_repo_path {
                 p.clone()
             } else if let Ok(repo_env) = std::env::var("AGENT_STUDIOS_REPO_PATH") {
                 PathBuf::from(repo_env)
@@ -1740,7 +2001,7 @@ async fn execute_task_lifecycle(
         wt_root,
         wt_cwd,
         wt_source_root,
-        wt_source_cwd,
+        wt_source_cwd.clone(),
         wt_base_sha,
     );
 
@@ -1755,7 +2016,11 @@ async fn execute_task_lifecycle(
         instance.instance_id,
     );
 
-    let prompt = {
+    let prompt = if let Some(explicit_prompt) =
+        exec_spec.as_ref().and_then(|e| e.initial_prompt.as_deref())
+    {
+        explicit_prompt.to_string()
+    } else {
         let cp = server_state.control_plane.read().await;
         cp.get_task(task_id)
             .map(|t| {
@@ -1768,7 +2033,174 @@ async fn execute_task_lifecycle(
             .unwrap_or_default()
     };
 
-    let model_ref = if let Some(ref configured_ref) = server_state.default_model_ref {
+    let model_ref = if let Some(ref model_id_str) =
+        exec_spec.as_ref().and_then(|e| e.model_id.as_ref())
+    {
+        let catalog = server_state.provider_catalog.read().await;
+        if let Some(ref prov_id_str) = exec_spec
+            .as_ref()
+            .and_then(|e| e.provider_instance_id.as_ref())
+        {
+            let prov_id =
+                match prov_id_str.parse::<agent_studios_provider::id::ProviderInstanceId>() {
+                    Ok(id) => id,
+                    Err(_) => {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!("Invalid provider instance ID '{prov_id_str}'")),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                        return;
+                    }
+                };
+            let m_id = match agent_studios_provider::id::ModelId::new(model_id_str.as_str()) {
+                Ok(id) => id,
+                Err(e) => {
+                    let fail_envs = {
+                        let mut cp = server_state.control_plane.write().await;
+                        let _ = cp.record_run_outcome(
+                            run_id,
+                            "failed",
+                            Some(format!("Invalid model ID '{model_id_str}': {e}")),
+                        );
+                        let _ = cp.transition_run_state(run_id, RunState::Failed);
+                        let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                        cp.drain_committed_events()
+                    };
+                    let _ = server_state.publish_control_plane_events(fail_envs);
+                    return;
+                }
+            };
+            if catalog.get_model(&prov_id, &m_id).is_some() {
+                Some(agent_studios_provider::model::ModelRef::new(prov_id, m_id))
+            } else {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!(
+                            "Requested model '{m_id}' not found for provider instance '{prov_id}' in catalog"
+                        )),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+        } else {
+            let matching: Vec<_> = catalog
+                .list_models()
+                .into_iter()
+                .filter(|m| m.id.as_str() == model_id_str.as_str())
+                .collect();
+            if matching.is_empty() {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!(
+                            "Requested model '{model_id_str}' not found in any provider instance in catalog"
+                        )),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            } else if matching.len() == 1 {
+                Some(matching[0].model_ref())
+            } else {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!(
+                            "Requested model '{model_id_str}' matches multiple provider instances ({}). Specify explicit provider_instance_id",
+                            matching.len()
+                        )),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+        }
+    } else if let Some(ref prov_id_str) = exec_spec
+        .as_ref()
+        .and_then(|e| e.provider_instance_id.as_ref())
+    {
+        let prov_id = match prov_id_str.parse::<agent_studios_provider::id::ProviderInstanceId>() {
+            Ok(id) => id,
+            Err(_) => {
+                let fail_envs = {
+                    let mut cp = server_state.control_plane.write().await;
+                    let _ = cp.record_run_outcome(
+                        run_id,
+                        "failed",
+                        Some(format!("Invalid provider instance ID '{prov_id_str}'")),
+                    );
+                    let _ = cp.transition_run_state(run_id, RunState::Failed);
+                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                    cp.drain_committed_events()
+                };
+                let _ = server_state.publish_control_plane_events(fail_envs);
+                return;
+            }
+        };
+        let catalog = server_state.provider_catalog.read().await;
+        let models = catalog.models_for_provider_instance(&prov_id);
+        if models.is_empty() {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!(
+                        "No models available for provider instance '{prov_id}' in catalog"
+                    )),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        } else if models.len() == 1 {
+            Some(models[0].model_ref())
+        } else {
+            let fail_envs = {
+                let mut cp = server_state.control_plane.write().await;
+                let _ = cp.record_run_outcome(
+                    run_id,
+                    "failed",
+                    Some(format!(
+                        "Multiple models ({}) for provider instance '{prov_id}'. Specify explicit model_id",
+                        models.len()
+                    )),
+                );
+                let _ = cp.transition_run_state(run_id, RunState::Failed);
+                let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                cp.drain_committed_events()
+            };
+            let _ = server_state.publish_control_plane_events(fail_envs);
+            return;
+        }
+    } else if let Some(ref configured_ref) = server_state.default_model_ref {
         let catalog = server_state.provider_catalog.read().await;
         if catalog
             .get_model(
@@ -1834,7 +2266,7 @@ async fn execute_task_lifecycle(
             .with_initial_prompt(prompt)
             .with_correlation(correlation);
 
-    if let Some(m) = model_ref {
+    if let Some(m) = model_ref.clone() {
         start_req = start_req.with_model_ref(m);
     }
 
@@ -1863,6 +2295,31 @@ async fn execute_task_lifecycle(
         .write()
         .await
         .insert(task_id, (session_ref.clone(), runtime.clone()));
+
+    {
+        let mut cp = server_state.control_plane.write().await;
+        if let Some(r) = cp.get_run_mut(run_id) {
+            let mut final_exec = exec_spec.clone().unwrap_or_default();
+            if final_exec.repository_path.is_none() {
+                final_exec.repository_path = Some(wt_source_cwd.to_string_lossy().to_string());
+            }
+            if final_exec.runtime_instance_id.is_none() {
+                final_exec.runtime_instance_id = Some(instance.instance_id.to_string());
+            }
+            if final_exec.runtime_preference.is_none() {
+                final_exec.runtime_preference = Some(instance.implementation_id.to_string());
+            }
+            if let Some(ref mr) = model_ref {
+                if final_exec.provider_instance_id.is_none() {
+                    final_exec.provider_instance_id = Some(mr.provider_instance_id.to_string());
+                }
+                if final_exec.model_id.is_none() {
+                    final_exec.model_id = Some(mr.model_id.to_string());
+                }
+            }
+            r.execution = Some(final_exec);
+        }
+    }
 
     let mut sub = match runtime.events_after(&session_ref, None).await {
         Ok(s) => s,

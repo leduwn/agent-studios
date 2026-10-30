@@ -17,6 +17,7 @@ pub mod envelope;
 pub mod error;
 pub mod framing;
 pub mod id;
+pub mod readiness;
 pub mod redaction;
 pub mod replay;
 
@@ -36,6 +37,9 @@ pub use framing::{
     IpcResponse, decode_frame, encode_frame,
 };
 pub use id::{ApprovalId, ClientId, CorrelationId, RequestId, SessionId, SubscriptionId};
+pub use readiness::{
+    ExecutionDefaultsReadiness, ExecutionReadinessReport, ModelReadiness, RuntimeInstanceReadiness,
+};
 pub use redaction::{MaskedTelemetry, Redacted, SecretRedactor};
 pub use replay::{IpcEvent, ReplayBuffer};
 
@@ -47,6 +51,7 @@ pub mod prelude {
     pub use super::error::*;
     pub use super::framing::*;
     pub use super::id::*;
+    pub use super::readiness::*;
     pub use super::redaction::*;
     pub use super::replay::*;
 }

@@ -76,6 +76,7 @@ pub enum IpcCommand {
         #[serde(default)]
         instance_id: Option<String>,
     },
+    GetExecutionReadiness,
     Custom {
         action: String,
         payload: serde_json::Value,

@@ -191,6 +191,7 @@ async fn test_actor_task_batch_and_live_event_subscription() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "step_2".to_string(),
@@ -202,6 +203,7 @@ async fn test_actor_task_batch_and_live_event_subscription() {
             dependency_keys: vec!["step_1".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 

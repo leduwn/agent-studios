@@ -1985,6 +1985,7 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
                 updated_at: now,
                 retry_count: 0,
                 dependency_output_policy: spec.dependency_output_policy,
+                execution: spec.execution.clone(),
             };
 
             candidate_events.push(ControlPlaneEvent::TaskCreated { task: task.clone() });
@@ -2307,7 +2308,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             .unwrap_or(0)
             + 1;
 
-        let run = RunRecord::new(task_id, agent_id, attempt);
+        let mut run = RunRecord::new(task_id, agent_id, attempt);
+        if let Some(ref exec) = task.execution {
+            run.execution = Some(exec.clone());
+        }
         let event = ControlPlaneEvent::RunCreated { run: run.clone() };
 
         self.commit_transaction(studio_id, vec![event])?;
@@ -2382,6 +2386,10 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
 
     pub fn get_run(&self, id: RunId) -> Option<&RunRecord> {
         self.state.runs.get(&id)
+    }
+
+    pub fn get_run_mut(&mut self, id: RunId) -> Option<&mut RunRecord> {
+        self.state.runs.get_mut(&id)
     }
 
     pub fn all_runs(&self) -> impl Iterator<Item = &RunRecord> {

@@ -71,9 +71,75 @@ pub struct ServerState {
     pub configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
     pub in_flight_approvals: Arc<Mutex<HashSet<agent_studios_protocol::id::ApprovalId>>>,
     pub in_flight_cancellations: Arc<Mutex<HashSet<agent_studios_protocol::id::TaskId>>>,
+    pub authorized_workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    pub strict_workspace_roots: bool,
 }
 
 impl ServerState {
+    /// Verifies and canonicalizes a requested repository/workspace path against the
+    /// authorized workspaces allowlist policy (M15).
+    pub fn verify_workspace_authorization(
+        &self,
+        requested: &str,
+    ) -> Result<std::path::PathBuf, String> {
+        let raw_path = std::path::PathBuf::from(requested);
+        let canonical = dunce::canonicalize(&raw_path).map_err(|e| {
+            format!(
+                "Failed to canonicalize requested workspace path '{}': {e}",
+                raw_path.display()
+            )
+        })?;
+
+        // Verify git repository identity (.git must exist or path is valid repo)
+        let dot_git = canonical.join(".git");
+        if !dot_git.exists() {
+            return Err(format!(
+                "Requested workspace path '{}' is not a valid Git repository (.git not found)",
+                canonical.display()
+            ));
+        }
+
+        let allowlist = self.authorized_workspaces.lock().unwrap();
+        if let Some(canon_def) = self
+            .default_repo_path
+            .as_ref()
+            .and_then(|def| dunce::canonicalize(def).ok())
+        {
+            let is_match = if self.strict_workspace_roots {
+                canonical == canon_def
+            } else {
+                canonical == canon_def || canonical.starts_with(&canon_def)
+            };
+            if is_match {
+                return Ok(canonical);
+            }
+        }
+
+        if allowlist.is_empty() {
+            return Err(format!(
+                "Workspace path '{}' is not authorized (no authorized workspaces configured on daemon)",
+                canonical.display()
+            ));
+        }
+
+        for auth in allowlist.iter() {
+            if let Ok(canon_auth) = dunce::canonicalize(auth) {
+                let is_match = if self.strict_workspace_roots {
+                    canonical == canon_auth
+                } else {
+                    canonical == canon_auth || canonical.starts_with(&canon_auth)
+                };
+                if is_match {
+                    return Ok(canonical);
+                }
+            }
+        }
+
+        Err(format!(
+            "Workspace path '{}' is not in the daemon authorized workspaces allowlist",
+            canonical.display()
+        ))
+    }
     pub fn register_approval_origin(
         &self,
         approval_id: impl Into<String>,
@@ -158,6 +224,8 @@ pub struct IpcServerBuilder {
     default_repo_path: Option<std::path::PathBuf>,
     default_model_ref: Option<agent_studios_provider::model::ModelRef>,
     configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
+    authorized_workspaces: Vec<std::path::PathBuf>,
+    strict_workspace_roots: bool,
 }
 
 impl Default for IpcServerBuilder {
@@ -181,6 +249,8 @@ impl IpcServerBuilder {
                 "hmac_auth".to_string(),
                 "tool_execution".to_string(),
                 "diff_inspection".to_string(),
+                "execution_readiness".to_string(),
+                "per_task_routing".to_string(),
             ],
             control_plane: None,
             provider_catalog: None,
@@ -190,6 +260,8 @@ impl IpcServerBuilder {
             default_repo_path: None,
             default_model_ref: None,
             configured_instance_id: None,
+            authorized_workspaces: Vec::new(),
+            strict_workspace_roots: false,
         }
     }
 
@@ -281,6 +353,24 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_authorized_workspace(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.authorized_workspaces.push(path.into());
+        self
+    }
+
+    pub fn with_authorized_workspaces(
+        mut self,
+        paths: impl IntoIterator<Item = std::path::PathBuf>,
+    ) -> Self {
+        self.authorized_workspaces.extend(paths);
+        self
+    }
+
+    pub fn with_strict_workspace_roots(mut self, strict: bool) -> Self {
+        self.strict_workspace_roots = strict;
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
@@ -352,6 +442,8 @@ impl IpcServerBuilder {
             configured_instance_id: self.configured_instance_id,
             in_flight_approvals: Arc::new(Mutex::new(HashSet::new())),
             in_flight_cancellations: Arc::new(Mutex::new(HashSet::new())),
+            authorized_workspaces: Arc::new(Mutex::new(self.authorized_workspaces)),
+            strict_workspace_roots: self.strict_workspace_roots,
         });
 
         Ok(IpcServer { state })

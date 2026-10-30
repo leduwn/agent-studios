@@ -528,6 +528,7 @@ async fn test_runtime_approval_delivery_and_cancellation() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -645,6 +646,7 @@ async fn test_runtime_cancellation_stops_session() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -765,6 +767,7 @@ async fn test_cancel_task_with_wrong_studio_id_fails_closed_without_stopping_run
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio1.id, spec).await.unwrap();
@@ -872,6 +875,7 @@ async fn test_cross_session_cancellation_rejected_for_standard_clients() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
@@ -967,6 +971,7 @@ async fn test_runtime_stop_failure_fails_closed() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -1062,6 +1067,7 @@ async fn test_late_runtime_completed_event_ignored_after_cancellation() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -1179,6 +1185,7 @@ async fn test_approval_runtime_delivery_failure_fails_closed_without_modifying_c
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -1325,6 +1332,7 @@ async fn test_cancel_task_missing_origin_fails_closed_for_standard_allowed_for_a
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = std_client.submit_task(studio.id, spec).await.unwrap();
@@ -1440,6 +1448,7 @@ async fn test_cancel_task_reconnected_owner_session_rebinding_succeeds() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
@@ -1553,6 +1562,7 @@ async fn test_cancel_task_duplicate_on_terminal_state_rejected() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -1652,6 +1662,7 @@ async fn test_concurrent_cancellation_serialized_and_deduplicated() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
@@ -1768,6 +1779,7 @@ async fn test_concurrent_approval_resolution_serialized_and_deduplicated() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client1.submit_task(studio.id, spec).await.unwrap();
@@ -1924,6 +1936,7 @@ async fn test_deterministic_model_routing_multi_model_unconfigured_fails_closed(
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -2035,6 +2048,7 @@ async fn test_deterministic_model_routing_missing_model_fails_closed() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
@@ -2168,6 +2182,7 @@ async fn test_deterministic_model_routing_configured_model_succeeds() {
         dependency_keys: vec![],
         dependency_task_ids: vec![],
         dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+        execution: None,
     };
 
     let task_ids = client.submit_task(studio.id, spec).await.unwrap();
