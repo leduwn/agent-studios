@@ -164,36 +164,22 @@ export function registerAllCommands(
     // If already registered by registerApprovalCommands, don't crash
   }
 
-  // 5. agent-studios.connectDaemon: prompts user for endpoint or connects to configured daemon endpoint; updates bridge
+  // 5. agent-studios.connectDaemon: connects to discovered or configured daemon endpoint; updates bridge
   disposables.push(
-    vscode.commands.registerCommand('agent-studios.connectDaemon', async () => {
-      const config = vscode.workspace.getConfiguration('agentStudios');
-      const defaultEndpoint = config.get<string>(
-        'daemonEndpoint',
-        'ipc://agent-studios.sock'
-      );
-
-      const endpoint = await vscode.window.showInputBox({
-        prompt: 'Connect to Agent Studios authoritative daemon endpoint',
-        value: defaultEndpoint,
-        placeHolder: 'ipc://agent-studios.sock or http://127.0.0.1:4000',
-      });
-
-      if (endpoint === undefined) {
-        return;
-      }
-
+    vscode.commands.registerCommand('agent-studios.connectDaemon', async (bootstrapPath?: string) => {
       try {
-        await bridgeManager.bridge.connect();
+        const daemonBridge = await bridgeManager.connectDaemon(bootstrapPath);
         vscode.window.showInformationMessage(
-          `Agent Studios connected to daemon at ${endpoint}.`
+          'Agent Studios connected to daemon.'
         );
+        return daemonBridge;
       } catch (err: unknown) {
         vscode.window.showErrorMessage(
-          `Failed to connect to daemon at ${endpoint}: ${
+          `Failed to connect to daemon: ${
             err instanceof Error ? err.message : String(err)
           }`
         );
+        return null;
       }
     })
   );
@@ -201,8 +187,10 @@ export function registerAllCommands(
   // 6. agent-studios.disconnectDaemon: disconnects bridge, returns to safe disconnected state
   disposables.push(
     vscode.commands.registerCommand('agent-studios.disconnectDaemon', async () => {
-      await bridgeManager.bridge.disconnect();
-      bridgeManager.setBridge(new DisconnectedBridge());
+      await bridgeManager.disconnectDaemon();
+      if (!(bridgeManager.bridge instanceof DisconnectedBridge)) {
+        bridgeManager.setBridge(new DisconnectedBridge());
+      }
       vscode.window.showInformationMessage('Agent Studios disconnected from daemon.');
     })
   );

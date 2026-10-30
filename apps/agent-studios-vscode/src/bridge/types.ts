@@ -14,11 +14,14 @@ export type ArtifactId = string;
 export type ConnectionState =
   | 'disconnected'
   | 'connecting'
+  | 'authenticating'
   | 'connected'
   | 'reconnecting'
   | 'degraded'
   | 'auth_required'
-  | 'incompatible';
+  | 'authentication_failed'
+  | 'incompatible'
+  | 'unsupported_protocol';
 
 export type SessionStatus =
   | 'idle'
