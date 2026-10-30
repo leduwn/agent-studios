@@ -130,16 +130,16 @@ describe('Real Rust Daemon (agsd) E2E Test Suite', function () {
   it('1. Daemon process startup', async () => {
     const isWindows = process.platform === 'win32';
     const spawnArgs = [
-      '--runtime_info_path',
+      '--runtime-info-path',
       runtimePath,
-      '--admin_runtime_info_path',
+      '--admin-runtime-info-path',
       adminRuntimePath,
     ];
 
     if (isWindows) {
-      spawnArgs.push('--pipe_name', pipeOrSocketPath);
+      spawnArgs.push('--pipe-name', pipeOrSocketPath);
     } else {
-      spawnArgs.push('--socket_path', pipeOrSocketPath);
+      spawnArgs.push('--socket-path', pipeOrSocketPath);
     }
 
     daemonProcess = childProcess.spawn(agsdBinaryPath, spawnArgs, {

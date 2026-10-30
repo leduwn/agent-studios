@@ -31,16 +31,6 @@ async function run(): Promise<void> {
     }
   }
 
-  const e2eDir = path.join(__dirname, '..', 'e2e');
-  if (fs.existsSync(e2eDir)) {
-    const e2eFiles = fs.readdirSync(e2eDir);
-    for (const file of e2eFiles) {
-      if (file.endsWith('.test.js')) {
-        mocha.addFile(path.join(e2eDir, file));
-      }
-    }
-  }
-
   return new Promise<void>((resolve, reject) => {
     mocha.run((failures: number) => {
       if (failures > 0) {

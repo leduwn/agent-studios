@@ -541,11 +541,11 @@ describe('Live Mission Control Data Projection E2E', () => {
     const realDaemon = childProcess.spawn(
       agsdBin,
       [
-        '--runtime_info_path',
+        '--runtime-info-path',
         realRuntimePath,
-        '--admin_runtime_info_path',
+        '--admin-runtime-info-path',
         realAdminRuntimePath,
-        isWindows ? '--pipe_name' : '--socket_path',
+        isWindows ? '--pipe-name' : '--socket-path',
         realPipeOrSocket,
       ],
       {

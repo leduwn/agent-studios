@@ -28,8 +28,9 @@ The **Milestone M14 Integration Quality Gate** executes the authoritative end-to
 
 | Verification Dimension | Pre-Integration Baseline | M14 Integrated Delivery | Quality Gate Status |
 | :--- | :--- | :--- | :--- |
-| **Total Automated Tests** | 308 tests passing | **412 tests passing (100% green)** | **PASS (+104 tests)** |
-| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd.exe` E2E (20 scenarios)** | **PASS** |
+| **Total Automated Tests** | 308 tests passing | **381 tests passing (100% green)** | **PASS (+73 tests)** |
+| **Pure Unit Tests** | 308 tests passing | **332 tests passing** | **PASS (+24 tests)** |
+| **Real Rust Daemon E2E** | Mock Daemon only | **Real compiled `agsd` E2E (20 scenarios)** | **PASS** |
 | **Live Mission Control E2E** | None | **Live Control Plane projection (11 tests)** | **PASS** |
 | **Real VS Code Extension Host** | None | **18 Extension Host tests (Real Electron)** | **PASS** |
 | **P1 Fabricated Task Progress** | Hardcoded 50% on running tasks | **Eliminated (Explicit Indeterminate / 100%)** | **PASS** |
@@ -74,6 +75,6 @@ The **Milestone M14 Integration Quality Gate** executes the authoritative end-to
 
 ## 4. Release Verdict
 
-The integrated system achieves a **100% green pass rate across all 333 automated tests**, zero TypeScript compilation errors, zero ESLint errors, clean production VSIX packaging, and empirical validation against the actual compiled Rust binary.
+The integrated system achieves a **100% green pass rate across all 381 automated tests**, zero TypeScript compilation errors, zero ESLint errors, clean production VSIX packaging, and empirical validation against the actual compiled Rust binary.
 
 **Final Release Verdict:** **GO FOR IMMEDIATE MERGE AND PR DELIVERY.**

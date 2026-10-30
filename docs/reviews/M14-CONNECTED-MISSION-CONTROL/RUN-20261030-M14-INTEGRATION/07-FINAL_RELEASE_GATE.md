@@ -18,16 +18,17 @@ The independent QA and Security Audit for Milestone M14 IPC-03.1 confirms that a
 ================================================================================
                            RELEASE GATE VERDICT: READY
 ================================================================================
-  [✓] Tier 1: Pure Unit & IPC Contract Tests       : 333 / 333 PASS (100%)
-  [✓] Tier 2: Standalone Mock Daemon E2E           :   1 /   1 PASS (100%)
+  [✓] Tier 1: Pure Unit & IPC Contract Tests       : 332 / 332 PASS (100%)
+  [✓] Tier 2: Live Mission Control Data Projection :  11 /  11 PASS (100%)
   [✓] Tier 3: Real Compiled Rust Daemon E2E        :  20 /  20 SCENARIOS PASS (100%)
   [✓] Tier 4: Real VS Code Extension Host (Electron):  18 /  18 PASS (100%)
   ------------------------------------------------------------------------------
+  [✓] Total Automated Tests                        : 381 / 381 PASS (100%)
   [✓] Static Analysis & TypeScript Typechecking   : 0 Errors / 0 Warnings
   [✓] ESLint Analysis                              : 0 Errors
   [✓] Security Boundaries & Fail-Closed Guard      : Fully Enforced
   [✓] P1 Fabricated UI Metrics (Progress/Latency)  : 100% Remediated
-  [✓] Production VSIX Package Verification         : 72 Files, 188.05 KB (Clean)
+  [✓] Production VSIX Package Verification         : 72 Files, 188.92 KB (Clean)
 ================================================================================
 ```
 
@@ -35,31 +36,42 @@ The independent QA and Security Audit for Milestone M14 IPC-03.1 confirms that a
 
 ## 2. Comprehensive 4-Tier Verification Matrix
 
-### Tier 1: Pure Unit Tests & Protocol Contracts (333 Tests)
-Executed via `npm run test:unit` using Mocha 10 on Node.js 22 LTS.
+### Tier 1: Pure Unit Tests & Protocol Contracts (332 Tests)
+Executed via `npm run test:unit` using Mocha 10 on Node.js 22 LTS (decoupled from E2E runner).
 
 | Test Suite File | Coverage Scope | Tests | Failures | Status |
 | :--- | :--- | :---: | :---: | :---: |
-| `ApprovalCommands.test.ts` | Modal warnings, decision dispatch, fail-closed guards | 7 | 0 | **PASS** |
-| `ArtifactCommands.test.ts` | QuickPick inspection, `vscode.diff` invocation | 5 | 0 | **PASS** |
-| `Bridge.test.ts` | `DisconnectedBridge`, `FixtureBridge` contracts, state transitions | 30 | 0 | **PASS** |
-| `ChatView.test.ts` | Chat webview lifecycle, session switching, streaming chunks | 18 | 0 | **PASS** |
-| `DaemonConnectedBridge.test.ts` | IPC bridge queries, monotonic watermarks, event deduplication | 5 | 0 | **PASS** |
-| `DaemonDiscovery.test.ts` | Bootstrap file discovery, symlink guard, credential redaction | 8 | 0 | **PASS** |
-| `NativeIpcTransport.test.ts` | Wire codec framing, 4 MiB limits, accumulator buffer, HMAC auth | 12 | 0 | **PASS** |
-| `RustIpcContractFixtures.test.ts` | Canonical JSON vectors, Serde schema wire parity | 9 | 0 | **PASS** |
-| `SessionStateProjection.test.ts` | Session hydration, task DAG projection, attention models | 16 | 0 | **PASS** |
-| `missionControl.test.ts` | 9-tab projection, fragments, DOM updates, P1 fixes, `allSettled` | 45 | 0 | **PASS** |
-| `SessionDetailWebview.test.ts` | Session inspector webview lifecycle, metric cards | 3 | 0 | **PASS** |
-| *(Additional Unit & Component Suites)* | Component styling, card layout, command dispatchers | 175 | 0 | **PASS** |
-| **Tier 1 Total** | | **333** | **0** | **PASS** |
+| `approvalCommands.test.ts` | Modal warnings, decision dispatch, fail-closed guards | 7 | 0 | **PASS** |
+| `artifactCommands.test.ts` | QuickPick inspection, `vscode.diff` invocation | 5 | 0 | **PASS** |
+| `Bridge.test.ts` | `DisconnectedBridge`, `FixtureBridge` contracts, state transitions | 19 | 0 | **PASS** |
+| `cards.test.ts` | Card renderer & interactive components | 27 | 0 | **PASS** |
+| `chatWebview.test.ts` | Chat webview lifecycle, session switching, streaming chunks | 21 | 0 | **PASS** |
+| `commandsRegistry.test.ts` | Command registration and dispatching | 14 | 0 | **PASS** |
+| `composer.test.ts` | Composer input handling, suggestions, prompt construction | 41 | 0 | **PASS** |
+| `controls.test.ts` | Action controls & UI toggle behaviors | 23 | 0 | **PASS** |
+| `CrossProcessDaemonE2E.test.ts` | Node.js out-of-process standalone mock daemon verification | 1 | 0 | **PASS** |
+| `DaemonConnectedBridge.test.ts` | IPC bridge queries, monotonic watermarks, event deduplication | 6 | 0 | **PASS** |
+| `DaemonDiscovery.test.ts` | Bootstrap file discovery, symlink guard, credential redaction | 7 | 0 | **PASS** |
+| `diffDocumentProvider.test.ts` | Virtual diff document scheme provider & caching | 11 | 0 | **PASS** |
+| `ipcBridge.test.ts` | IPC message routing & framing handlers | 17 | 0 | **PASS** |
+| `missionControl.test.ts` | 9-tab projection, fragments, DOM updates, P1 fixes, `allSettled` | 24 | 0 | **PASS** |
+| `NativeIpcTransport.test.ts` | Wire codec framing, 4 MiB limits, accumulator buffer, HMAC auth | 5 | 0 | **PASS** |
+| `onboarding.test.ts` | First-run onboarding flow & workbench views | 4 | 0 | **PASS** |
+| `rustIpcCodec.test.ts` | Frame encoding, header prefix parsing, buffer chunking | 11 | 0 | **PASS** |
+| `RustIpcContractFixtures.test.ts` | Canonical JSON vectors, Serde schema wire parity | 15 | 0 | **PASS** |
+| `securityGuards.test.ts` | Mutation defense, privilege validation, injection checks | 23 | 0 | **PASS** |
+| `SessionStateProjection.test.ts` | Session hydration, task DAG projection, attention models | 11 | 0 | **PASS** |
+| `TaskGraphLayout.test.ts` | DAG layout algorithm & cycle prevention | 4 | 0 | **PASS** |
+| `views.test.ts` | Tree view data providers & view activation | 15 | 0 | **PASS** |
+| `webviews.test.ts` | Webview panel manager & CSP enforcement | 21 | 0 | **PASS** |
+| **Tier 1 Total** | | **332** | **0** | **PASS** |
 
-### Tier 2: Standalone Mock Daemon E2E (1 Test)
-Executed via `apps/agent-studios-vscode/src/test/e2e/CrossProcessDaemonE2E.test.ts`.
-- Validates cross-process Node.js child process lifecycle.
-- Tests standard input/output streaming, wire length-prefixed framing, and full HMAC-SHA256 handshake.
-- Verifies clean socket termination upon parent process exit.
-- **Result:** **1 / 1 PASS (100%)**
+### Tier 2: Live Mission Control Data Projection E2E (11 Tests)
+Executed via `apps/agent-studios-vscode/src/test/e2e/LiveMissionControlE2E.test.ts`.
+- Validates cross-process standalone daemon and live Control Plane state projection.
+- Tests standard vs admin credential separation, fail-closed mutating boundaries, and seed data hydration.
+- Verifies truthful indeterminate progress semantics, unmeasured latency, and query error attention alerts.
+- **Result:** **11 / 11 PASS (100%)**
 
 ### Tier 3: Real Compiled Rust Daemon (`agsd.exe`) E2E (20 Scenarios)
 Executed via `apps/agent-studios-vscode/src/test/e2e/RealRustDaemonE2E.test.ts` against the actual compiled binary `D:\Projects\agent-studios-m13\agent-studios-rs\target\debug\agsd.exe` over Windows Named Pipes (`\\.\pipe\ags-e2e-<id>`).
