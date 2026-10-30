@@ -394,7 +394,11 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
    */
   public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
     this.assertConnected();
-    return SubmitTaskAdapter.submitTask(this._transport!, req);
+    const workspacePath = req.workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return SubmitTaskAdapter.submitTask(this._transport!, {
+      ...req,
+      workspacePath,
+    });
   }
 
   /**
@@ -410,10 +414,11 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
 
   /**
    * Cancels current run.
+   * STRICTLY DISABLED in M14-IPC-03 read-only connected vertical slice.
+   * Fails closed to avoid fabricating cancellation state in the UI.
    */
   public async cancelCurrentRun(): Promise<void> {
-    // In read-only slice, no-op safe
-    return Promise.resolve();
+    throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
   }
 
   /**

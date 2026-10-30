@@ -11,3 +11,6 @@ export * from './RustHmacSigner';
 export * from './RustIpcCodec';
 export * from './DaemonDiscovery';
 export * from './NativeIpcTransport';
+export * from './PromptSanitizer';
+export * from './CapabilityMatrix';
+export * from './SubmitTaskAdapter';

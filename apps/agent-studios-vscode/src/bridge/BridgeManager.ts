@@ -8,6 +8,7 @@ import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { DisconnectedBridge } from './DisconnectedBridge';
 import { FixtureBridge } from './FixtureBridge';
 import { DaemonConnectedBridge } from './DaemonConnectedBridge';
+import { CapabilityMatrix, CapabilityDescriptor } from './ipc/CapabilityMatrix';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 
 /**
@@ -89,6 +90,39 @@ export class BridgeManager implements vscode.Disposable {
    */
   public get isDaemonMode(): boolean {
     return this._bridge instanceof DaemonConnectedBridge;
+  }
+
+  /**
+   * Truthfully evaluates if a capability is enabled on the current active bridge.
+   * In developer preview mode (FixtureBridge), mock interactive capabilities may be simulated.
+   * In connected daemon mode (DaemonConnectedBridge) or disconnected mode, capabilities strictly
+   * reflect verified production availability from CapabilityMatrix.
+   */
+  public isCapabilityEnabled(capabilityId: string): boolean {
+    if (!this.isConnected) {
+      return false;
+    }
+    if (this.isPreviewMode) {
+      // FixtureBridge simulates approval and cancellation flows locally
+      if (capabilityId === 'approval.resolve' || capabilityId === 'task.cancel') {
+        return true;
+      }
+    }
+    return CapabilityMatrix.isCapabilityEnabled(capabilityId);
+  }
+
+  /**
+   * Retrieves the effective capability descriptor for the current bridge.
+   */
+  public getCapabilityDescriptor(capabilityId: string): CapabilityDescriptor | undefined {
+    const desc = CapabilityMatrix.getDescriptor(capabilityId);
+    if (!desc) {
+      return undefined;
+    }
+    return {
+      ...desc,
+      enabled: this.isCapabilityEnabled(capabilityId),
+    };
   }
 
   /**
