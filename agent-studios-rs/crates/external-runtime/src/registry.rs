@@ -84,6 +84,46 @@ impl RuntimeRegistry {
         }
     }
 
+    /// Creates a registry initialized with the given runtimes, rejecting duplicate implementations.
+    pub fn from_runtimes(
+        runtimes: impl IntoIterator<Item = Arc<dyn AgentRuntime>>,
+    ) -> Result<Self, RuntimeError> {
+        let mut map = BTreeMap::new();
+        for rt in runtimes {
+            let id = rt.implementation_id().clone();
+            if map.contains_key(&id) {
+                return Err(RuntimeError::DuplicateRuntime {
+                    implementation_id: id,
+                });
+            }
+            map.insert(id, rt);
+        }
+        Ok(Self {
+            runtimes: Arc::new(RwLock::new(map)),
+        })
+    }
+
+    /// Registers a runtime implementation synchronously using try_write.
+    /// Fails if an implementation with the same ID is already registered or lock is contended.
+    pub fn register_sync(&self, runtime: Arc<dyn AgentRuntime>) -> Result<(), RuntimeError> {
+        let mut guard = self
+            .runtimes
+            .try_write()
+            .map_err(|_| RuntimeError::Internal {
+                reason: SanitizedRuntimeMessage::new(
+                    "Runtime registry lock unavailable for sync registration",
+                ),
+            })?;
+        let id = runtime.implementation_id().clone();
+        if guard.contains_key(&id) {
+            return Err(RuntimeError::DuplicateRuntime {
+                implementation_id: id,
+            });
+        }
+        guard.insert(id, runtime);
+        Ok(())
+    }
+
     /// Registers a runtime implementation. Fails if an implementation with the same ID is already registered.
     pub async fn register(&self, runtime: Arc<dyn AgentRuntime>) -> Result<(), RuntimeError> {
         let mut guard = self.runtimes.write().await;

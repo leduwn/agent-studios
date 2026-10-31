@@ -1375,25 +1375,29 @@ async fn build_execution_readiness_report(
     let mut runtime_instances = Vec::new();
 
     // 1. Runtime availability check
-    if let Some(ref runtime) = server_state.runtime {
-        available_runtimes.push(runtime.implementation_id().to_string());
-        match runtime.discover().await {
-            Ok(instances) => {
-                for inst in instances {
-                    let healthy = inst.availability.is_available();
-                    runtime_instances.push(RuntimeInstanceReadiness {
-                        instance_id: inst.instance_id.to_string(),
-                        implementation: inst.implementation_id.to_string(),
-                        healthy,
-                    });
-                }
-            }
-            Err(e) => {
-                blocking_reasons.push(format!("Failed to discover runtime instances: {e}"));
-            }
-        }
-    } else {
+    let registered_runtimes = server_state.list_runtimes().await;
+    if registered_runtimes.is_empty() {
         blocking_reasons.push("No agent runtime configured on daemon".to_string());
+    } else {
+        available_runtimes = registered_runtimes
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+
+        let outcome = server_state.runtime_registry.discover_all().await;
+        for inst in &outcome.instances {
+            let healthy = inst.availability.is_available();
+            runtime_instances.push(RuntimeInstanceReadiness {
+                instance_id: inst.instance_id.to_string(),
+                implementation: inst.implementation_id.to_string(),
+                healthy,
+            });
+        }
+        for (failed_id, reason) in &outcome.failures {
+            blocking_reasons.push(format!(
+                "Failed to discover instances for runtime '{failed_id}': {reason}"
+            ));
+        }
     }
 
     // Check runtime instance availability
@@ -1406,8 +1410,21 @@ async fn build_execution_readiness_report(
                 "Configured runtime instance '{target_id}' is not available or unhealthy"
             ));
         }
-    } else if !runtime_instances.iter().any(|r| r.healthy) && server_state.runtime.is_some() {
+    } else if !runtime_instances.iter().any(|r| r.healthy) && !registered_runtimes.is_empty() {
         blocking_reasons.push("No healthy runtime instances available".to_string());
+    } else {
+        // If multiple healthy runtime implementations exist without a configured instance, routing is ambiguous
+        let healthy_impls: std::collections::BTreeSet<_> = runtime_instances
+            .iter()
+            .filter(|r| r.healthy)
+            .map(|r| &r.implementation)
+            .collect();
+        if healthy_impls.len() > 1 && server_state.configured_instance_id.is_none() {
+            blocking_reasons.push(format!(
+                "Multiple healthy runtimes available ({}) but no default runtime instance configured",
+                healthy_impls.len()
+            ));
+        }
     }
 
     // 2. Model catalog check
@@ -1615,39 +1632,17 @@ async fn execute_task_lifecycle(
     let (run_id, agent_id, exec_spec, start_envs) = maybe_run;
     let _ = server_state.publish_control_plane_events(start_envs);
 
-    let runtime = match server_state.runtime.as_ref() {
-        Some(r) => r.clone(),
-        None => {
-            let fail_envs = {
-                let mut cp = server_state.control_plane.write().await;
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "failed",
-                    Some("No agent runtime configured for execution".to_string()),
-                );
-                let _ = cp.transition_run_state(run_id, RunState::Failed);
-                let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                cp.drain_committed_events()
-            };
-            let _ = server_state.publish_control_plane_events(fail_envs);
-            return;
-        }
-    };
+    // --- M15-02 Deterministic Runtime and Instance Resolution ---
+    let outcome = server_state.runtime_registry.discover_all().await;
+    let registered_runtimes = server_state.list_runtimes().await;
 
-    if let Some(pref) = exec_spec
-        .as_ref()
-        .and_then(|e| e.runtime_preference.as_ref())
-        .filter(|pref| runtime.implementation_id().as_str() != pref.as_str())
-    {
+    if registered_runtimes.is_empty() {
         let fail_envs = {
             let mut cp = server_state.control_plane.write().await;
             let _ = cp.record_run_outcome(
                 run_id,
                 "failed",
-                Some(format!(
-                    "Requested runtime preference '{pref}' does not match available runtime implementation '{}'",
-                    runtime.implementation_id()
-                )),
+                Some("No agent runtime configured for execution".to_string()),
             );
             let _ = cp.transition_run_state(run_id, RunState::Failed);
             let _ = cp.transition_task_state(task_id, TaskState::Failed);
@@ -1657,125 +1652,288 @@ async fn execute_task_lifecycle(
         return;
     }
 
-    let instances = match runtime.discover().await {
-        Ok(inst) => inst,
-        Err(e) => {
-            let fail_envs = {
-                let mut cp = server_state.control_plane.write().await;
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "failed",
-                    Some(format!("Runtime discovery error: {e}")),
-                );
-                let _ = cp.transition_run_state(run_id, RunState::Failed);
-                let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                cp.drain_committed_events()
+    let req_pref = exec_spec
+        .as_ref()
+        .and_then(|e| e.runtime_preference.as_deref());
+    let req_inst = exec_spec
+        .as_ref()
+        .and_then(|e| e.runtime_instance_id.as_deref());
+
+    let resolution_result: Result<
+        (
+            Arc<dyn agent_studios_external_runtime::AgentRuntime>,
+            agent_studios_external_runtime::discovery::DiscoveredRuntimeInstance,
+        ),
+        String,
+    > = match (req_pref, req_inst) {
+        // Case 1: Both explicit preference AND explicit instance
+        (Some(pref), Some(inst_id_str)) => {
+            let pref_id = match pref
+                .parse::<agent_studios_external_runtime::id::RuntimeImplementationId>()
+            {
+                Ok(id) => id,
+                Err(_) => {
+                    return {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!("Requested runtime preference '{pref}' is invalid")),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                    };
+                }
             };
-            let _ = server_state.publish_control_plane_events(fail_envs);
-            return;
+            let runtime = match server_state.get_runtime(&pref_id).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!(
+                                    "Requested runtime implementation '{pref}' is not registered"
+                                )),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                    };
+                }
+            };
+            match outcome
+                .instances
+                .iter()
+                .find(|i| i.instance_id.to_string() == inst_id_str)
+            {
+                Some(inst) => {
+                    if inst.implementation_id != pref_id {
+                        Err(format!(
+                            "Requested instance '{inst_id_str}' belongs to runtime '{}', not requested preference '{pref}'",
+                            inst.implementation_id
+                        ))
+                    } else if !inst.is_available() {
+                        Err(format!(
+                            "Requested runtime instance '{inst_id_str}' is not available"
+                        ))
+                    } else {
+                        Ok((runtime, inst.clone()))
+                    }
+                }
+                None => {
+                    if let Some(err) = outcome.failures.get(&pref_id) {
+                        Err(format!("Runtime discovery error: {err}"))
+                    } else {
+                        Err(format!(
+                            "Requested runtime instance '{inst_id_str}' not found"
+                        ))
+                    }
+                }
+            }
+        }
+        // Case 2: Explicit instance only (no preference)
+        (None, Some(inst_id_str)) => {
+            match outcome
+                .instances
+                .iter()
+                .find(|i| i.instance_id.to_string() == inst_id_str)
+            {
+                Some(inst) => {
+                    if !inst.is_available() {
+                        Err(format!(
+                            "Requested runtime instance '{inst_id_str}' is not available"
+                        ))
+                    } else {
+                        match server_state.get_runtime(&inst.implementation_id).await {
+                            Ok(runtime) => Ok((runtime, inst.clone())),
+                            Err(_) => Err(format!(
+                                "Runtime implementation '{}' for instance '{inst_id_str}' is not registered",
+                                inst.implementation_id
+                            )),
+                        }
+                    }
+                }
+                None => Err(format!(
+                    "Requested runtime instance '{inst_id_str}' not found"
+                )),
+            }
+        }
+        // Case 3: Explicit preference only (no explicit instance)
+        (Some(pref), None) => {
+            let pref_id = match pref
+                .parse::<agent_studios_external_runtime::id::RuntimeImplementationId>()
+            {
+                Ok(id) => id,
+                Err(_) => {
+                    return {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!("Requested runtime preference '{pref}' is invalid")),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                    };
+                }
+            };
+            let runtime = match server_state.get_runtime(&pref_id).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return {
+                        let fail_envs = {
+                            let mut cp = server_state.control_plane.write().await;
+                            let _ = cp.record_run_outcome(
+                                run_id,
+                                "failed",
+                                Some(format!(
+                                    "Requested runtime implementation '{pref}' is not registered"
+                                )),
+                            );
+                            let _ = cp.transition_run_state(run_id, RunState::Failed);
+                            let _ = cp.transition_task_state(task_id, TaskState::Failed);
+                            cp.drain_committed_events()
+                        };
+                        let _ = server_state.publish_control_plane_events(fail_envs);
+                    };
+                }
+            };
+            let matching_instances: Vec<_> = outcome
+                .instances
+                .iter()
+                .filter(|i| i.implementation_id == pref_id)
+                .collect();
+            if matching_instances.is_empty() {
+                if let Some(err) = outcome.failures.get(&pref_id) {
+                    Err(format!("Runtime discovery error: {err}"))
+                } else {
+                    Err(format!(
+                        "No runtime instances found for implementation '{pref}'"
+                    ))
+                }
+            } else if let Some(target_id) = &server_state.configured_instance_id {
+                match matching_instances
+                    .iter()
+                    .find(|i| &i.instance_id == target_id)
+                {
+                    Some(inst) => {
+                        if !inst.is_available() {
+                            Err(format!(
+                                "Configured runtime instance '{target_id}' is not available"
+                            ))
+                        } else {
+                            Ok((runtime, (*inst).clone()))
+                        }
+                    }
+                    None => Err(format!(
+                        "Configured runtime instance '{target_id}' does not belong to requested implementation '{pref}'"
+                    )),
+                }
+            } else {
+                let available: Vec<_> = matching_instances
+                    .into_iter()
+                    .filter(|i| i.is_available())
+                    .collect();
+                if available.is_empty() {
+                    Err(format!(
+                        "No available runtime instances for implementation '{pref}'"
+                    ))
+                } else if available.len() == 1 {
+                    Ok((runtime, (*available[0]).clone()))
+                } else {
+                    Err(format!(
+                        "Multiple runtime instances available ({}) for implementation '{pref}' but no explicit instance selected. Configure target instance ID",
+                        available.len()
+                    ))
+                }
+            }
+        }
+        // Case 4: Neither explicit preference NOR explicit instance
+        (None, None) => {
+            if let Some(target_id) = &server_state.configured_instance_id {
+                match outcome
+                    .instances
+                    .iter()
+                    .find(|i| &i.instance_id == target_id)
+                {
+                    Some(inst) => {
+                        if !inst.is_available() {
+                            Err(format!(
+                                "Configured runtime instance '{target_id}' is not available"
+                            ))
+                        } else {
+                            match server_state.get_runtime(&inst.implementation_id).await {
+                                Ok(runtime) => Ok((runtime, inst.clone())),
+                                Err(_) => Err(format!(
+                                    "Runtime implementation '{}' for configured instance '{target_id}' is not registered",
+                                    inst.implementation_id
+                                )),
+                            }
+                        }
+                    }
+                    None => Err(format!(
+                        "Configured runtime instance '{target_id}' not found"
+                    )),
+                }
+            } else {
+                let available: Vec<_> = outcome
+                    .instances
+                    .iter()
+                    .filter(|i| i.is_available())
+                    .collect();
+                if available.is_empty() {
+                    if let Some((_, err)) = outcome.failures.iter().next() {
+                        Err(format!("Runtime discovery error: {err}"))
+                    } else {
+                        Err("No available runtime instance discovered. OpenCode runtime binary not found. Install via: npm i -g opencode-ai or configure AGENT_STUDIOS_OPENCODE_PATH".to_string())
+                    }
+                } else {
+                    let distinct_impls: std::collections::BTreeSet<_> =
+                        available.iter().map(|i| &i.implementation_id).collect();
+                    if distinct_impls.len() > 1 {
+                        Err(format!(
+                            "Ambiguous runtime routing: multiple available runtimes ({}) without explicit preference or configured instance",
+                            distinct_impls.len()
+                        ))
+                    } else if available.len() > 1 {
+                        Err(format!(
+                            "Multiple runtime instances available ({}) but no explicit instance selected. Configure target instance ID",
+                            available.len()
+                        ))
+                    } else {
+                        let inst = available[0].clone();
+                        match server_state.get_runtime(&inst.implementation_id).await {
+                            Ok(runtime) => Ok((runtime, inst)),
+                            Err(_) => Err(format!(
+                                "Runtime implementation '{}' for instance '{}' is not registered",
+                                inst.implementation_id, inst.instance_id
+                            )),
+                        }
+                    }
+                }
+            }
         }
     };
 
-    let instance = if let Some(req_inst) = exec_spec
-        .as_ref()
-        .and_then(|e| e.runtime_instance_id.as_deref())
-    {
-        match instances
-            .into_iter()
-            .find(|i| i.instance_id.to_string() == req_inst)
-        {
-            Some(inst) => {
-                if !inst.is_available() {
-                    let fail_envs = {
-                        let mut cp = server_state.control_plane.write().await;
-                        let _ = cp.record_run_outcome(
-                            run_id,
-                            "failed",
-                            Some(format!(
-                                "Requested runtime instance '{req_inst}' is not available"
-                            )),
-                        );
-                        let _ = cp.transition_run_state(run_id, RunState::Failed);
-                        let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                        cp.drain_committed_events()
-                    };
-                    let _ = server_state.publish_control_plane_events(fail_envs);
-                    return;
-                }
-                inst
-            }
-            None => {
-                let fail_envs = {
-                    let mut cp = server_state.control_plane.write().await;
-                    let _ = cp.record_run_outcome(
-                        run_id,
-                        "failed",
-                        Some(format!("Requested runtime instance '{req_inst}' not found")),
-                    );
-                    let _ = cp.transition_run_state(run_id, RunState::Failed);
-                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                    cp.drain_committed_events()
-                };
-                let _ = server_state.publish_control_plane_events(fail_envs);
-                return;
-            }
-        }
-    } else if let Some(target_id) = server_state.configured_instance_id {
-        match instances
-            .into_iter()
-            .find(|i| i.instance_id == target_id && i.is_available())
-        {
-            Some(inst) => inst,
-            None => {
-                let fail_envs = {
-                    let mut cp = server_state.control_plane.write().await;
-                    let _ = cp.record_run_outcome(
-                        run_id,
-                        "failed",
-                        Some(format!(
-                            "Configured runtime instance '{target_id}' is not available"
-                        )),
-                    );
-                    let _ = cp.transition_run_state(run_id, RunState::Failed);
-                    let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                    cp.drain_committed_events()
-                };
-                let _ = server_state.publish_control_plane_events(fail_envs);
-                return;
-            }
-        }
-    } else {
-        let mut available: Vec<_> = instances.into_iter().filter(|i| i.is_available()).collect();
-        if available.is_empty() {
+    let (runtime, instance) = match resolution_result {
+        Ok(pair) => pair,
+        Err(err_msg) => {
             let fail_envs = {
                 let mut cp = server_state.control_plane.write().await;
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "failed",
-                    Some(
-                        "No available runtime instance discovered. OpenCode runtime binary not found. Install via: npm i -g opencode-ai or configure AGENT_STUDIOS_OPENCODE_PATH"
-                            .to_string(),
-                    ),
-                );
-                let _ = cp.transition_run_state(run_id, RunState::Failed);
-                let _ = cp.transition_task_state(task_id, TaskState::Failed);
-                cp.drain_committed_events()
-            };
-            let _ = server_state.publish_control_plane_events(fail_envs);
-            return;
-        } else if available.len() == 1 {
-            available.pop().unwrap()
-        } else {
-            let fail_envs = {
-                let mut cp = server_state.control_plane.write().await;
-                let _ = cp.record_run_outcome(
-                    run_id,
-                    "failed",
-                    Some(format!(
-                        "Multiple runtime instances available ({}) but no explicit instance selected. Configure target instance ID",
-                        available.len()
-                    )),
-                );
+                let _ = cp.record_run_outcome(run_id, "failed", Some(err_msg));
                 let _ = cp.transition_run_state(run_id, RunState::Failed);
                 let _ = cp.transition_task_state(task_id, TaskState::Failed);
                 cp.drain_committed_events()
