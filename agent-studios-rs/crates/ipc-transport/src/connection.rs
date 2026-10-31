@@ -1379,20 +1379,20 @@ async fn build_execution_readiness_report(
     if registered_runtimes.is_empty() {
         blocking_reasons.push("No agent runtime configured on daemon".to_string());
     } else {
-        available_runtimes = registered_runtimes
-            .iter()
-            .map(|id| id.to_string())
-            .collect();
-
         let outcome = server_state.runtime_registry.discover_all().await;
+        let mut healthy_implementations = std::collections::BTreeSet::new();
         for inst in &outcome.instances {
             let healthy = inst.availability.is_available();
+            if healthy {
+                healthy_implementations.insert(inst.implementation_id.to_string());
+            }
             runtime_instances.push(RuntimeInstanceReadiness {
                 instance_id: inst.instance_id.to_string(),
                 implementation: inst.implementation_id.to_string(),
                 healthy,
             });
         }
+        available_runtimes = healthy_implementations.into_iter().collect();
         for (failed_id, reason) in &outcome.failures {
             blocking_reasons.push(format!(
                 "Failed to discover instances for runtime '{failed_id}': {reason}"
@@ -1413,16 +1413,11 @@ async fn build_execution_readiness_report(
     } else if !runtime_instances.iter().any(|r| r.healthy) && !registered_runtimes.is_empty() {
         blocking_reasons.push("No healthy runtime instances available".to_string());
     } else {
-        // If multiple healthy runtime implementations exist without a configured instance, routing is ambiguous
-        let healthy_impls: std::collections::BTreeSet<_> = runtime_instances
-            .iter()
-            .filter(|r| r.healthy)
-            .map(|r| &r.implementation)
-            .collect();
-        if healthy_impls.len() > 1 && server_state.configured_instance_id.is_none() {
+        // Even two healthy instances of the same implementation are ambiguous.
+        let healthy_count = runtime_instances.iter().filter(|r| r.healthy).count();
+        if healthy_count > 1 && server_state.configured_instance_id.is_none() {
             blocking_reasons.push(format!(
-                "Multiple healthy runtimes available ({}) but no default runtime instance configured",
-                healthy_impls.len()
+                "Multiple healthy runtimes available ({healthy_count}) but no default runtime instance configured"
             ));
         }
     }
@@ -1894,12 +1889,14 @@ async fn execute_task_lifecycle(
                     .iter()
                     .filter(|i| i.is_available())
                     .collect();
-                if available.is_empty() {
-                    if let Some((_, err)) = outcome.failures.iter().next() {
-                        Err(format!("Runtime discovery error: {err}"))
-                    } else {
-                        Err("No available runtime instance discovered. OpenCode runtime binary not found. Install via: npm i -g opencode-ai or configure AGENT_STUDIOS_OPENCODE_PATH".to_string())
-                    }
+                if let Some((failed_id, err)) = outcome.failures.iter().next() {
+                    // Without an explicit route, never substitute the surviving adapter
+                    // while another registered implementation failed discovery.
+                    Err(format!(
+                        "Runtime discovery incomplete for '{failed_id}': {err}. Select a runtime explicitly"
+                    ))
+                } else if available.is_empty() {
+                    Err("No available runtime instance discovered. Check the registered runtime adapters and their installation paths".to_string())
                 } else {
                     let distinct_impls: std::collections::BTreeSet<_> =
                         available.iter().map(|i| &i.implementation_id).collect();
