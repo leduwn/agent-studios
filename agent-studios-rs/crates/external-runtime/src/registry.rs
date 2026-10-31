@@ -250,7 +250,10 @@ impl RuntimeRegistry {
         for (id, res) in collected {
             match res {
                 Ok(instances) => {
-                    if instances.iter().any(|instance| instance.implementation_id != id) {
+                    if instances
+                        .iter()
+                        .any(|instance| instance.implementation_id != id)
+                    {
                         outcome.failures.insert(
                             id,
                             SanitizedRuntimeMessage::new(
