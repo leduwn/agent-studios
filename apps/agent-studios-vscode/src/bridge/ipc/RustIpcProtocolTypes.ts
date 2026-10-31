@@ -202,6 +202,7 @@ export interface RustRunRecord {
   state: RustRunState;
   started_at?: string | null;
   finished_at?: string | null;
+  execution?: RustTaskExecutionSpec | null;
 }
 
 export interface RustCancellationSummary {

@@ -75,7 +75,8 @@ export class ExecutionClient {
    * Retrieves truthful non-secret execution readiness report from the daemon.
    */
   public static async getExecutionReadiness(
-    transport: IpcCommandTransport
+    transport: IpcCommandTransport,
+    timeoutMs?: number
   ): Promise<RustExecutionReadinessReport> {
     /* eslint-disable @typescript-eslint/naming-convention */
     const command: RustIpcCommand = {
@@ -83,7 +84,7 @@ export class ExecutionClient {
     };
     /* eslint-enable @typescript-eslint/naming-convention */
 
-    const resp = await transport.sendCommand(command);
+    const resp = await transport.sendCommand(command, timeoutMs);
     if (resp.type === 'error') {
       throw new Error(`Daemon execution readiness check failed: ${resp.message}`);
     }

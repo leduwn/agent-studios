@@ -687,14 +687,26 @@ body.vscode-high-contrast-light :focus-visible {
   background-color: rgba(0, 0, 0, 0.2);
 }
 
-.workspace-badge--matched {
+.workspace-badge--matched,
+.workspace-badge--authorized {
   color: var(--status-green);
   border-color: rgba(152, 195, 121, 0.4);
 }
 
-.workspace-badge--mismatched {
+.workspace-badge--mismatched,
+.workspace-badge--mismatch {
   color: var(--status-red);
   border-color: rgba(224, 108, 117, 0.4);
+}
+
+.workspace-badge--unverified {
+  color: var(--status-yellow, #e5c07b);
+  border-color: rgba(229, 192, 123, 0.4);
+}
+
+.workspace-badge--unavailable {
+  color: var(--fg-subtle, #abb2bf);
+  border-color: rgba(171, 178, 191, 0.4);
 }
 
 /* Execution Summary Card */

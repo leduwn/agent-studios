@@ -212,6 +212,7 @@ export class TaskExecutionStore implements vscode.Disposable {
             ...this._state,
             status: 'running',
             activeTaskId: event.taskId ?? this._state.activeTaskId,
+            activeRunId: ((payload.run_id || payload.runId) as string | undefined) ?? this._state.activeRunId,
           };
           this.notifyStateChanged();
         }
@@ -226,6 +227,7 @@ export class TaskExecutionStore implements vscode.Disposable {
               ...this._state,
               status: 'running',
               activeTaskId: event.taskId ?? this._state.activeTaskId,
+              activeRunId: ((payload.run_id || payload.runId) as string | undefined) ?? this._state.activeRunId,
             };
             this.notifyStateChanged();
           }

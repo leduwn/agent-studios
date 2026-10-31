@@ -11,7 +11,7 @@
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import { BridgeManager } from '../bridge/BridgeManager';
-import { CapabilityMatrix, normalizeWorkspacePath } from '../bridge/ipc/CapabilityMatrix';
+import { CapabilityMatrix } from '../bridge/ipc/CapabilityMatrix';
 import {
   AgentMode,
   ApprovalDecisionResult,
@@ -23,6 +23,7 @@ import {
   TimelineEvent,
 } from '../bridge/types';
 import { OperatorConfirmationModal } from '../security/OperatorConfirmationModal';
+import { WorkspaceVerification } from '../security/WorkspaceVerification';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 import { TaskExecutionStore } from '../state/TaskExecutionStore';
 import { ChatHtmlBuilder } from './ChatHtmlBuilder';
@@ -148,7 +149,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       : null;
 
     let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
-    let selectedRuntime = 'claude_code';
+    let selectedRuntime = '';
     if (readiness) {
       if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
         runtimeOptions = readiness.runtime_instances.map((inst) => ({
@@ -168,6 +169,8 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         selectedRuntime = readiness.defaults.configured_instance_id;
       } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
         selectedRuntime = readiness.available_runtimes[0];
+      } else if (runtimeOptions && runtimeOptions.length > 0) {
+        selectedRuntime = runtimeOptions[0].id;
       }
     }
 
@@ -180,25 +183,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     } else if (session) {
       studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
     }
-    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || 'default-studio';
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
 
-    let isWorkspaceMatched = true;
-    let workspaceMismatchReason = '';
-    if (session && session.workspacePath && localWorkspace) {
-      try {
-        const normLocal = normalizeWorkspacePath(localWorkspace);
-        const normDaemon = normalizeWorkspacePath(session.workspacePath);
-        if (normLocal !== normDaemon) {
-          isWorkspaceMatched = false;
-          workspaceMismatchReason = `Workspace mismatch: daemon is bound to '${session.workspacePath}', but active VS Code workspace is '${localWorkspace}'.`;
-        }
-      } catch (err: unknown) {
-        isWorkspaceMatched = false;
-        workspaceMismatchReason = `Workspace validation error: ${(err as Error).message}`;
-      }
-    }
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    const workspaceStatus = wsVerification.status;
+    const isWorkspaceMatched = wsVerification.isAuthorized;
+    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
 
-    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit');
+    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit') && isWorkspaceMatched;
 
     webviewView.webview.html = ChatHtmlBuilder.buildHtml(
       webviewView.webview,
@@ -221,6 +213,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         runtimes: runtimeOptions,
         studios: studioOptions,
         workspacePath: localWorkspace,
+        workspaceStatus,
         isWorkspaceMatched,
         workspaceMismatchReason,
         isTaskSubmitEnabled,
@@ -669,34 +662,52 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
 
     const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-    const session = await this.bridge.getCurrentSession().catch(() => null);
-    if (session && session.workspacePath && localWorkspace) {
-      try {
-        const normLocal = normalizeWorkspacePath(localWorkspace);
-        const normDaemon = normalizeWorkspacePath(session.workspacePath);
-        if (normLocal !== normDaemon) {
-          await this.postMessage({
-            type: 'error',
-            error: `Workspace mismatch: Daemon session root (${session.workspacePath}) does not match local workspace (${localWorkspace}). Task submission blocked for security.`,
-          });
-          return;
-        }
-      } catch (err: unknown) {
-        await this.postMessage({
-          type: 'error',
-          error: `Workspace validation error: ${(err as Error).message}`,
-        });
-        return;
-      }
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    if (!wsVerification.isAuthorized) {
+      await this.postMessage({
+        type: 'error',
+        error: `Workspace mismatch (${wsVerification.status}): ${wsVerification.reason}`,
+      });
+      return;
     }
 
-    const studioId = message.studioId || 'default-studio';
-    const runtime = message.runtime || 'claude_code';
+    const studioId = message.studioId;
+    if (!studioId || studioId.trim().length === 0) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Active studio identity is required before submitting tasks. Please select or create a studio.',
+      });
+      return;
+    }
+
+    const runtime = message.runtime || (readiness?.runtime_instances?.[0]?.implementation || readiness?.available_runtimes?.[0]) || 'opencode';
+    if (!runtime || runtime.trim().length === 0) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Execution runtime is required before submitting tasks. Daemon has no active runtimes.',
+      });
+      return;
+    }
+
+    let runtimeInstanceId: string | undefined;
+    if (readiness?.runtime_instances) {
+      const matchedInst = readiness.runtime_instances.find(
+        (inst) => inst.implementation === runtime || inst.instance_id === runtime
+      );
+      if (matchedInst) {
+        runtimeInstanceId = matchedInst.instance_id;
+      }
+    }
 
     // Operator confirmation gate using trusted VS Code native modal dialog
     const confirmResult = await OperatorConfirmationModal.requestConfirmation({
       studioId,
       runtime,
+      runtimeInstanceId,
       prompt,
       workspacePath: localWorkspace || undefined,
       modelId: message.modelId || this._selectedModelId,
@@ -728,6 +739,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           studioId,
           prompt,
           runtimePreference: runtime,
+          runtimeInstanceId,
           workspacePath: localWorkspace || undefined,
           requestedModelId: message.modelId || this._selectedModelId,
           requestedProviderId: message.providerId || this._selectedProviderId,
@@ -841,7 +853,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       : null;
 
     let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
-    let selectedRuntime = 'claude_code';
+    let selectedRuntime = '';
     if (readiness) {
       if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
         runtimeOptions = readiness.runtime_instances.map((inst) => ({
@@ -861,6 +873,8 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         selectedRuntime = readiness.defaults.configured_instance_id;
       } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
         selectedRuntime = readiness.available_runtimes[0];
+      } else if (runtimeOptions && runtimeOptions.length > 0) {
+        selectedRuntime = runtimeOptions[0].id;
       }
     }
 
@@ -873,25 +887,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     } else if (session) {
       studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
     }
-    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || 'default-studio';
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
 
-    let isWorkspaceMatched = true;
-    let workspaceMismatchReason = '';
-    if (session && session.workspacePath && localWorkspace) {
-      try {
-        const normLocal = normalizeWorkspacePath(localWorkspace);
-        const normDaemon = normalizeWorkspacePath(session.workspacePath);
-        if (normLocal !== normDaemon) {
-          isWorkspaceMatched = false;
-          workspaceMismatchReason = `Workspace mismatch: daemon is bound to '${session.workspacePath}', but active VS Code workspace is '${localWorkspace}'.`;
-        }
-      } catch (err: unknown) {
-        isWorkspaceMatched = false;
-        workspaceMismatchReason = `Workspace validation error: ${(err as Error).message}`;
-      }
-    }
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    const workspaceStatus = wsVerification.status;
+    const isWorkspaceMatched = wsVerification.isAuthorized;
+    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
 
-    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit');
+    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit') && isWorkspaceMatched;
 
     await this.postMessage({
       type: 'syncState',
@@ -910,6 +913,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         messages: this._messages,
         attachments: this._attachments,
         executionState: TaskExecutionStore.instance.getState(),
+        workspaceStatus,
         isWorkspaceMatched,
         workspaceMismatchReason,
         isTaskSubmitEnabled,

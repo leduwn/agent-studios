@@ -62,6 +62,7 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
       assert.strictEqual(result.challenge.modelId, 'claude-3-5-sonnet');
       assert.strictEqual(result.challenge.providerId, 'anthropic');
       assert.strictEqual(result.challenge.workspacePath, testWorkspace);
+      assert.strictEqual(result.challenge.runtimePreference, 'Claude Code (Native CLI)');
       assert.strictEqual(result.challenge.intent, 'task_execution');
 
       // Verify challenge signature and parameters in OperatorConfirmationManager
@@ -73,6 +74,7 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
           workspacePath: req.workspacePath,
           modelId: req.modelId,
           providerId: req.providerId,
+          runtimePreference: req.runtime,
           intent: 'task_execution',
         },
         { consume: false }
@@ -212,6 +214,7 @@ describe('M15 OperatorConfirmationModal Unit Tests', () => {
           studioId: 'studio-cross-platform',
           prompt: 'Cross-platform safe task',
           workspacePath: testWorkspace,
+          runtimePreference: 'Claude Code (Native CLI)',
           intent: 'task_execution',
         },
         { consume: false }

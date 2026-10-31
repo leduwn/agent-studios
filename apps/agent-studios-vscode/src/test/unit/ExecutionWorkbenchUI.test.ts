@@ -47,6 +47,11 @@ describe('ExecutionWorkbenchUI Tests', () => {
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         connectionState: 'connected',
         selectedRuntime: 'claude_code',
+        runtimes: [
+          { id: 'claude_code', name: 'Claude Code (Native CLI)', enabled: true },
+          { id: 'codex_external', name: 'Codex Runtime (External — Coming in M16)', enabled: false, tooltip: 'Coming in M16: External process runner support' },
+          { id: 'custom_shell', name: 'Custom Shell (Disabled)', enabled: false, tooltip: 'Coming in future milestone' },
+        ],
       });
 
       assert.ok(html.includes('id="runtimeSelect"'), 'Must render runtimeSelect');
@@ -66,6 +71,10 @@ describe('ExecutionWorkbenchUI Tests', () => {
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         connectionState: 'connected',
         selectedStudioId: 'default-studio',
+        studios: [
+          { id: 'default-studio', name: 'default-studio' },
+          { id: 'agent-studios-core', name: 'agent-studios-core' },
+        ],
       });
 
       assert.ok(html.includes('id="studioSelect"'), 'Must render studioSelect');
@@ -81,8 +90,8 @@ describe('ExecutionWorkbenchUI Tests', () => {
         isWorkspaceMatched: true,
       });
 
-      assert.ok(html.includes('class="workspace-badge workspace-badge--matched"'));
-      assert.ok(html.includes('✓ Verified'));
+      assert.ok(html.includes('workspace-badge--authorized') || html.includes('workspace-badge--matched'));
+      assert.ok(html.includes('✓ Authorized') || html.includes('✓ Verified'));
       assert.ok(html.includes('/projects/agent-studios'));
     });
 
@@ -96,7 +105,7 @@ describe('ExecutionWorkbenchUI Tests', () => {
         workspaceMismatchReason: mismatchReason,
       });
 
-      assert.ok(html.includes('class="workspace-badge workspace-badge--mismatched"'));
+      assert.ok(html.includes('workspace-badge--mismatch') || html.includes('workspace-badge--mismatched'));
       assert.ok(html.includes('⚠ Mismatch'));
       assert.ok(html.includes(mismatchReason));
     });

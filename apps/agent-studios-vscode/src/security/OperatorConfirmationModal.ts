@@ -24,6 +24,7 @@ export interface OperatorConfirmationDialogRequest {
   studioId: string;
   studioName?: string;
   runtime: string;
+  runtimeInstanceId?: string;
   providerId?: string;
   modelId?: string;
   workspacePath?: string;
@@ -137,6 +138,8 @@ export class OperatorConfirmationModal {
         workspacePath: request.workspacePath,
         modelId: request.modelId,
         providerId: request.providerId,
+        runtimePreference: request.runtime,
+        runtimeInstanceId: request.runtimeInstanceId,
         intent: 'task_execution',
       }
     );

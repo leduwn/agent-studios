@@ -217,9 +217,23 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     const startedAt = new Date(studio.created_at).getTime() || Date.now();
     const elapsedMs = Math.max(0, Date.now() - startedAt);
 
+    // Authoritative daemon repository path from execution readiness defaults, NOT client workspace
+    let daemonWorkspacePath = '';
+    try {
+      const readiness = await this.getExecutionReadiness(1500);
+      if (readiness?.defaults?.default_repo_path) {
+        daemonWorkspacePath = readiness.defaults.default_repo_path;
+      } else if (readiness?.authorized_workspaces && readiness.authorized_workspaces.length > 0) {
+        daemonWorkspacePath = readiness.authorized_workspaces[0];
+      }
+    } catch {
+      // Readiness query failed or uninitialized; leave workspacePath empty to prevent false verified status
+      daemonWorkspacePath = '';
+    }
+
     return {
       id: studio.id,
-      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      workspacePath: daemonWorkspacePath,
       goalSummary: studio.name,
       status: sessionStatus,
       activeAgentCount: 1,
@@ -508,9 +522,9 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   /**
    * Retrieves execution readiness report from the daemon using ExecutionClient.
    */
-  public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+  public async getExecutionReadiness(timeoutMs?: number): Promise<RustExecutionReadinessReport> {
     this.assertConnected();
-    return ExecutionClient.getExecutionReadiness(this._transport!);
+    return ExecutionClient.getExecutionReadiness(this._transport!, timeoutMs);
   }
 
   /**

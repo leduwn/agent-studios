@@ -203,6 +203,8 @@ export class SubmitTaskAdapter {
       prompt: req.prompt,
       requestedModelId: req.requestedModelId,
       requestedProviderId: req.requestedProviderId,
+      runtimePreference: req.runtimePreference,
+      runtimeInstanceId: req.runtimeInstanceId,
       confirmedByUser: req.confirmedByUser,
       confirmationChallenge: req.confirmationChallenge,
       consumeChallenge: true, // Atomically consume challenge at dispatch boundary

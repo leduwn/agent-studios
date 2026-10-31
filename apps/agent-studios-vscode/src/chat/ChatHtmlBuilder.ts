@@ -26,6 +26,7 @@ import { escapeHtml } from '../webviews/markdownRenderer';
 import { CHAT_STYLES } from './styles.css';
 import { OnboardingWorkflow } from './OnboardingWorkflow';
 import { TaskExecutionState, ExecutionMetrics } from '../state/TaskExecutionStore';
+import { WorkspaceAuthorizationStatus } from '../security/WorkspaceVerification';
 
 export interface RuntimeOption {
   id: string;
@@ -53,6 +54,7 @@ export interface ChatHtmlInitialState {
   runtimes?: RuntimeOption[];
   studios?: StudioOption[];
   workspacePath?: string;
+  workspaceStatus?: WorkspaceAuthorizationStatus;
   isWorkspaceMatched?: boolean;
   workspaceMismatchReason?: string;
   isTaskSubmitEnabled?: boolean;
@@ -89,20 +91,35 @@ export class ChatHtmlBuilder {
     const sessionTitle = session?.goalSummary || 'Agent Studios Assistant';
     const sessionId = session?.id || '';
 
-    const selectedRuntime = initialState?.selectedRuntime || 'claude_code';
-    const selectedStudioId = initialState?.selectedStudioId || session?.id || 'default-studio';
+    const selectedRuntime = initialState?.selectedRuntime || '';
+    const selectedStudioId = initialState?.selectedStudioId || session?.id || '';
     const workspacePath = initialState?.workspacePath || session?.workspacePath || '';
-    const isWorkspaceMatched = initialState?.isWorkspaceMatched ?? true;
+    const workspaceStatus: WorkspaceAuthorizationStatus = initialState?.workspaceStatus
+      ?? (initialState?.isWorkspaceMatched === false ? 'MISMATCH' : (initialState?.isWorkspaceMatched ? 'AUTHORIZED' : 'UNAVAILABLE'));
+    const isWorkspaceAuthorized = workspaceStatus === 'AUTHORIZED';
     const workspaceMismatchReason = initialState?.workspaceMismatchReason || '';
-    const isTaskSubmitEnabled = initialState?.isTaskSubmitEnabled ?? true;
+    const isTaskSubmitEnabled = (initialState?.isTaskSubmitEnabled ?? true) && isWorkspaceAuthorized;
     const executionState = initialState?.executionState;
+
+    let badgeLabel = '⚠ Unavailable';
+    let badgeClass = 'workspace-badge--unavailable';
+    if (workspaceStatus === 'AUTHORIZED') {
+      badgeLabel = '✓ Authorized';
+      badgeClass = 'workspace-badge--authorized workspace-badge--matched';
+    } else if (workspaceStatus === 'MISMATCH') {
+      badgeLabel = '⚠ Mismatch';
+      badgeClass = 'workspace-badge--mismatch workspace-badge--mismatched';
+    } else if (workspaceStatus === 'UNVERIFIED') {
+      badgeLabel = '⚠ Unverified';
+      badgeClass = 'workspace-badge--unverified';
+    }
 
     const shortWorkspacePath = workspacePath
       ? (workspacePath.length > 28 ? '...' + workspacePath.slice(-25) : workspacePath)
       : 'No workspace';
-    const workspaceTooltip = isWorkspaceMatched
-      ? `Workspace verified against daemon root: ${workspacePath}`
-      : (workspaceMismatchReason || `Workspace mismatch with daemon root: ${workspacePath}`);
+    const workspaceTooltip = isWorkspaceAuthorized
+      ? `Workspace authorized by daemon: ${workspacePath}`
+      : (workspaceMismatchReason || `Workspace status ${workspaceStatus}: ${workspacePath}`);
 
     let selectedModelName = 'Default Model';
     if (providers.length > 0) {
@@ -145,9 +162,7 @@ export class ChatHtmlBuilder {
     const runtimeOptions: RuntimeOption[] = initialState?.runtimes && initialState.runtimes.length > 0
       ? initialState.runtimes
       : [
-          { id: 'claude_code', name: 'Claude Code (Native CLI)', enabled: true },
-          { id: 'codex_external', name: 'Codex Runtime (External — Coming in M16)', enabled: false, tooltip: 'Coming in M16: External process runner support' },
-          { id: 'custom_shell', name: 'Custom Shell (Disabled)', enabled: false, tooltip: 'Coming in future milestone' },
+          { id: '', name: 'No runtimes available (daemon unready)', enabled: false },
         ];
 
     const runtimeOptionsHtml = runtimeOptions.map((r) => {
@@ -171,8 +186,7 @@ export class ChatHtmlBuilder {
       : (sessions && sessions.length > 0)
       ? sessions.map((s) => ({ id: s.id, name: s.title || s.id }))
       : [
-          { id: 'default-studio', name: 'default-studio' },
-          { id: 'agent-studios-core', name: 'agent-studios-core' },
+          { id: '', name: 'No studios found (create studio required)' },
         ];
 
     if (selectedStudioId && !studioOptions.some((s) => s.id === selectedStudioId)) {
@@ -197,7 +211,9 @@ export class ChatHtmlBuilder {
       selectedRuntime,
       selectedStudioId,
       workspacePath,
-      isWorkspaceMatched,
+      workspaceStatus,
+      isWorkspaceAuthorized,
+      isWorkspaceMatched: isWorkspaceAuthorized,
       workspaceMismatchReason,
       isTaskSubmitEnabled,
       composerDraft,
@@ -576,10 +592,10 @@ export class ChatHtmlBuilder {
         </div>
         <div class="workbench-field">
           <span class="workbench-field-label">Workspace</span>
-          <div id="workspaceBadge" class="workspace-badge ${isWorkspaceMatched ? 'workspace-badge--matched' : 'workspace-badge--mismatched'}" title="${escapeHtml(workspaceTooltip)}">
-            <span>${isWorkspaceMatched ? '✓ Verified' : '⚠ Mismatch'}</span>
+          <div id="workspaceBadge" class="workspace-badge ${badgeClass}" title="${escapeHtml(workspaceTooltip)}">
+            <span id="workspaceBadgeLabel">${badgeLabel}</span>
             <span id="workspacePathDisplay">${escapeHtml(workspacePath || shortWorkspacePath)}</span>
-            ${!isWorkspaceMatched && workspaceMismatchReason ? `<span class="workspace-mismatch-detail" title="${escapeHtml(workspaceMismatchReason)}">(${escapeHtml(workspaceMismatchReason)})</span>` : ''}
+            ${!isWorkspaceAuthorized && workspaceMismatchReason ? `<span class="workspace-mismatch-detail" title="${escapeHtml(workspaceMismatchReason)}">(${escapeHtml(workspaceMismatchReason)})</span>` : ''}
           </div>
         </div>
       </div>
@@ -1394,8 +1410,16 @@ export class ChatHtmlBuilder {
               if (msg.state.executionState) {
                 renderExecutionState(msg.state.executionState);
               }
-              if (msg.state.isWorkspaceMatched !== undefined) {
-                state.isWorkspaceMatched = msg.state.isWorkspaceMatched;
+              if (msg.state.workspaceStatus !== undefined || msg.state.isWorkspaceMatched !== undefined) {
+                var status = msg.state.workspaceStatus || (msg.state.isWorkspaceMatched ? 'AUTHORIZED' : 'MISMATCH');
+                state.workspaceStatus = status;
+                state.isWorkspaceMatched = status === 'AUTHORIZED';
+                var badge = document.getElementById('workspaceBadge');
+                var label = document.getElementById('workspaceBadgeLabel');
+                if (badge && label) {
+                  badge.className = 'workspace-badge workspace-badge--' + status.toLowerCase();
+                  label.textContent = status === 'AUTHORIZED' ? '✓ Authorized' : (status === 'MISMATCH' ? '⚠ Mismatch' : (status === 'UNVERIFIED' ? '⚠ Unverified' : '⚠ Unavailable'));
+                }
               }
               if (msg.state.workspaceMismatchReason !== undefined) {
                 state.workspaceMismatchReason = msg.state.workspaceMismatchReason;
