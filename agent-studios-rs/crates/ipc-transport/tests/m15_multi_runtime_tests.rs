@@ -1225,6 +1225,11 @@ async fn test_14_readiness_only_advertises_healthy_implementations() {
 
     let readiness = client.get_execution_readiness().await.unwrap();
     assert_eq!(readiness.available_runtimes, vec!["runtime-alpha"]);
+    assert_eq!(
+        readiness.registered_runtimes,
+        vec!["runtime-alpha", "runtime-beta"]
+    );
+    assert_eq!(readiness.runtime_capabilities.len(), 3);
     assert_eq!(readiness.runtime_instances.len(), 3);
     assert!(readiness.runtime_instances.iter().any(|instance| {
         instance.instance_id == beta_id.to_string() && !instance.healthy
