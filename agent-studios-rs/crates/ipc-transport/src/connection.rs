@@ -1373,6 +1373,7 @@ async fn build_execution_readiness_report(
     let mut blocking_reasons = Vec::new();
     let mut available_runtimes = Vec::new();
     let mut runtime_instances = Vec::new();
+    let mut runtime_capabilities = std::collections::BTreeMap::new();
 
     // 1. Runtime availability check
     let registered_runtimes = server_state.list_runtimes().await;
@@ -1385,6 +1386,14 @@ async fn build_execution_readiness_report(
             let healthy = inst.availability.is_available();
             if healthy {
                 healthy_implementations.insert(inst.implementation_id.to_string());
+            }
+            // Serialize only the declared tri-state capability profile, never
+            // environment, tokens, runtime metadata or provider configuration.
+            if let Ok(value) = serde_json::to_value(&inst.capabilities)
+                && let Ok(capabilities) =
+                    serde_json::from_value::<std::collections::BTreeMap<String, String>>(value)
+            {
+                runtime_capabilities.insert(inst.instance_id.to_string(), capabilities);
             }
             runtime_instances.push(RuntimeInstanceReadiness {
                 instance_id: inst.instance_id.to_string(),
@@ -1531,7 +1540,12 @@ async fn build_execution_readiness_report(
 
     ExecutionReadinessReport {
         is_ready,
+        registered_runtimes: registered_runtimes
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
         available_runtimes,
+        runtime_capabilities,
         runtime_instances,
         available_models,
         authorized_workspaces,
