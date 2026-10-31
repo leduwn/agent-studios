@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::capabilities::RuntimeCapabilities;
 use crate::discovery::DiscoveredRuntimeInstance;
 use crate::error::{RuntimeError, SanitizedRuntimeMessage};
-use crate::id::RuntimeImplementationId;
+use crate::id::{RuntimeImplementationId, RuntimeInstanceId};
 use crate::traits::AgentRuntime;
 
 /// Typed outcome of discovering runtime instances across all registered implementations.
@@ -82,6 +82,46 @@ impl RuntimeRegistry {
         Self {
             runtimes: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    /// Creates a registry initialized with the given runtimes, rejecting duplicate implementations.
+    pub fn from_runtimes(
+        runtimes: impl IntoIterator<Item = Arc<dyn AgentRuntime>>,
+    ) -> Result<Self, RuntimeError> {
+        let mut map = BTreeMap::new();
+        for rt in runtimes {
+            let id = rt.implementation_id().clone();
+            if map.contains_key(&id) {
+                return Err(RuntimeError::DuplicateRuntime {
+                    implementation_id: id,
+                });
+            }
+            map.insert(id, rt);
+        }
+        Ok(Self {
+            runtimes: Arc::new(RwLock::new(map)),
+        })
+    }
+
+    /// Registers a runtime implementation synchronously using try_write.
+    /// Fails if an implementation with the same ID is already registered or lock is contended.
+    pub fn register_sync(&self, runtime: Arc<dyn AgentRuntime>) -> Result<(), RuntimeError> {
+        let mut guard = self
+            .runtimes
+            .try_write()
+            .map_err(|_| RuntimeError::Internal {
+                reason: SanitizedRuntimeMessage::new(
+                    "Runtime registry lock unavailable for sync registration",
+                ),
+            })?;
+        let id = runtime.implementation_id().clone();
+        if guard.contains_key(&id) {
+            return Err(RuntimeError::DuplicateRuntime {
+                implementation_id: id,
+            });
+        }
+        guard.insert(id, runtime);
+        Ok(())
     }
 
     /// Registers a runtime implementation. Fails if an implementation with the same ID is already registered.
@@ -201,11 +241,40 @@ impl RuntimeRegistry {
             }
         }
 
-        // Iterate in deterministic sorted BTreeMap key order
+        // Validate ownership at the discovery boundary. A misconfigured or malicious
+        // adapter must never claim an instance belonging to another implementation.
+        // Duplicate IDs (even inside one adapter) are ambiguous and must fail closed.
+        let mut seen_instances: BTreeMap<RuntimeInstanceId, RuntimeImplementationId> =
+            BTreeMap::new();
+        let mut ambiguous_ids = BTreeSet::new();
         for (id, res) in collected {
             match res {
                 Ok(instances) => {
-                    outcome.instances.extend(instances);
+                    if instances
+                        .iter()
+                        .any(|instance| instance.implementation_id != id)
+                    {
+                        outcome.failures.insert(
+                            id,
+                            SanitizedRuntimeMessage::new(
+                                "Runtime discovery returned a foreign implementation identity",
+                            ),
+                        );
+                        continue;
+                    }
+                    for instance in instances {
+                        if let Some(first_owner) = seen_instances.get(&instance.instance_id) {
+                            ambiguous_ids.insert(instance.instance_id);
+                            let reason = SanitizedRuntimeMessage::new(
+                                "Duplicate runtime instance identity discovered",
+                            );
+                            outcome.failures.insert(first_owner.clone(), reason.clone());
+                            outcome.failures.insert(id.clone(), reason);
+                        } else {
+                            seen_instances.insert(instance.instance_id, id.clone());
+                            outcome.instances.push(instance);
+                        }
+                    }
                 }
                 Err(err) => {
                     outcome
@@ -214,6 +283,11 @@ impl RuntimeRegistry {
                 }
             }
         }
+
+        // Remove the first occurrence as well, rather than selecting an arbitrary owner.
+        outcome
+            .instances
+            .retain(|instance| !ambiguous_ids.contains(&instance.instance_id));
 
         for (id, failure) in worker_failures {
             outcome.failures.insert(id, failure);

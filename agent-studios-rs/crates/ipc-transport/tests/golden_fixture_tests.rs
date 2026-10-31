@@ -580,7 +580,9 @@ fn test_fixture_execution_readiness_roundtrip() {
 
     let report = ExecutionReadinessReport {
         is_ready: true,
+        registered_runtimes: vec!["claude-code".to_string()],
         available_runtimes: vec!["claude-code".to_string()],
+        runtime_capabilities: std::collections::BTreeMap::new(),
         runtime_instances: vec![RuntimeInstanceReadiness {
             instance_id: "rt-inst-c0a80101-0000-0000-0000-000000000001".to_string(),
             implementation: "claude-code".to_string(),
@@ -608,6 +610,10 @@ fn test_fixture_execution_readiness_roundtrip() {
     let resp_val: Value = serde_json::from_str(&resp_json).expect("parse json");
     assert_eq!(resp_val["type"], "execution_readiness");
     assert_eq!(resp_val["readiness"]["is_ready"], true);
+    assert_eq!(
+        resp_val["readiness"]["registered_runtimes"][0],
+        "claude-code"
+    );
     assert_eq!(
         resp_val["readiness"]["runtime_instances"][0]["implementation"],
         "claude-code"
@@ -869,4 +875,22 @@ fn test_fixture_error_responses_serialization() {
         }
         other => panic!("Unexpected response variant: {:?}", other),
     }
+}
+
+#[test]
+fn test_legacy_readiness_json_deserializes_without_optional_multi_runtime_fields() {
+    let previous = r#"{
+        "is_ready": false,
+        "available_runtimes": [],
+        "runtime_instances": [],
+        "available_models": [],
+        "authorized_workspaces": [],
+        "defaults": {},
+        "blocking_reasons": []
+    }"#;
+    let report: ExecutionReadinessReport =
+        serde_json::from_str(previous).expect("M15-01 readiness fixture must remain valid");
+    assert!(!report.is_ready);
+    assert!(report.registered_runtimes.is_empty());
+    assert!(report.runtime_capabilities.is_empty());
 }

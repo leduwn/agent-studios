@@ -58,7 +58,7 @@ pub struct ServerState {
     pub control_plane: Arc<tokio::sync::RwLock<ControlPlane>>,
     pub provider_catalog: Arc<tokio::sync::RwLock<ProviderCatalog>>,
     pub auto_execute: bool,
-    pub runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    pub runtime_registry: agent_studios_external_runtime::registry::RuntimeRegistry,
     pub workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
     pub default_repo_path: Option<std::path::PathBuf>,
     pub active_runtime_sessions: ActiveRuntimeSessions,
@@ -209,6 +209,22 @@ impl ServerState {
         }
         Ok(())
     }
+
+    pub async fn get_runtime(
+        &self,
+        id: &agent_studios_external_runtime::id::RuntimeImplementationId,
+    ) -> Result<
+        Arc<dyn agent_studios_external_runtime::AgentRuntime>,
+        agent_studios_external_runtime::error::RuntimeError,
+    > {
+        self.runtime_registry.get(id).await
+    }
+
+    pub async fn list_runtimes(
+        &self,
+    ) -> Vec<agent_studios_external_runtime::id::RuntimeImplementationId> {
+        self.runtime_registry.list_ids().await
+    }
 }
 
 pub struct IpcServerBuilder {
@@ -219,7 +235,8 @@ pub struct IpcServerBuilder {
     control_plane: Option<ControlPlane>,
     provider_catalog: Option<ProviderCatalog>,
     auto_execute: bool,
-    runtime: Option<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    runtimes: Vec<Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    runtime_registry: Option<agent_studios_external_runtime::registry::RuntimeRegistry>,
     workspace_orchestrator: Option<Arc<agent_studios_workspace::WorkspaceOrchestrator>>,
     default_repo_path: Option<std::path::PathBuf>,
     default_model_ref: Option<agent_studios_provider::model::ModelRef>,
@@ -255,7 +272,8 @@ impl IpcServerBuilder {
             control_plane: None,
             provider_catalog: None,
             auto_execute: false,
-            runtime: None,
+            runtimes: Vec::new(),
+            runtime_registry: None,
             workspace_orchestrator: None,
             default_repo_path: None,
             default_model_ref: None,
@@ -320,7 +338,23 @@ impl IpcServerBuilder {
         mut self,
         runtime: Arc<dyn agent_studios_external_runtime::AgentRuntime>,
     ) -> Self {
-        self.runtime = Some(runtime);
+        self.runtimes.push(runtime);
+        self
+    }
+
+    pub fn with_runtimes(
+        mut self,
+        runtimes: impl IntoIterator<Item = Arc<dyn agent_studios_external_runtime::AgentRuntime>>,
+    ) -> Self {
+        self.runtimes.extend(runtimes);
+        self
+    }
+
+    pub fn with_runtime_registry(
+        mut self,
+        registry: agent_studios_external_runtime::registry::RuntimeRegistry,
+    ) -> Self {
+        self.runtime_registry = Some(registry);
         self
     }
 
@@ -400,12 +434,34 @@ impl IpcServerBuilder {
             }
         });
 
-        let runtime = self.runtime.or_else(|| {
-            agent_studios_opencode_runtime::OpenCodeRuntime::new()
-                .map(|rt| rt.with_catalog(catalog_arc.clone()))
-                .ok()
-                .map(|rt| Arc::new(rt) as Arc<dyn agent_studios_external_runtime::AgentRuntime>)
-        });
+        let runtime_registry = if let Some(reg) = self.runtime_registry {
+            for rt in self.runtimes {
+                let id = rt.implementation_id().clone();
+                if let Err(e) = reg.register_sync(rt) {
+                    return Err(TransportError::Daemon(format!(
+                        "Duplicate runtime implementation '{}' registered: {e}",
+                        id
+                    )));
+                }
+            }
+            reg
+        } else {
+            let mut list = self.runtimes;
+            if list.is_empty() {
+                #[allow(clippy::collapsible_if)]
+                if let Ok(rt) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+                    let rt = rt.with_catalog(catalog_arc.clone());
+                    list.push(Arc::new(rt));
+                }
+            }
+            agent_studios_external_runtime::registry::RuntimeRegistry::from_runtimes(list).map_err(
+                |e| {
+                    TransportError::Daemon(format!(
+                        "Duplicate runtime implementation registered: {e}"
+                    ))
+                },
+            )?
+        };
 
         let workspace_orchestrator = self.workspace_orchestrator.or_else(|| {
             let base_dir = std::env::temp_dir().join("agent-studios-workspaces");
@@ -433,7 +489,7 @@ impl IpcServerBuilder {
             control_plane,
             provider_catalog,
             auto_execute: self.auto_execute,
-            runtime,
+            runtime_registry,
             workspace_orchestrator,
             default_repo_path: self.default_repo_path,
             active_runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),

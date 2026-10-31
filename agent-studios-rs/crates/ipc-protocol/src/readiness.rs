@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Readiness state of a discovered external runtime instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +35,14 @@ pub struct ExecutionDefaultsReadiness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ExecutionReadinessReport {
     pub is_ready: bool,
+    /// Implementations installed in the registry, even if no instance is healthy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub registered_runtimes: Vec<String>,
+    /// Implementations with at least one healthy discovered instance.
     pub available_runtimes: Vec<String>,
+    /// Instance ID to tri-state capability support (supported/unsupported/unknown).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_capabilities: BTreeMap<String, BTreeMap<String, String>>,
     pub runtime_instances: Vec<RuntimeInstanceReadiness>,
     pub available_models: Vec<ModelReadiness>,
     pub authorized_workspaces: Vec<String>,
