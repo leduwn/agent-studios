@@ -580,7 +580,9 @@ fn test_fixture_execution_readiness_roundtrip() {
 
     let report = ExecutionReadinessReport {
         is_ready: true,
+        registered_runtimes: vec!["claude-code".to_string()],
         available_runtimes: vec!["claude-code".to_string()],
+        runtime_capabilities: std::collections::BTreeMap::new(),
         runtime_instances: vec![RuntimeInstanceReadiness {
             instance_id: "rt-inst-c0a80101-0000-0000-0000-000000000001".to_string(),
             implementation: "claude-code".to_string(),
@@ -608,6 +610,10 @@ fn test_fixture_execution_readiness_roundtrip() {
     let resp_val: Value = serde_json::from_str(&resp_json).expect("parse json");
     assert_eq!(resp_val["type"], "execution_readiness");
     assert_eq!(resp_val["readiness"]["is_ready"], true);
+    assert_eq!(
+        resp_val["readiness"]["registered_runtimes"][0],
+        "claude-code"
+    );
     assert_eq!(
         resp_val["readiness"]["runtime_instances"][0]["implementation"],
         "claude-code"
