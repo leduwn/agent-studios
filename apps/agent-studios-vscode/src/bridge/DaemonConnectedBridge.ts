@@ -45,7 +45,12 @@ import {
   SubmitTaskRequest,
   SubmitTaskResult,
 } from './ipc/SubmitTaskAdapter';
-import { OperatorConfirmationManager } from './ipc/CapabilityMatrix';
+import {
+  ExecutionClient,
+  CancelTaskResult,
+  TaskCancellationError,
+} from './ipc/ExecutionClient';
+import { CapabilityMatrix, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import {
   NativeIpcTransport,
   TransportState,
@@ -57,6 +62,7 @@ import {
   RustTaskRecord,
   RustTaskState,
   RustHealthResponse,
+  RustExecutionReadinessReport,
 } from './ipc/RustIpcProtocolTypes';
 
 export interface DaemonConnectedBridgeOptions {
@@ -211,9 +217,23 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     const startedAt = new Date(studio.created_at).getTime() || Date.now();
     const elapsedMs = Math.max(0, Date.now() - startedAt);
 
+    // Authoritative daemon repository path from execution readiness defaults, NOT client workspace
+    let daemonWorkspacePath = '';
+    try {
+      const readiness = await this.getExecutionReadiness(1500);
+      if (readiness?.defaults?.default_repo_path) {
+        daemonWorkspacePath = readiness.defaults.default_repo_path;
+      } else if (readiness?.authorized_workspaces && readiness.authorized_workspaces.length > 0) {
+        daemonWorkspacePath = readiness.authorized_workspaces[0];
+      }
+    } catch {
+      // Readiness query failed or uninitialized; leave workspacePath empty to prevent false verified status
+      daemonWorkspacePath = '';
+    }
+
     return {
       id: studio.id,
-      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      workspacePath: daemonWorkspacePath,
       goalSummary: studio.name,
       status: sessionStatus,
       activeAgentCount: 1,
@@ -418,12 +438,41 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Cancels current run.
-   * STRICTLY DISABLED in M14-IPC-03 read-only connected vertical slice.
-   * Fails closed to avoid fabricating cancellation state in the UI.
+   * Cancels a specific task on the daemon using M15 ExecutionClient.
+   * Gated on task.cancel capability and explicit studio/task identity.
    */
-  public async cancelCurrentRun(): Promise<void> {
-    throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+  public async cancelTask(taskId: string, reason?: string): Promise<CancelTaskResult> {
+    this.assertConnected();
+    if (!this._activeStudioId) {
+      throw new TaskCancellationError('No active studio selected for task cancellation.');
+    }
+    return ExecutionClient.cancelTask(this._transport!, {
+      studioId: this._activeStudioId,
+      taskId,
+      reason,
+    });
+  }
+
+  /**
+   * Cancels current run or active task on the daemon.
+   * Fails closed if capability is disabled or if no active studio or running task is found.
+   */
+  public async cancelCurrentRun(taskId?: string, reason?: string): Promise<void> {
+    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
+      throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+    }
+    this.assertConnected();
+    if (taskId) {
+      await this.cancelTask(taskId, reason);
+      return;
+    }
+    const tasks = await this.listTasks();
+    const running = tasks.find((t) => t.status === 'running');
+    if (running) {
+      await this.cancelTask(running.id, reason);
+      return;
+    }
+    throw new TaskCancellationError('No active or running task found to cancel in current studio.');
   }
 
   /**
@@ -468,6 +517,14 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     }
 
     return current;
+  }
+
+  /**
+   * Retrieves execution readiness report from the daemon using ExecutionClient.
+   */
+  public async getExecutionReadiness(timeoutMs?: number): Promise<RustExecutionReadinessReport> {
+    this.assertConnected();
+    return ExecutionClient.getExecutionReadiness(this._transport!, timeoutMs);
   }
 
   /**

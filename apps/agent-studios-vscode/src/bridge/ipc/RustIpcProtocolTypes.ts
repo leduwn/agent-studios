@@ -134,6 +134,15 @@ export interface RustTaskRecord {
   dependency_output_policy?: RustDependencyOutputPolicy;
 }
 
+export interface RustTaskExecutionSpec {
+  initial_prompt?: string | null;
+  repository_path?: string | null;
+  runtime_instance_id?: string | null;
+  runtime_preference?: string | null;
+  provider_instance_id?: string | null;
+  model_id?: string | null;
+}
+
 export interface RustBatchTaskSpec {
   key: string;
   title: string;
@@ -144,6 +153,36 @@ export interface RustBatchTaskSpec {
   dependency_keys?: string[];
   dependency_task_ids?: string[];
   dependency_output_policy?: RustDependencyOutputPolicy;
+  execution?: RustTaskExecutionSpec | null;
+}
+
+export interface RustRuntimeInstanceReadiness {
+  instance_id: string;
+  implementation: string;
+  healthy: boolean;
+}
+
+export interface RustModelReadiness {
+  provider_instance_id: string;
+  model_id: string;
+  display_name?: string | null;
+}
+
+export interface RustExecutionDefaultsReadiness {
+  default_repo_path?: string | null;
+  default_provider_instance_id?: string | null;
+  default_model_id?: string | null;
+  configured_instance_id?: string | null;
+}
+
+export interface RustExecutionReadinessReport {
+  is_ready: boolean;
+  available_runtimes: string[];
+  runtime_instances: RustRuntimeInstanceReadiness[];
+  available_models: RustModelReadiness[];
+  authorized_workspaces: string[];
+  defaults: RustExecutionDefaultsReadiness;
+  blocking_reasons: string[];
 }
 
 export type RustRunState =
@@ -163,6 +202,7 @@ export interface RustRunRecord {
   state: RustRunState;
   started_at?: string | null;
   finished_at?: string | null;
+  execution?: RustTaskExecutionSpec | null;
 }
 
 export interface RustCancellationSummary {
@@ -295,6 +335,9 @@ export type RustIpcCommand =
       instance_id?: string;
     }
   | {
+      type: 'get_execution_readiness';
+    }
+  | {
       type: 'shutdown';
     };
 
@@ -381,6 +424,10 @@ export type RustIpcResponse =
   | {
       type: 'models';
       models: RustModelDescriptor[];
+    }
+  | {
+      type: 'execution_readiness';
+      readiness: RustExecutionReadinessReport;
     }
   | {
       type: 'shutdown_acknowledged';

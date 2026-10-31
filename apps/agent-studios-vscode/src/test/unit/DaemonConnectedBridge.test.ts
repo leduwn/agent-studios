@@ -159,6 +159,21 @@ describe('DaemonConnectedBridge Unit Tests', () => {
             },
           ],
         });
+      } else if (cmd.type === 'get_execution_readiness') {
+        sendResponse({
+          type: 'execution_readiness',
+          readiness: {
+            is_ready: true,
+            available_runtimes: ['opencode'],
+            runtime_instances: [],
+            authorized_workspaces: ['/workspace/test'],
+            auth_state: { authenticated: true, active_sessions: 1 },
+            defaults: {
+              default_repo_path: '/workspace/test',
+            },
+            blocking_reasons: [],
+          },
+        });
       }
     });
 

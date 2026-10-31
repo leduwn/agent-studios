@@ -29,6 +29,8 @@ export interface OperatorConfirmationChallenge {
   workspacePath?: string;
   modelId?: string;
   providerId?: string;
+  runtimePreference?: string;
+  runtimeInstanceId?: string;
   intent?: string;
   expiresAt: number;
   signature: string;
@@ -41,6 +43,8 @@ interface TrackedConfirmation {
   workspacePath?: string;
   modelId?: string;
   providerId?: string;
+  runtimePreference?: string;
+  runtimeInstanceId?: string;
   intent: string;
   issuedAt: number;
   expiresAt: number;
@@ -62,6 +66,13 @@ export class OperatorConfirmationManager {
   }
 
   /**
+   * Returns number of active pending challenges in Extension Host memory.
+   */
+  public static getActiveChallengesCountForTesting(): number {
+    return this.activeChallenges.size;
+  }
+
+  /**
    * Generates a signed challenge using an explicit foreign secret to test signature verification failure.
    */
   public static createChallengeWithForeignSecretForTesting(
@@ -72,6 +83,8 @@ export class OperatorConfirmationManager {
       workspacePath?: string;
       modelId?: string;
       providerId?: string;
+      runtimePreference?: string;
+      runtimeInstanceId?: string;
       intent?: string;
       ttlMs?: number;
     }
@@ -80,11 +93,13 @@ export class OperatorConfirmationManager {
     const promptHash = crypto.createHash('sha256').update(normalizedPrompt, 'utf8').digest('hex');
     const expiresAt = Date.now() + (options?.ttlMs ?? 5 * 60 * 1000);
     const token = crypto.randomBytes(16).toString('hex');
-    const intent = options?.intent ?? 'submit_task';
+    const intent = options?.intent ?? 'task_execution';
     const normalizedWs = options?.workspacePath ? normalizeWorkspacePath(options.workspacePath) : '';
     const model = options?.modelId || '';
     const provider = options?.providerId || '';
-    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${intent}:${expiresAt}`;
+    const runtimePref = options?.runtimePreference || '';
+    const runtimeInst = options?.runtimeInstanceId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${expiresAt}`;
     const signature = crypto.createHmac('sha256', foreignSecret).update(payload, 'utf8').digest('hex');
 
     const challenge: OperatorConfirmationChallenge = {
@@ -94,6 +109,8 @@ export class OperatorConfirmationManager {
       workspacePath: options?.workspacePath,
       modelId: options?.modelId,
       providerId: options?.providerId,
+      runtimePreference: options?.runtimePreference,
+      runtimeInstanceId: options?.runtimeInstanceId,
       intent,
       expiresAt,
       signature,
@@ -107,6 +124,8 @@ export class OperatorConfirmationManager {
       workspacePath: options?.workspacePath,
       modelId: options?.modelId,
       providerId: options?.providerId,
+      runtimePreference: options?.runtimePreference,
+      runtimeInstanceId: options?.runtimeInstanceId,
       intent,
       issuedAt: Date.now(),
       expiresAt,
@@ -127,6 +146,8 @@ export class OperatorConfirmationManager {
       workspacePath?: string;
       modelId?: string;
       providerId?: string;
+      runtimePreference?: string;
+      runtimeInstanceId?: string;
       intent?: string;
       ttlMs?: number;
     }
@@ -135,11 +156,13 @@ export class OperatorConfirmationManager {
     const promptHash = crypto.createHash('sha256').update(normalizedPrompt, 'utf8').digest('hex');
     const expiresAt = Date.now() + (options?.ttlMs ?? 5 * 60 * 1000);
     const token = crypto.randomBytes(16).toString('hex');
-    const intent = options?.intent ?? 'submit_task';
+    const intent = options?.intent ?? 'task_execution';
     const normalizedWs = options?.workspacePath ? normalizeWorkspacePath(options.workspacePath) : '';
     const model = options?.modelId || '';
     const provider = options?.providerId || '';
-    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${intent}:${expiresAt}`;
+    const runtimePref = options?.runtimePreference || '';
+    const runtimeInst = options?.runtimeInstanceId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${expiresAt}`;
     const signature = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
 
     const challenge: OperatorConfirmationChallenge = {
@@ -149,6 +172,8 @@ export class OperatorConfirmationManager {
       workspacePath: options?.workspacePath,
       modelId: options?.modelId,
       providerId: options?.providerId,
+      runtimePreference: options?.runtimePreference,
+      runtimeInstanceId: options?.runtimeInstanceId,
       intent,
       expiresAt,
       signature,
@@ -161,6 +186,8 @@ export class OperatorConfirmationManager {
       workspacePath: options?.workspacePath,
       modelId: options?.modelId,
       providerId: options?.providerId,
+      runtimePreference: options?.runtimePreference,
+      runtimeInstanceId: options?.runtimeInstanceId,
       intent,
       issuedAt: Date.now(),
       expiresAt,
@@ -200,6 +227,8 @@ export class OperatorConfirmationManager {
       workspacePath?: string;
       modelId?: string;
       providerId?: string;
+      runtimePreference?: string;
+      runtimeInstanceId?: string;
       intent?: string;
     },
     options?: {
@@ -235,8 +264,10 @@ export class OperatorConfirmationManager {
 
     const model = parsed.modelId || '';
     const provider = parsed.providerId || '';
-    const intent = parsed.intent || 'submit_task';
-    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normWsForSig}:${model}:${provider}:${intent}:${parsed.expiresAt}`;
+    const runtimePref = parsed.runtimePreference || '';
+    const runtimeInst = parsed.runtimeInstanceId || '';
+    const intent = parsed.intent || 'task_execution';
+    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normWsForSig}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${parsed.expiresAt}`;
     const expectedSig = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
 
     const sigBuf = Buffer.from(parsed.signature, 'hex');
@@ -353,9 +384,45 @@ export class OperatorConfirmationManager {
       };
     }
 
+    // Exact presence/absence equality for runtimePreference:
+    const hasParsedRuntime = Boolean(parsed.runtimePreference && parsed.runtimePreference.trim().length > 0);
+    const hasExpectedRuntime = Boolean(expected.runtimePreference && expected.runtimePreference.trim().length > 0);
+
+    if (hasParsedRuntime !== hasExpectedRuntime) {
+      return {
+        valid: false,
+        reason: `Runtime preference presence mismatch in confirmation challenge (challenge had: ${hasParsedRuntime}, request had: ${hasExpectedRuntime})`,
+      };
+    }
+
+    if (hasParsedRuntime && hasExpectedRuntime && parsed.runtimePreference !== expected.runtimePreference) {
+      return {
+        valid: false,
+        reason: `Runtime preference mismatch in confirmation challenge (expected '${expected.runtimePreference}', got '${parsed.runtimePreference}')`,
+      };
+    }
+
+    // Exact presence/absence equality for runtimeInstanceId:
+    const hasParsedInstance = Boolean(parsed.runtimeInstanceId && parsed.runtimeInstanceId.trim().length > 0);
+    const hasExpectedInstance = Boolean(expected.runtimeInstanceId && expected.runtimeInstanceId.trim().length > 0);
+
+    if (hasParsedInstance !== hasExpectedInstance) {
+      return {
+        valid: false,
+        reason: `Runtime instance ID presence mismatch in confirmation challenge (challenge had: ${hasParsedInstance}, request had: ${hasExpectedInstance})`,
+      };
+    }
+
+    if (hasParsedInstance && hasExpectedInstance && parsed.runtimeInstanceId !== expected.runtimeInstanceId) {
+      return {
+        valid: false,
+        reason: `Runtime instance ID mismatch in confirmation challenge (expected '${expected.runtimeInstanceId}', got '${parsed.runtimeInstanceId}')`,
+      };
+    }
+
     // Intent match
-    const expectedIntent = expected.intent ?? 'submit_task';
-    const parsedIntent = parsed.intent ?? 'submit_task';
+    const expectedIntent = expected.intent ?? 'task_execution';
+    const parsedIntent = parsed.intent ?? 'task_execution';
     if (parsedIntent !== expectedIntent) {
       return {
         valid: false,
@@ -381,6 +448,8 @@ export class OperatorConfirmationManager {
       workspacePath?: string;
       modelId?: string;
       providerId?: string;
+      runtimePreference?: string;
+      runtimeInstanceId?: string;
       intent?: string;
     },
     options?: {
@@ -583,6 +652,8 @@ export interface TaskSubmissionPreflightRequest {
   prompt: string;
   requestedModelId?: string;
   requestedProviderId?: string;
+  runtimePreference?: string;
+  runtimeInstanceId?: string;
   confirmedByUser: boolean;
   confirmationChallenge?: OperatorConfirmationChallenge | string;
   consumeChallenge?: boolean;
@@ -836,6 +907,9 @@ export class CapabilityMatrix {
           workspacePath: req.workspacePath,
           modelId: req.requestedModelId,
           providerId: req.requestedProviderId,
+          runtimePreference: req.runtimePreference,
+          runtimeInstanceId: req.runtimeInstanceId,
+          intent: 'task_execution',
         },
         {
           consume: req.consumeChallenge ?? true,

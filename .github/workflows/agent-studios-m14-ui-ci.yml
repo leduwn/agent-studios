@@ -37,11 +37,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Checkout pinned Rust backend (M13 IPC agsd)
+      - name: Checkout pinned Rust backend (M15 IPC agsd)
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
-          PINNED_SHA="ce0396c1f165760ea271110eaf9bfd6dc84a67a7"
+          PINNED_SHA="a5dbbfc5ebada254727db9a788c0ee40e3035ea8"
           echo "Fetching pinned backend commit: $PINNED_SHA"
           git fetch --depth=1 --force origin "$PINNED_SHA":backend-pin || {
             echo "::error::Failed to fetch pinned backend commit $PINNED_SHA. Branch fallback disabled."
@@ -64,7 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent-studios-rs
-          key: ce0396c1f165760ea271110eaf9bfd6dc84a67a7
+          key: a5dbbfc5ebada254727db9a788c0ee40e3035ea8
 
       - name: Build agsd native daemon
         working-directory: ${{ github.workspace }}

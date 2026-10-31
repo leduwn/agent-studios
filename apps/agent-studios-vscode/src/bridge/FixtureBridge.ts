@@ -23,6 +23,9 @@ import {
   TimelineEvent,
   ToolCallInfo,
 } from './types';
+import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
+import { CancelTaskResult } from './ipc/ExecutionClient';
+import { RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
 
 /**
  * Developer fixture / preview bridge providing deterministic mock session data
@@ -742,6 +745,83 @@ export class FixtureBridge implements AgentStudiosBridge {
     this._isCancelled = true;
   }
 
+  public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
+    const taskId = `task-fixture-${Date.now()}`;
+    this._nextSequenceNumber++;
+    const startEvt: TimelineEvent = {
+      sequenceNumber: this._nextSequenceNumber,
+      id: `evt-${this._nextSequenceNumber}`,
+      timestamp: Date.now(),
+      type: 'task_started',
+      summary: `Task "${req.prompt}" started`,
+      taskId,
+    };
+    this._timeline.push(startEvt);
+    this._onEvent.fire(startEvt);
+
+    return {
+      success: true,
+      taskId,
+      taskKey: `key-${taskId}`,
+      studioId: req.studioId,
+      displayTitle: req.prompt,
+    };
+  }
+
+  public async cancelTask(taskId: string, _reason?: string): Promise<CancelTaskResult> {
+    this._nextSequenceNumber++;
+    const cancelEvt: TimelineEvent = {
+      sequenceNumber: this._nextSequenceNumber,
+      id: `evt-${this._nextSequenceNumber}`,
+      timestamp: Date.now(),
+      type: 'task_cancelled',
+      summary: `Task ${taskId} cancelled`,
+      taskId,
+    };
+    this._timeline.push(cancelEvt);
+    this._onEvent.fire(cancelEvt);
+
+    return {
+      success: true,
+      taskId,
+      studioId: 'fixture-studio',
+      summary: {
+        cancelled_tasks: [taskId],
+        cancelled_runs: [],
+        cancelled_approvals: [],
+      },
+    };
+  }
+
+  public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+    return {
+      is_ready: true,
+      available_runtimes: ['claude-code'],
+      runtime_instances: [
+        {
+          instance_id: 'claude-code-local',
+          implementation: 'claude-code',
+          healthy: true,
+        },
+      ],
+      available_models: [
+        {
+          provider_instance_id: 'provider-anthropic-01',
+          model_id: 'claude-3-5-sonnet',
+          display_name: 'Claude 3.5 Sonnet',
+        },
+      ],
+      authorized_workspaces: [this._session.workspacePath],
+      defaults: {
+        default_repo_path: this._session.workspacePath,
+        default_provider_instance_id: 'provider-anthropic-01',
+        default_model_id: 'claude-3-5-sonnet',
+        configured_instance_id: 'claude-code-local',
+      },
+      blocking_reasons: [],
+    };
+  }
+
   public async listSessions(): Promise<SessionSummary[]> {
     return this._sessions.map(s => ({
       id: s.id,
@@ -792,6 +872,10 @@ export class FixtureBridge implements AgentStudiosBridge {
     }
     this._session = target;
     return { ...this._session };
+  }
+
+  public setSessionWorkspacePathForTesting(wsPath: string): void {
+    this._session = { ...this._session, workspacePath: wsPath };
   }
 
   public dispose(): void {
