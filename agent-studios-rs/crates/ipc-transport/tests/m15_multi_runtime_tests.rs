@@ -610,6 +610,11 @@ async fn test_02_readiness_aggregation_and_fault_isolation() {
             .iter()
             .any(|b| b.contains("Failed to discover instances for runtime 'runtime-beta'"))
     );
+    assert_eq!(
+        r_fault.available_runtimes,
+        vec!["runtime-alpha"],
+        "Failed implementations must not be advertised as available"
+    );
 }
 
 #[tokio::test]
@@ -1139,4 +1144,96 @@ async fn test_11_lifecycle_session_ownership_cancellation_dispatch() {
 
     // Verify rt_a received ZERO stop calls
     assert_eq!(rt_a.stopped_sessions().len(), 0);
+}
+
+#[tokio::test]
+async fn test_12_duplicate_instance_identity_fails_closed_at_registry_boundary() {
+    let shared_id = RuntimeInstanceId::generate();
+    let alpha = Arc::new(MultiRuntimeMock::new("runtime-alpha", vec![shared_id]));
+    let beta = Arc::new(MultiRuntimeMock::new("runtime-beta", vec![shared_id]));
+    let registry = RuntimeRegistry::from_runtimes(vec![
+        alpha as Arc<dyn AgentRuntime>,
+        beta as Arc<dyn AgentRuntime>,
+    ])
+    .expect("registration with distinct implementation IDs");
+
+    let outcome = registry.discover_all().await;
+    assert!(outcome.instances.is_empty(), "Ambiguous identity must not resolve");
+    assert!(outcome.failures.contains_key(
+        &RuntimeImplementationId::new("runtime-alpha").unwrap()
+    ));
+    assert!(outcome.failures.contains_key(
+        &RuntimeImplementationId::new("runtime-beta").unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn test_13_foreign_implementation_identity_rejected_at_discovery() {
+    let instance_id = RuntimeInstanceId::generate();
+    let mut spoof = MultiRuntimeMock::new("runtime-spoof", vec![instance_id]);
+    spoof.instances[0].implementation_id =
+        RuntimeImplementationId::new("runtime-trusted").unwrap();
+    let registry =
+        RuntimeRegistry::from_runtimes(vec![Arc::new(spoof) as Arc<dyn AgentRuntime>])
+            .expect("register spoofed implementation");
+
+    let outcome = registry.discover_all().await;
+    assert!(outcome.instances.is_empty(), "Foreign identity must be rejected");
+    assert!(outcome.failures.contains_key(
+        &RuntimeImplementationId::new("runtime-spoof").unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn test_14_readiness_only_advertises_healthy_implementations() {
+    let secret = b"secret-m15-02-healthy-filter".to_vec();
+    let key_id = "healthy-filter-client";
+    let repo = IsolatedTestRepo::new();
+    let (catalog, provider_id, model_id, _, _) = create_test_catalog();
+    let alpha_id_1 = RuntimeInstanceId::generate();
+    let alpha_id_2 = RuntimeInstanceId::generate();
+    let beta_id = RuntimeInstanceId::generate();
+    let alpha = Arc::new(MultiRuntimeMock::new(
+        "runtime-alpha",
+        vec![alpha_id_1, alpha_id_2],
+    ));
+    let beta = Arc::new(MultiRuntimeMock::with_unavailable_instance(
+        "runtime-beta",
+        beta_id,
+    ));
+
+    let server = IpcServer::builder()
+        .with_admin_auth_key(key_id, secret.clone())
+        .with_runtimes(vec![
+            alpha as Arc<dyn AgentRuntime>,
+            beta as Arc<dyn AgentRuntime>,
+        ])
+        .with_provider_catalog(catalog)
+        .with_default_model_ref(ModelRef::new(provider_id, model_id))
+        .with_default_repo_path(repo.path())
+        .with_authorized_workspace(repo.path())
+        .build()
+        .expect("build multi-runtime server");
+    let (client_stream, server_stream) = tokio::io::duplex(65536);
+    server.handle_connection(server_stream);
+    let mut client = IpcClient::connect_stream(
+        client_stream,
+        ClientConfig::new(key_id, secret),
+    )
+    .await
+    .expect("connect IPC client");
+
+    let readiness = client.get_execution_readiness().await.unwrap();
+    assert_eq!(readiness.available_runtimes, vec!["runtime-alpha"]);
+    assert_eq!(readiness.runtime_instances.len(), 3);
+    assert!(readiness.runtime_instances.iter().any(|instance| {
+        instance.instance_id == beta_id.to_string() && !instance.healthy
+    }));
+    assert!(
+        !readiness.is_ready,
+        "Two healthy instances from one implementation still need a default"
+    );
+    assert!(readiness.blocking_reasons.iter().any(|reason| {
+        reason.contains("Multiple healthy runtimes available")
+    }));
 }
