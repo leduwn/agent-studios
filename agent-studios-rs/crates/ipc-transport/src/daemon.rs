@@ -261,6 +261,8 @@ pub struct DaemonConfig {
     pub key_id: String,
     pub capacity: usize,
     pub auto_execute: bool,
+    pub state_dir: Option<PathBuf>,
+    pub db_path: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -273,7 +275,43 @@ impl Default for DaemonConfig {
             key_id: "ags-client".to_string(),
             capacity: 1000,
             auto_execute: true,
+            state_dir: None,
+            db_path: None,
         }
+    }
+}
+
+impl DaemonConfig {
+    /// Resolves the effective SQLite database path based on configuration and platform defaults.
+    pub fn resolve_db_path(&self) -> PathBuf {
+        if let Some(ref db) = self.db_path {
+            return db.clone();
+        }
+        let state_dir = self
+            .state_dir
+            .clone()
+            .unwrap_or_else(Self::default_state_dir);
+        state_dir.join("agsd.db")
+    }
+
+    /// Returns standard platform-specific state directory.
+    pub fn default_state_dir() -> PathBuf {
+        #[cfg(windows)]
+        {
+            if let Ok(app_data) = std::env::var("APPDATA") {
+                return PathBuf::from(app_data).join("AgentStudios");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("agent-studios");
+            }
+        }
+        std::env::temp_dir().join("agent-studios-state")
     }
 }
 
@@ -334,12 +372,82 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         "Daemon standard and admin runtime connection info written with restricted permissions (0600)"
     );
 
+    let db_path = config.resolve_db_path();
+    if let Some(parent) = db_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(TransportError::Io)?;
+        }
+    }
+    info!(
+        db_path = %db_path.display(),
+        "Opening durable SQLite EventStore for daemon"
+    );
+    let store = agent_studios_control_plane::sqlite_store::SqliteEventStore::open(&db_path)
+        .map_err(|e| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to open SQLite store at {}: {e}", db_path.display()),
+            ))
+        })?;
+
+    let mut control_plane = agent_studios_control_plane::ControlPlane::restore_from_store(
+        agent_studios_control_plane::SystemClock,
+        agent_studios_control_plane::AnyEventStore::Sqlite(store),
+    )
+    .map_err(|e| {
+        TransportError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to restore control plane state from durable store: {e}"),
+        ))
+    })?;
+
+    let (interrupted_tasks, interrupted_runs) = control_plane
+        .reconcile_interrupted_executions()
+        .map_err(|e| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to reconcile interrupted executions: {e}"),
+            ))
+        })?;
+
+    let (reconciled_wts, missing_wts) =
+        control_plane.reconcile_missing_worktrees().map_err(|e| {
+            TransportError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to reconcile worktrees: {e}"),
+            ))
+        })?;
+
+    let total_events = control_plane.all_events().map(|v| v.len()).unwrap_or(0);
+
+    let recovery_status = agent_studios_ipc_protocol::RecoveryStatusReport {
+        last_recovery_at: Some(chrono::Utc::now()),
+        interrupted_tasks_count: interrupted_tasks,
+        interrupted_runs_count: interrupted_runs,
+        worktrees_reconciled: reconciled_wts,
+        worktrees_missing: missing_wts,
+        worktrees_foreign: 0,
+        database_healthy: true,
+        database_path: Some(db_path.to_string_lossy().to_string()),
+        total_persisted_events: total_events,
+    };
+
+    info!(
+        interrupted_tasks,
+        interrupted_runs,
+        reconciled_wts,
+        missing_wts,
+        total_events,
+        "Daemon startup durable recovery complete"
+    );
+
     let server = IpcServerBuilder::new()
         .with_auth_key(&config.key_id, client_key.into_bytes())
         .with_admin_auth_key(&admin_key_id, admin_key.into_bytes())
         .with_replay_capacity(config.capacity)
         .with_auto_execute(config.auto_execute)
-        .with_control_plane(agent_studios_control_plane::ControlPlane::new_default())
+        .with_control_plane(control_plane)
+        .with_recovery_status(recovery_status)
         .with_provider_catalog(agent_studios_provider::ProviderCatalog::with_builtin_definitions())
         .build()?;
 

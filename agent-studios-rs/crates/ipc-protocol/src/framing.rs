@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::approval::ApprovalDecision;
@@ -93,10 +94,25 @@ pub enum IpcCommand {
         #[serde(default)]
         limit: Option<usize>,
     },
+    GetRecoveryStatus,
     Custom {
         action: String,
         payload: serde_json::Value,
     },
+}
+
+/// Durable recovery and persistence health status report (M15-04).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryStatusReport {
+    pub last_recovery_at: Option<DateTime<Utc>>,
+    pub interrupted_tasks_count: usize,
+    pub interrupted_runs_count: usize,
+    pub worktrees_reconciled: usize,
+    pub worktrees_missing: usize,
+    pub worktrees_foreign: usize,
+    pub database_healthy: bool,
+    pub database_path: Option<String>,
+    pub total_persisted_events: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -34,7 +34,7 @@ pub use envelope::{IpcEnvelope, ProtocolVersion};
 pub use error::ProtocolError;
 pub use framing::{
     AccessMode, DEFAULT_MAX_FRAME_SIZE, ErrorCode, FrameCodec, IpcCommand, IpcErrorResponse,
-    IpcResponse, decode_frame, encode_frame,
+    IpcResponse, RecoveryStatusReport, decode_frame, encode_frame,
 };
 pub use id::{ApprovalId, ClientId, CorrelationId, RequestId, SessionId, SubscriptionId};
 pub use readiness::{

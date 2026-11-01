@@ -30,6 +30,12 @@ struct Cli {
 
     #[arg(long, default_value_t = true, alias = "auto_execute")]
     auto_execute: bool,
+
+    #[arg(long, alias = "state_dir")]
+    state_dir: Option<PathBuf>,
+
+    #[arg(long, alias = "db_path")]
+    db_path: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -50,6 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         key_id: cli.key_id,
         capacity: cli.capacity,
         auto_execute: cli.auto_execute,
+        state_dir: cli.state_dir,
+        db_path: cli.db_path,
     };
 
     run_daemon(config).await?;

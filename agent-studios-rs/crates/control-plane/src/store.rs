@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use agent_studios_protocol::event::EventEnvelope;
+pub use agent_studios_protocol::event::EventEnvelope;
 use agent_studios_protocol::id::{EventId, StudioId};
 
-use crate::error::StoreError;
+pub use crate::error::StoreError;
 
 /// Storage abstraction for persisting and retrieving domain event streams.
 pub trait EventStore: Send + Sync {
@@ -133,6 +133,97 @@ impl EventStore for InMemoryStore {
 
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         Ok(self.all_events.clone())
+    }
+}
+
+impl EventStore for Box<dyn EventStore> {
+    fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
+        (**self).append_batch(events)
+    }
+
+    fn events_for_studio(
+        &self,
+        studio_id: StudioId,
+        from_sequence: u64,
+    ) -> Result<Vec<EventEnvelope>, StoreError> {
+        (**self).events_for_studio(studio_id, from_sequence)
+    }
+
+    fn latest_sequence(&self, studio_id: StudioId) -> Result<u64, StoreError> {
+        (**self).latest_sequence(studio_id)
+    }
+
+    fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
+        (**self).all_events()
+    }
+}
+
+/// Unified event store backend container supporting in-memory, SQLite, or custom backends.
+pub enum AnyEventStore {
+    InMemory(InMemoryStore),
+    Sqlite(crate::sqlite_store::SqliteEventStore),
+    Custom(Box<dyn EventStore>),
+}
+
+impl Default for AnyEventStore {
+    fn default() -> Self {
+        Self::InMemory(InMemoryStore::new())
+    }
+}
+
+impl EventStore for AnyEventStore {
+    fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(s) => s.append_batch(events),
+            Self::Sqlite(s) => s.append_batch(events),
+            Self::Custom(s) => s.append_batch(events),
+        }
+    }
+
+    fn events_for_studio(
+        &self,
+        studio_id: StudioId,
+        from_sequence: u64,
+    ) -> Result<Vec<EventEnvelope>, StoreError> {
+        match self {
+            Self::InMemory(s) => s.events_for_studio(studio_id, from_sequence),
+            Self::Sqlite(s) => s.events_for_studio(studio_id, from_sequence),
+            Self::Custom(s) => s.events_for_studio(studio_id, from_sequence),
+        }
+    }
+
+    fn latest_sequence(&self, studio_id: StudioId) -> Result<u64, StoreError> {
+        match self {
+            Self::InMemory(s) => s.latest_sequence(studio_id),
+            Self::Sqlite(s) => s.latest_sequence(studio_id),
+            Self::Custom(s) => s.latest_sequence(studio_id),
+        }
+    }
+
+    fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
+        match self {
+            Self::InMemory(s) => s.all_events(),
+            Self::Sqlite(s) => s.all_events(),
+            Self::Custom(s) => s.all_events(),
+        }
+    }
+}
+
+impl From<InMemoryStore> for AnyEventStore {
+    fn from(s: InMemoryStore) -> Self {
+        Self::InMemory(s)
+    }
+}
+
+impl From<crate::sqlite_store::SqliteEventStore> for AnyEventStore {
+    fn from(s: crate::sqlite_store::SqliteEventStore) -> Self {
+        Self::Sqlite(s)
+    }
+}
+
+impl From<Box<dyn EventStore>> for AnyEventStore {
+    fn from(s: Box<dyn EventStore>) -> Self {
+        Self::Custom(s)
     }
 }
 

@@ -160,6 +160,7 @@ pub enum IpcCommand {
         #[serde(default)]
         limit: Option<usize>,
     },
+    GetRecoveryStatus,
     Shutdown,
 }
 
@@ -258,6 +259,9 @@ pub enum IpcResponse {
     },
     TaskDiff {
         diff: TaskDiffResponse,
+    },
+    RecoveryStatus {
+        status: agent_studios_ipc_protocol::RecoveryStatusReport,
     },
     ShutdownAcknowledged,
     Error {
@@ -1748,6 +1752,12 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     })
                     .await
                     .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetRecoveryStatus => {
+                    let status = server_state.recovery_status.lock().unwrap().clone();
+                    tx.send(IpcResponse::RecoveryStatus { status })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::Shutdown => {
                     if session.role == ClientRole::Admin {

@@ -857,6 +857,26 @@ impl IpcClient {
         }
     }
 
+    /// Retrieves recovery status report from the daemon (M15-04).
+    pub async fn get_recovery_status(
+        &mut self,
+    ) -> Result<agent_studios_ipc_protocol::RecoveryStatusReport, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &IpcCommand::GetRecoveryStatus).await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::RecoveryStatus { status } => Ok(status),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "RecoveryStatus".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
     pub fn event_stream(&self) -> EventSubscriptionStream {
         EventSubscriptionStream {
             inner: self.inner.clone(),
