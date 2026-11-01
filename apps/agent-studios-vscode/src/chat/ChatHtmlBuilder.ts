@@ -33,6 +33,8 @@ export interface RuntimeOption {
   name: string;
   enabled: boolean;
   tooltip?: string;
+  instanceId?: string;
+  implementation?: string;
 }
 
 export interface StudioOption {
@@ -166,7 +168,13 @@ export class ChatHtmlBuilder {
         ];
 
     const runtimeOptionsHtml = runtimeOptions.map((r) => {
-      const isSelected = r.id === selectedRuntime || (selectedRuntime === 'claude_code' && (r.id === 'claude-code' || r.id === 'claude_code'));
+      const isSelected = Boolean(
+        selectedRuntime &&
+        (r.id === selectedRuntime ||
+          r.instanceId === selectedRuntime ||
+          r.id.startsWith(selectedRuntime + '|') ||
+          r.id.endsWith('|' + selectedRuntime))
+      );
       const parts = [`value="${escapeHtml(r.id)}"`];
       if (isSelected) {
         parts.push('selected');
@@ -729,8 +737,8 @@ export class ChatHtmlBuilder {
         messages: initialState.messages || [],
         attachments: initialState.attachments || [],
         isExecuting: false,
-        runtime: initialState.selectedRuntime || 'claude_code',
-        studioId: initialState.selectedStudioId || 'default-studio',
+        runtime: initialState.selectedRuntime || '',
+        studioId: initialState.selectedStudioId || '',
         workspacePath: initialState.workspacePath || '',
         isWorkspaceMatched: initialState.isWorkspaceMatched !== false,
         workspaceMismatchReason: initialState.workspaceMismatchReason || '',

@@ -58,6 +58,8 @@ export interface TaskExecutionState {
   streamOutput: string;
   metrics?: ExecutionMetrics;
   lastError?: ExecutionError;
+  runtimePreference?: string;
+  runtimeInstanceId?: string;
 }
 
 export class TaskExecutionStore implements vscode.Disposable {
@@ -95,7 +97,13 @@ export class TaskExecutionStore implements vscode.Disposable {
     return { ...this._state };
   }
 
-  public beginSubmission(studioId: string, prompt: string, displayTitle?: string): void {
+  public beginSubmission(
+    studioId: string,
+    prompt: string,
+    displayTitle?: string,
+    runtimePreference?: string,
+    runtimeInstanceId?: string
+  ): void {
     this.stopTimer();
     const now = Date.now();
     this._state = {
@@ -105,6 +113,8 @@ export class TaskExecutionStore implements vscode.Disposable {
       prompt,
       displayTitle: displayTitle || (prompt.length > 60 ? `${prompt.substring(0, 60)}...` : prompt),
       startedAt: now,
+      runtimePreference,
+      runtimeInstanceId,
     };
     this.startTimer();
     this.notifyStateChanged();
@@ -208,11 +218,14 @@ export class TaskExecutionStore implements vscode.Disposable {
       case 'task_started':
       case 'run_started':
         if (this._state.status === 'submitting' || this._state.status === 'queued') {
+          const exec = payload.execution as Record<string, unknown> | undefined;
           this._state = {
             ...this._state,
             status: 'running',
             activeTaskId: event.taskId ?? this._state.activeTaskId,
             activeRunId: ((payload.run_id || payload.runId) as string | undefined) ?? this._state.activeRunId,
+            runtimePreference: ((payload.runtime_preference || exec?.runtime_preference) as string | undefined) ?? this._state.runtimePreference,
+            runtimeInstanceId: ((payload.runtime_instance_id || exec?.runtime_instance_id) as string | undefined) ?? this._state.runtimeInstanceId,
           };
           this.notifyStateChanged();
         }

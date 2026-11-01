@@ -22,6 +22,7 @@ import {
   RustIpcResponse,
   RustProviderInstance,
   RustModelDescriptor,
+  RustExecutionReadinessReport,
 } from './RustIpcProtocolTypes';
 import {
   CapabilityMatrix,
@@ -48,6 +49,7 @@ export interface SubmitTaskRequest {
   customKey?: string;
   verifyDaemon?: boolean;
   requireWorkspace?: boolean;
+  readiness?: RustExecutionReadinessReport | null;
 }
 
 export interface VerifiedDaemonConfig {
@@ -216,6 +218,7 @@ export class SubmitTaskAdapter {
       requireWorkspace: req.requireWorkspace ?? (effectiveRepo !== undefined),
       requireAuthoritativeCheck: true,
       requireChallenge: true,
+      readiness: req.readiness,
     };
 
     const preflight: TaskSubmissionPreflightResult =

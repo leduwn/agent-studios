@@ -26,11 +26,131 @@ import { OperatorConfirmationModal } from '../security/OperatorConfirmationModal
 import { WorkspaceVerification } from '../security/WorkspaceVerification';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 import { TaskExecutionStore } from '../state/TaskExecutionStore';
-import { ChatHtmlBuilder } from './ChatHtmlBuilder';
+import { ChatHtmlBuilder, RuntimeOption } from './ChatHtmlBuilder';
 import { ChatSecurityGuards } from './ChatSecurityGuards';
+import { RustExecutionReadinessReport } from '../bridge/ipc/RustIpcProtocolTypes';
 
 export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'agent-studios.chat';
+
+  /**
+   * Constructs typed runtime options and authoritative selection from daemon readiness.
+   * Enforces:
+   * - Distinct selectable identity for every instance (${instance_id}|${implementation}).
+   * - Unhealthy, unknown or duplicate runtime identities disabled.
+   * - If multiple instances exist, never silently chooses first (selectedRuntime = '').
+   * - If configured default valid, selects exact default instance.
+   * - Truthful unavailable state if no healthy instances discovered.
+   * - No hardcoded OpenCode, Claude Code or Codex fallback.
+   * - Never enables native Claude Code or Codex unless backend explicitly reports verified adapter.
+   */
+  public static buildRuntimeOptions(
+    readiness: RustExecutionReadinessReport | null | undefined
+  ): { runtimeOptions: RuntimeOption[]; selectedRuntime: string } {
+    if (!readiness) {
+      return {
+        runtimeOptions: [
+          { id: '', name: 'No runtimes available (daemon unready)', enabled: false },
+        ],
+        selectedRuntime: '',
+      };
+    }
+
+    const instances = readiness.runtime_instances || [];
+    const seenIds = new Set<string>();
+    const duplicateIds = new Set<string>();
+    for (const inst of instances) {
+      if (seenIds.has(inst.instance_id)) {
+        duplicateIds.add(inst.instance_id);
+      }
+      seenIds.add(inst.instance_id);
+    }
+
+    const runtimeOptions: RuntimeOption[] = [];
+
+    for (const inst of instances) {
+      const isDuplicate = duplicateIds.has(inst.instance_id);
+      const isNativeUnverified =
+        (inst.implementation === 'claude_code' ||
+          inst.implementation === 'claude-code' ||
+          inst.implementation === 'codex') &&
+        (!readiness.available_runtimes || !readiness.available_runtimes.includes(inst.implementation));
+
+      const isEnabled = inst.healthy && !isDuplicate && !isNativeUnverified;
+      let tooltip = 'Healthy runtime instance';
+      if (isDuplicate) {
+        tooltip = 'Duplicate runtime instance ID detected in daemon readiness (disabled)';
+      } else if (!inst.healthy) {
+        tooltip = 'Degraded/Unhealthy runtime instance';
+      } else if (isNativeUnverified) {
+        tooltip = `Native ${inst.implementation} adapter is unverified / not implemented in backend`;
+      }
+
+      const compositeId = `${inst.instance_id}|${inst.implementation}`;
+      const suffix = isDuplicate
+        ? ' [Duplicate ID - Disabled]'
+        : !inst.healthy
+          ? ' [Unhealthy]'
+          : isNativeUnverified
+            ? ' [Unverified Adapter]'
+            : '';
+      const name = `${inst.implementation} (${inst.instance_id})${suffix}`;
+
+      runtimeOptions.push({
+        id: compositeId,
+        name,
+        enabled: isEnabled,
+        tooltip,
+        instanceId: inst.instance_id,
+        implementation: inst.implementation,
+      });
+    }
+
+    // Include registered but undiscovered runtimes as visibly disabled options
+    if (readiness.registered_runtimes) {
+      for (const reg of readiness.registered_runtimes) {
+        const hasInstance = instances.some((i) => i.implementation === reg);
+        if (!hasInstance) {
+          runtimeOptions.push({
+            id: `unregistered|${reg}`,
+            name: `${reg} (Registered, no discovered instance)`,
+            enabled: false,
+            tooltip: 'Adapter registered in backend but no active instance discovered',
+            implementation: reg,
+          });
+        }
+      }
+    }
+
+    // Determine default selection
+    let selectedRuntime = '';
+    const configuredId = readiness.defaults?.configured_instance_id;
+    if (configuredId && configuredId.trim().length > 0) {
+      const matched = runtimeOptions.find((r) => r.instanceId === configuredId && r.enabled);
+      if (matched) {
+        selectedRuntime = matched.id;
+      }
+    }
+
+    // If no configured default, and exactly one healthy instance exists, select it
+    if (!selectedRuntime) {
+      const healthy = runtimeOptions.filter((r) => r.enabled);
+      if (healthy.length === 1) {
+        selectedRuntime = healthy[0].id;
+      }
+      // If multiple healthy instances exist, leave selectedRuntime = '' (never silently pick first)
+    }
+
+    if (runtimeOptions.length === 0) {
+      runtimeOptions.push({
+        id: '',
+        name: 'No runtimes available (daemon unready)',
+        enabled: false,
+      });
+    }
+
+    return { runtimeOptions, selectedRuntime };
+  }
 
   private readonly _extensionUri: vscode.Uri;
   private _bridgeManager?: BridgeManager;
@@ -148,31 +268,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       ? await this.bridge.getExecutionReadiness().catch(() => null)
       : null;
 
-    let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
-    let selectedRuntime = '';
-    if (readiness) {
-      if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
-        runtimeOptions = readiness.runtime_instances.map((inst) => ({
-          id: inst.implementation,
-          name: `${inst.implementation} (${inst.instance_id})`,
-          enabled: inst.healthy,
-          tooltip: inst.healthy ? 'Healthy runtime instance' : 'Degraded runtime instance',
-        }));
-      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
-        runtimeOptions = readiness.available_runtimes.map((r) => ({
-          id: r,
-          name: r,
-          enabled: true,
-        }));
-      }
-      if (readiness.defaults?.configured_instance_id) {
-        selectedRuntime = readiness.defaults.configured_instance_id;
-      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
-        selectedRuntime = readiness.available_runtimes[0];
-      } else if (runtimeOptions && runtimeOptions.length > 0) {
-        selectedRuntime = runtimeOptions[0].id;
-      }
-    }
+    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
 
     let studioOptions: { id: string; name: string }[] | undefined;
     if (sessions && sessions.length > 0) {
@@ -190,7 +286,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const isWorkspaceMatched = wsVerification.isAuthorized;
     const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
 
-    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit') && isWorkspaceMatched;
+    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
+    const isTaskSubmitEnabled =
+      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
+      isWorkspaceMatched &&
+      hasHealthyRuntime;
 
     webviewView.webview.html = ChatHtmlBuilder.buildHtml(
       webviewView.webview,
@@ -684,24 +784,21 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       return;
     }
 
-    const runtime = message.runtime || (readiness?.runtime_instances?.[0]?.implementation || readiness?.available_runtimes?.[0]) || 'opencode';
-    if (!runtime || runtime.trim().length === 0) {
+    // Revalidate runtime selection against authoritative daemon readiness at dispatch
+    const runtimeValidation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
+      runtime: message.runtime,
+    });
+
+    if (!runtimeValidation.valid || !runtimeValidation.runtimePreference || !runtimeValidation.runtimeInstanceId) {
       await this.postMessage({
         type: 'error',
-        error: 'Execution runtime is required before submitting tasks. Daemon has no active runtimes.',
+        error: `Runtime selection rejected: ${runtimeValidation.reason || 'Invalid or unhealthy runtime selection.'}`,
       });
       return;
     }
 
-    let runtimeInstanceId: string | undefined;
-    if (readiness?.runtime_instances) {
-      const matchedInst = readiness.runtime_instances.find(
-        (inst) => inst.implementation === runtime || inst.instance_id === runtime
-      );
-      if (matchedInst) {
-        runtimeInstanceId = matchedInst.instance_id;
-      }
-    }
+    const runtime = runtimeValidation.runtimePreference;
+    const runtimeInstanceId = runtimeValidation.runtimeInstanceId;
 
     // Operator confirmation gate using trusted VS Code native modal dialog
     const confirmResult = await OperatorConfirmationModal.requestConfirmation({
@@ -731,7 +828,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
 
     const store = TaskExecutionStore.instance;
-    store.beginSubmission(studioId, prompt);
+    store.beginSubmission(studioId, prompt, undefined, runtime, runtimeInstanceId);
 
     try {
       if (typeof this.bridge.submitTask === 'function') {
@@ -745,6 +842,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           requestedProviderId: message.providerId || this._selectedProviderId,
           confirmedByUser: true,
           confirmationChallenge: confirmResult.challenge,
+          readiness,
         });
 
         store.taskSubmitted(submitResult.taskId, studioId);
@@ -852,31 +950,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       ? await this.bridge.getExecutionReadiness().catch(() => null)
       : null;
 
-    let runtimeOptions: { id: string; name: string; enabled: boolean; tooltip?: string }[] | undefined;
-    let selectedRuntime = '';
-    if (readiness) {
-      if (readiness.runtime_instances && readiness.runtime_instances.length > 0) {
-        runtimeOptions = readiness.runtime_instances.map((inst) => ({
-          id: inst.implementation,
-          name: `${inst.implementation} (${inst.instance_id})`,
-          enabled: inst.healthy,
-          tooltip: inst.healthy ? 'Healthy runtime instance' : 'Degraded runtime instance',
-        }));
-      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
-        runtimeOptions = readiness.available_runtimes.map((r) => ({
-          id: r,
-          name: r,
-          enabled: true,
-        }));
-      }
-      if (readiness.defaults?.configured_instance_id) {
-        selectedRuntime = readiness.defaults.configured_instance_id;
-      } else if (readiness.available_runtimes && readiness.available_runtimes.length > 0) {
-        selectedRuntime = readiness.available_runtimes[0];
-      } else if (runtimeOptions && runtimeOptions.length > 0) {
-        selectedRuntime = runtimeOptions[0].id;
-      }
-    }
+    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
 
     let studioOptions: { id: string; name: string }[] | undefined;
     if (sessions && sessions.length > 0) {
@@ -894,7 +968,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const isWorkspaceMatched = wsVerification.isAuthorized;
     const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
 
-    const isTaskSubmitEnabled = CapabilityMatrix.isCapabilityEnabled('task.submit') && isWorkspaceMatched;
+    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
+    const isTaskSubmitEnabled =
+      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
+      isWorkspaceMatched &&
+      hasHealthyRuntime;
 
     await this.postMessage({
       type: 'syncState',

@@ -420,9 +420,18 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
     this.assertConnected();
     const workspacePath = req.workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    let readiness = req.readiness;
+    if (readiness === undefined) {
+      try {
+        readiness = await this.getExecutionReadiness(1500);
+      } catch {
+        readiness = null;
+      }
+    }
     return SubmitTaskAdapter.submitTask(this._transport!, {
       ...req,
       workspacePath,
+      readiness,
     });
   }
 

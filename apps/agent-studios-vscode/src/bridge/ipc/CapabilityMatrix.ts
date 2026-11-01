@@ -21,6 +21,14 @@ import {
   PromptSanitizer,
   PromptSanitizationError,
 } from './PromptSanitizer';
+import { RustExecutionReadinessReport } from './RustIpcProtocolTypes';
+
+export interface RuntimeValidationResult {
+  valid: boolean;
+  runtimePreference?: string;
+  runtimeInstanceId?: string;
+  reason?: string;
+}
 
 export interface OperatorConfirmationChallenge {
   token: string;
@@ -665,6 +673,7 @@ export interface TaskSubmissionPreflightRequest {
   requireAuthoritativeCheck?: boolean;
   requireChallenge?: boolean;
   requireWorkspace?: boolean;
+  readiness?: RustExecutionReadinessReport | null;
 }
 
 /**
@@ -783,6 +792,198 @@ export class CapabilityMatrix {
   }
 
   /**
+   * Validates runtime instance selection against authoritative daemon readiness.
+   * Enforces:
+   * 1. Readiness presence (fails closed if readiness report is missing/null).
+   * 2. Duplicate instance identity detection (rejects if duplicate instance_ids exist).
+   * 3. Distinct instance resolution (never silently picks first if ambiguous).
+   * 4. Health verification (rejects unhealthy/degraded instances).
+   * 5. Unimplemented/unverified adapter rejection (rejects native Claude Code / Codex unless backend explicitly verified).
+   * 6. Capability verification (rejects if required capabilities are unsupported).
+   * 7. Configured default resolution when no explicit selection provided.
+   */
+  public static validateRuntimeInstanceSelection(
+    readiness: RustExecutionReadinessReport | null | undefined,
+    selection?: {
+      runtime?: string;
+      runtimePreference?: string;
+      runtimeInstanceId?: string;
+    }
+  ): RuntimeValidationResult {
+    if (!readiness) {
+      return {
+        valid: false,
+        reason: 'Execution readiness report is unavailable from daemon.',
+      };
+    }
+
+    const instances = readiness.runtime_instances || [];
+    if (instances.length === 0) {
+      return {
+        valid: false,
+        reason: 'Daemon reports zero runtime instances available.',
+      };
+    }
+
+    // Check for duplicate instance IDs
+    const seenIds = new Set<string>();
+    const duplicateIds = new Set<string>();
+    for (const inst of instances) {
+      if (seenIds.has(inst.instance_id)) {
+        duplicateIds.add(inst.instance_id);
+      }
+      seenIds.add(inst.instance_id);
+    }
+
+    let reqInstId: string | undefined = selection?.runtimeInstanceId;
+    let reqPref: string | undefined = selection?.runtimePreference;
+
+    if (selection?.runtime && selection.runtime.trim().length > 0) {
+      const trimmed = selection.runtime.trim();
+      if (trimmed.includes('|')) {
+        const [partId, partPref] = trimmed.split('|');
+        if (!reqInstId && partId.trim().length > 0) {
+          reqInstId = partId.trim();
+        }
+        if (!reqPref && partPref.trim().length > 0) {
+          reqPref = partPref.trim();
+        }
+      } else if (!reqInstId && !reqPref) {
+        // Could be instance_id or implementation
+        const byId = instances.find((i) => i.instance_id === trimmed);
+        if (byId) {
+          reqInstId = byId.instance_id;
+          reqPref = byId.implementation;
+        } else {
+          reqPref = trimmed;
+        }
+      }
+    }
+
+    let resolvedInstance: (typeof instances)[0] | undefined;
+
+    if (reqInstId) {
+      if (duplicateIds.has(reqInstId)) {
+        return {
+          valid: false,
+          reason: `Duplicate runtime instance identity detected in daemon readiness: '${reqInstId}'. Execution rejected (fail-closed).`,
+        };
+      }
+      resolvedInstance = instances.find((i) => i.instance_id === reqInstId);
+      if (!resolvedInstance) {
+        return {
+          valid: false,
+          reason: `Unknown runtime instance '${reqInstId}'. Not found in daemon discovered instances.`,
+        };
+      }
+      if (reqPref && reqPref !== resolvedInstance.implementation) {
+        return {
+          valid: false,
+          reason: `Runtime preference mismatch: requested implementation '${reqPref}', but instance '${reqInstId}' implements '${resolvedInstance.implementation}'.`,
+        };
+      }
+    } else if (reqPref) {
+      const matching = instances.filter((i) => i.implementation === reqPref);
+      if (matching.length === 0) {
+        return {
+          valid: false,
+          reason: `Unknown runtime implementation '${reqPref}'. Not found in daemon discovered instances.`,
+        };
+      }
+      if (matching.length > 1) {
+        return {
+          valid: false,
+          reason: `Ambiguous runtime selection: multiple instances discovered for implementation '${reqPref}'. Explicit instance selection required.`,
+        };
+      }
+      resolvedInstance = matching[0];
+      if (duplicateIds.has(resolvedInstance.instance_id)) {
+        return {
+          valid: false,
+          reason: `Duplicate runtime instance identity detected in daemon readiness: '${resolvedInstance.instance_id}'. Execution rejected (fail-closed).`,
+        };
+      }
+    } else {
+      // Neither instance ID nor preference specified — check configured default
+      const defaultInstId = readiness.defaults?.configured_instance_id;
+      if (defaultInstId && defaultInstId.trim().length > 0) {
+        if (duplicateIds.has(defaultInstId)) {
+          return {
+            valid: false,
+            reason: `Duplicate runtime instance identity detected in daemon readiness for default: '${defaultInstId}'. Execution rejected (fail-closed).`,
+          };
+        }
+        resolvedInstance = instances.find((i) => i.instance_id === defaultInstId);
+        if (!resolvedInstance) {
+          return {
+            valid: false,
+            reason: `Configured default runtime instance '${defaultInstId}' not found in daemon discovered instances.`,
+          };
+        }
+      } else {
+        // Missing default and no selection provided
+        const healthy = instances.filter((i) => i.healthy);
+        if (healthy.length === 0) {
+          return {
+            valid: false,
+            reason: 'No healthy runtime instances available on daemon. Configuration required.',
+          };
+        }
+        if (healthy.length > 1) {
+          return {
+            valid: false,
+            reason: 'Multiple runtime instances discovered but no configured default or explicit selection provided. Explicit instance selection required.',
+          };
+        }
+        resolvedInstance = healthy[0];
+        if (duplicateIds.has(resolvedInstance.instance_id)) {
+          return {
+            valid: false,
+            reason: `Duplicate runtime instance identity detected in daemon readiness: '${resolvedInstance.instance_id}'. Execution rejected (fail-closed).`,
+          };
+        }
+      }
+    }
+
+    // Health check
+    if (!resolvedInstance.healthy) {
+      return {
+        valid: false,
+        reason: `Runtime instance '${resolvedInstance.instance_id}' (${resolvedInstance.implementation}) is degraded or unhealthy. Task execution disabled.`,
+      };
+    }
+
+    // Native Claude Code / Codex verification guard
+    const impl = resolvedInstance.implementation;
+    if (impl === 'claude_code' || impl === 'claude-code' || impl === 'codex') {
+      const isAvailable = readiness.available_runtimes && readiness.available_runtimes.includes(impl);
+      if (!isAvailable) {
+        return {
+          valid: false,
+          reason: `Native '${impl}' runtime adapter is not implemented or verified in backend. Task execution disabled.`,
+        };
+      }
+    }
+
+    // Capability check if declared
+    if (readiness.runtime_capabilities && readiness.runtime_capabilities[resolvedInstance.instance_id]) {
+      const caps = readiness.runtime_capabilities[resolvedInstance.instance_id];
+      if (caps['streaming_events'] === 'unsupported' && caps['stop'] === 'unsupported') {
+        return {
+          valid: false,
+          reason: `Runtime instance '${resolvedInstance.instance_id}' does not support streaming_events or stop capabilities.`,
+        };
+      }
+    }
+
+    return {
+      valid: true,
+      runtimePreference: resolvedInstance.implementation,
+      runtimeInstanceId: resolvedInstance.instance_id,
+    };
+  }
+
+  /**
    * Retrieves descriptor for a capability.
    */
   public static getDescriptor(capabilityId: string): CapabilityDescriptor | undefined {
@@ -887,6 +1088,23 @@ export class CapabilityMatrix {
       }
     }
 
+    // 4.6. Runtime instance selection validation against authoritative daemon readiness
+    if (req.readiness !== undefined) {
+      const runtimeVal = this.validateRuntimeInstanceSelection(req.readiness, {
+        runtimePreference: req.runtimePreference,
+        runtimeInstanceId: req.runtimeInstanceId,
+      });
+      if (!runtimeVal.valid) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: runtimeVal.reason || 'Runtime selection validation failed against daemon readiness.',
+        };
+      }
+      req.runtimePreference = runtimeVal.runtimePreference;
+      req.runtimeInstanceId = runtimeVal.runtimeInstanceId;
+    }
+
     // 5. Operator confirmation challenge: reject untrusted raw boolean without verification token
     if (req.requireChallenge || req.confirmationChallenge !== undefined) {
       if (!req.confirmationChallenge) {
@@ -930,8 +1148,10 @@ export class CapabilityMatrix {
     // If the user requested a specific model (requestedModelId) that differs from the verified daemon default,
     // or if requestedProviderId differs from the daemon's provider, task submission must be REJECTED (fail closed).
     const parsedDefaultModel = parseDefaultModelEnv();
-    const effectiveModel = req.daemonEffectiveModel || parsedDefaultModel?.modelId;
-    const effectiveProvider = req.daemonEffectiveProvider || parsedDefaultModel?.providerId;
+    const readinessDefaultModel = req.readiness?.defaults?.default_model_id || (req.readiness?.available_models?.length === 1 ? req.readiness.available_models[0].model_id : undefined);
+    const readinessDefaultProvider = req.readiness?.defaults?.default_provider_instance_id || (req.readiness?.available_models?.length === 1 ? req.readiness.available_models[0].provider_instance_id : undefined);
+    const effectiveModel = req.daemonEffectiveModel || readinessDefaultModel || parsedDefaultModel?.modelId;
+    const effectiveProvider = req.daemonEffectiveProvider || readinessDefaultProvider || parsedDefaultModel?.providerId;
 
     if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
       if (!effectiveModel) {

@@ -177,7 +177,9 @@ export interface RustExecutionDefaultsReadiness {
 
 export interface RustExecutionReadinessReport {
   is_ready: boolean;
+  registered_runtimes?: string[];
   available_runtimes: string[];
+  runtime_capabilities?: Record<string, Record<string, 'supported' | 'unsupported' | 'unknown'>>;
   runtime_instances: RustRuntimeInstanceReadiness[];
   available_models: RustModelReadiness[];
   authorized_workspaces: string[];
