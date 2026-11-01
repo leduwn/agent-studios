@@ -55,8 +55,9 @@ function resolveAgsdBinaryPath(): string {
     path.resolve(__dirname, '../../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
     path.resolve(__dirname, '../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
     path.resolve(process.cwd(), '../../agent-studios-rs/target/debug/agsd' + exeSuffix),
-    isWindows ? 'D:\\Projects\\agent-studios-m15\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
+    isWindows ? 'D:\\Projects\\agent-studios-m15-03\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
     isWindows ? 'D:\\Projects\\agent-studios-m15-02\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
+    isWindows ? 'D:\\Projects\\agent-studios-m15\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
   ].filter((p): p is string => typeof p === 'string' && p.length > 0);
 
   for (const candidate of candidatePaths) {

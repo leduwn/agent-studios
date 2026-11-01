@@ -19,6 +19,8 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'approveAction',
   'denyAction',
   'openDiff',
+  'viewTaskDiff',
+  'openArtifactReview',
   'attachContext',
   'removeAttachment',
   'switchMode',
@@ -298,6 +300,17 @@ export class ChatSecurityGuards {
       }
 
       case 'cancelTask': {
+        if (record.taskId !== undefined && (typeof record.taskId !== 'string' || record.taskId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'taskId' parameter." };
+        }
+        if (record.studioId !== undefined && (typeof record.studioId !== 'string' || record.studioId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'studioId' parameter." };
+        }
+        return { valid: true };
+      }
+
+      case 'viewTaskDiff':
+      case 'openArtifactReview': {
         if (record.taskId !== undefined && (typeof record.taskId !== 'string' || record.taskId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: "Invalid 'taskId' parameter." };
         }

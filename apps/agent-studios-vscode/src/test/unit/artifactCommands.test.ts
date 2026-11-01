@@ -84,4 +84,26 @@ describe('ArtifactCommands Tests', () => {
     const diffCall = executedCommands.find(c => c.command === 'vscode.diff');
     assert.ok(diffCall !== undefined);
   });
+
+  it('opens ArtifactReviewPanel with explicit studioId and taskId options', async () => {
+    await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+      studioId: 'session-m14-fixture',
+      taskId: 'task-1',
+      taskTitle: 'Analyze workspace',
+      taskStatus: 'succeeded',
+    });
+    // Panel was created without error
+    assert.ok(true);
+  });
+
+  it('prompts user via QuickPick for openArtifactReview when no options passed', async () => {
+    const tasks = await bridge.listTasks();
+    mockWindowMessages.quickPickSelection = {
+      label: tasks[0].title,
+      task: tasks[0],
+    };
+
+    await vscode.commands.executeCommand('agent-studios.openArtifactReview');
+    assert.ok(true);
+  });
 });

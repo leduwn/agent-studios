@@ -417,6 +417,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         await this._handleOpenDiff(message.artifactId, message.filePath);
         break;
 
+      case 'viewTaskDiff':
+      case 'openArtifactReview':
+        await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+          studioId: message.studioId,
+          taskId: message.taskId,
+        });
+        break;
+
       case 'attachContext':
         await this._handleAttachContext(message.source);
         break;

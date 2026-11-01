@@ -12,6 +12,7 @@ import {
   findWorkspaceFileForArtifact,
 } from '../bridge/DiffDocumentProvider';
 import { Artifact } from '../bridge/types';
+import { ArtifactReviewPanel, ArtifactReviewOptions } from '../webviews/ArtifactReviewPanel';
 
 /**
  * Registers commands for inspecting and visualizing Agent Studios artifacts.
@@ -114,7 +115,52 @@ export function registerArtifactCommands(
     }
   );
 
-  disposables.push(inspectCommand);
+  const reviewCommand = vscode.commands.registerCommand(
+    'agent-studios.openArtifactReview',
+    async (args?: unknown) => {
+      let options: ArtifactReviewOptions;
+
+      if (args && typeof args === 'object' && 'studioId' in args && 'taskId' in args) {
+        options = args as ArtifactReviewOptions;
+      } else {
+        const session = await bridge.getCurrentSession();
+        const studioId = session?.id || 'default-studio';
+        const tasks = await bridge.listTasks();
+        if (tasks.length === 0) {
+          vscode.window.showInformationMessage('No tasks available to review.');
+          return;
+        }
+
+        const items = tasks.map((t) => ({
+          label: t.title,
+          description: `Status: ${t.status} | ID: ${t.id}`,
+          task: t,
+        }));
+
+        const pick = await vscode.window.showQuickPick(items, {
+          placeHolder: 'Select a task to review artifacts and diff',
+        });
+        if (!pick) {
+          return;
+        }
+
+        options = {
+          studioId,
+          taskId: pick.task.id,
+          taskTitle: pick.task.title,
+          taskStatus: pick.task.status,
+        };
+      }
+
+      const loadDiffFn = bridge.getTaskDiff
+        ? () => bridge.getTaskDiff!(options.studioId, options.taskId)
+        : undefined;
+
+      ArtifactReviewPanel.createOrShow(context.extensionUri, options, loadDiffFn);
+    }
+  );
+
+  disposables.push(inspectCommand, reviewCommand);
 
   const compositeDisposable = vscode.Disposable.from(...disposables);
   context.subscriptions.push(compositeDisposable);

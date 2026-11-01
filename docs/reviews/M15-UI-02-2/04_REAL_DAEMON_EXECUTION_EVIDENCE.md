@@ -23,7 +23,7 @@ This test validates real end-to-end task submission and lifecycle event processi
 
 ## 2. Real Daemon Execution Verification Test Matrix
 
-The smoke test suite `src/test/e2e/RealExecutionSmoke.test.ts` exercises:
+The real daemon test suites (`src/test/e2e/RealRustDaemonE2E.test.ts`, `src/test/e2e/LiveMissionControlE2E.test.ts`, and `src/test/unit/CrossProcessDaemonE2E.test.ts`) exercise:
 
 1. **Daemon Spawning & IPC Bootstrap**:
    - Launches genuine compiled `agsd` binary with `--auto-execute` and `--pipe-name`/`--uds-path`.

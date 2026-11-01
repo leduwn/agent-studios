@@ -185,6 +185,18 @@ export class MissionControlPanel implements vscode.Disposable {
         }
         break;
 
+      case 'viewTaskDiff':
+      case 'openArtifactReview':
+        if (message.payload?.taskId) {
+          const state = this._projection.state;
+          const studioId = state.activeStudio?.id || state.currentSession?.id || 'default-studio';
+          await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+            studioId: message.payload.studioId || studioId,
+            taskId: message.payload.taskId,
+          });
+        }
+        break;
+
       case 'openChat':
         await this._openChat(message.payload?.sessionId);
         break;

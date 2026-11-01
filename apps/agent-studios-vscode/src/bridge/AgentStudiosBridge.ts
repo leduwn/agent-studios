@@ -23,7 +23,8 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
-import { RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import { RustArtifactRecord, RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
 
 /**
  * Thrown when an operation requiring daemon connectivity is attempted while disconnected.
@@ -58,6 +59,9 @@ export interface AgentStudiosBridge extends vscode.Disposable {
   requestApprovalDecision(id: string, decision: 'approved' | 'denied'): Promise<ApprovalDecisionResult>;
   listArtifacts(): Promise<Artifact[]>;
   getArtifactDiff(artifactId: string): Promise<string | null>;
+  getTaskDiff?(studioId: string, taskId: string, signal?: AbortSignal): Promise<ReassembledTaskDiff>;
+  listTaskArtifacts?(studioId: string, taskId: string): Promise<RustArtifactRecord[]>;
+  fetchArtifactContent?(studioId: string, artifactId: string, signal?: AbortSignal): Promise<ReassembledArtifactContent>;
   listProviderSummaries(): Promise<ProviderSummary[]>;
   submitEditorAction(action: EditorActionRequest): Promise<EditorActionResult>;
 

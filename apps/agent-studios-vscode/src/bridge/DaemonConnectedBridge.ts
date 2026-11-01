@@ -64,7 +64,13 @@ import {
   RustTaskState,
   RustHealthResponse,
   RustExecutionReadinessReport,
+  RustArtifactRecord,
 } from './ipc/RustIpcProtocolTypes';
+import {
+  ArtifactClient,
+  ReassembledArtifactContent,
+  ReassembledTaskDiff,
+} from './ipc/ArtifactClient';
 
 export interface DaemonConnectedBridgeOptions {
   bootstrapPath?: string;
@@ -344,6 +350,41 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     this.assertConnected();
     const artifact = this._artifacts.get(artifactId);
     return artifact ? artifact.diffContent : null;
+  }
+
+  /**
+   * Fetches unified diff for a task with lossless Base64 pagination and SHA-256 integrity verification.
+   */
+  public async getTaskDiff(
+    studioId: string,
+    taskId: string,
+    signal?: AbortSignal
+  ): Promise<ReassembledTaskDiff> {
+    this.assertConnected();
+    return ArtifactClient.fetchTaskDiff(this._transport!, studioId, taskId, { signal });
+  }
+
+  /**
+   * Lists artifact records for a task from daemon.
+   */
+  public async listTaskArtifacts(
+    studioId: string,
+    taskId: string
+  ): Promise<RustArtifactRecord[]> {
+    this.assertConnected();
+    return ArtifactClient.listTaskArtifacts(this._transport!, studioId, taskId);
+  }
+
+  /**
+   * Fetches raw artifact content with Base64 decoding, chunk verification and SHA-256 verification.
+   */
+  public async fetchArtifactContent(
+    studioId: string,
+    artifactId: string,
+    signal?: AbortSignal
+  ): Promise<ReassembledArtifactContent> {
+    this.assertConnected();
+    return ArtifactClient.fetchArtifactContent(this._transport!, studioId, artifactId, { signal });
   }
 
   /**

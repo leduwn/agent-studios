@@ -36,4 +36,16 @@ describe('Extension Host: Virtual Diff Document Provider Integration Tests', () 
       assert.fail(`vscode.diff command failed with virtual documents: ${err}`);
     }
   });
+
+  it('triggers agent-studios.openArtifactReview command without workspace mutation', async () => {
+    try {
+      await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+        studioId: 'session-m14-fixture',
+        taskId: 'task-2',
+      });
+      assert.ok(true, 'Native openArtifactReview command executed successfully');
+    } catch (err) {
+      assert.fail(`openArtifactReview command failed: ${err}`);
+    }
+  });
 });

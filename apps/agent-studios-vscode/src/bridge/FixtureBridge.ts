@@ -3,6 +3,7 @@
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from './AgentStudiosBridge';
 import {
@@ -25,7 +26,8 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
-import { RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import { RustArtifactRecord, RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
 
 /**
  * Developer fixture / preview bridge providing deterministic mock session data
@@ -472,6 +474,109 @@ export class FixtureBridge implements AgentStudiosBridge {
   public async getArtifactDiff(artifactId: string): Promise<string | null> {
     const artifact = this._artifacts.find(a => a.id === artifactId);
     return artifact ? artifact.diffContent : null;
+  }
+
+  public async getTaskDiff(
+    studioId: string,
+    taskId: string,
+    _signal?: AbortSignal
+  ): Promise<ReassembledTaskDiff> {
+    const rawPatch = `diff --git a/src/example.ts b/src/example.ts
+index 1111111..2222222 100644
+--- a/src/example.ts
++++ b/src/example.ts
+@@ -1,3 +1,3 @@
+-console.log('old');
++console.log('new');
+`;
+    const buffer = Buffer.from(rawPatch, 'utf8');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return {
+      studioId,
+      taskId,
+      artifactId: 'fixture-diff-artifact',
+      baseCommit: 'commit-base-001',
+      headCommit: 'commit-head-002',
+      summary: {
+        files_changed: 1,
+        added_files: [],
+        modified_files: ['src/example.ts'],
+        deleted_files: [],
+        renamed_files: [],
+        binary_files: [],
+        patch_size_bytes: buffer.byteLength,
+        base_commit: 'commit-base-001',
+      },
+      rawBuffer: buffer,
+      text: rawPatch,
+      isBinary: false,
+      sha256: hash,
+      expectedSha256: hash,
+      integrity: 'VERIFIED',
+      totalBytes: buffer.byteLength,
+      chunkCount: 1,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+  }
+
+  public async listTaskArtifacts(
+    studioId: string,
+    taskId: string
+  ): Promise<RustArtifactRecord[]> {
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return [
+      {
+        id: `artifact-patch-${taskId}`,
+        studio_id: studioId,
+        task_id: taskId,
+        producer_agent_id: 'agent-coder-01',
+        kind: 'patch',
+        logical_name: 'unified.patch',
+        content_hash: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        location: '/tmp/artifacts/patch.diff',
+        created_at: new Date().toISOString(),
+        size_bytes: 120,
+      },
+    ];
+    /* eslint-enable @typescript-eslint/naming-convention */
+  }
+
+  public async fetchArtifactContent(
+    studioId: string,
+    artifactId: string,
+    _signal?: AbortSignal
+  ): Promise<ReassembledArtifactContent> {
+    const text = 'Fixture artifact content for preview.';
+    const buffer = Buffer.from(text, 'utf8');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return {
+      studioId,
+      artifactId,
+      artifact: {
+        id: artifactId,
+        studio_id: studioId,
+        task_id: 'task-1',
+        producer_agent_id: 'agent-coder-01',
+        kind: 'file',
+        logical_name: 'fixture.txt',
+        content_hash: `sha256:${hash}`,
+        location: '/tmp/artifacts/fixture.txt',
+        created_at: new Date().toISOString(),
+        size_bytes: buffer.byteLength,
+      },
+      rawBuffer: buffer,
+      text,
+      isBinary: false,
+      sha256: hash,
+      expectedSha256: hash,
+      integrity: 'VERIFIED',
+      totalBytes: buffer.byteLength,
+      chunkCount: 1,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
   }
 
   public async listProviderSummaries(): Promise<ProviderSummary[]> {
