@@ -77,6 +77,22 @@ pub enum IpcCommand {
         instance_id: Option<String>,
     },
     GetExecutionReadiness,
+    ListTaskArtifacts {
+        studio_id: String,
+        task_id: String,
+    },
+    GetArtifact {
+        studio_id: String,
+        artifact_id: String,
+    },
+    GetTaskDiff {
+        studio_id: String,
+        task_id: String,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Custom {
         action: String,
         payload: serde_json::Value,
