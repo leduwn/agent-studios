@@ -22,6 +22,7 @@ import {
   PromptSanitizationError,
 } from './PromptSanitizer';
 import { RustExecutionReadinessReport } from './RustIpcProtocolTypes';
+import { WorkspaceVerification } from '../../security/WorkspaceVerification';
 
 export interface RuntimeValidationResult {
   valid: boolean;
@@ -43,6 +44,7 @@ export interface OperatorConfirmationChallenge {
   providerId?: string;
   runtimePreference?: string;
   runtimeInstanceId?: string;
+  sessionId?: string;
   intent?: string;
   expiresAt: number;
   signature: string;
@@ -57,6 +59,7 @@ interface TrackedConfirmation {
   providerId?: string;
   runtimePreference?: string;
   runtimeInstanceId?: string;
+  sessionId?: string;
   intent: string;
   issuedAt: number;
   expiresAt: number;
@@ -97,6 +100,7 @@ export class OperatorConfirmationManager {
       providerId?: string;
       runtimePreference?: string;
       runtimeInstanceId?: string;
+      sessionId?: string;
       intent?: string;
       ttlMs?: number;
     }
@@ -111,7 +115,8 @@ export class OperatorConfirmationManager {
     const provider = options?.providerId || '';
     const runtimePref = options?.runtimePreference || '';
     const runtimeInst = options?.runtimeInstanceId || '';
-    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${expiresAt}`;
+    const sessId = options?.sessionId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${sessId}:${expiresAt}`;
     const signature = crypto.createHmac('sha256', foreignSecret).update(payload, 'utf8').digest('hex');
 
     const challenge: OperatorConfirmationChallenge = {
@@ -123,6 +128,7 @@ export class OperatorConfirmationManager {
       providerId: options?.providerId,
       runtimePreference: options?.runtimePreference,
       runtimeInstanceId: options?.runtimeInstanceId,
+      sessionId: options?.sessionId,
       intent,
       expiresAt,
       signature,
@@ -138,6 +144,7 @@ export class OperatorConfirmationManager {
       providerId: options?.providerId,
       runtimePreference: options?.runtimePreference,
       runtimeInstanceId: options?.runtimeInstanceId,
+      sessionId: options?.sessionId,
       intent,
       issuedAt: Date.now(),
       expiresAt,
@@ -160,6 +167,7 @@ export class OperatorConfirmationManager {
       providerId?: string;
       runtimePreference?: string;
       runtimeInstanceId?: string;
+      sessionId?: string;
       intent?: string;
       ttlMs?: number;
     }
@@ -174,7 +182,8 @@ export class OperatorConfirmationManager {
     const provider = options?.providerId || '';
     const runtimePref = options?.runtimePreference || '';
     const runtimeInst = options?.runtimeInstanceId || '';
-    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${expiresAt}`;
+    const sessId = options?.sessionId || '';
+    const payload = `${token}:${studioId}:${promptHash}:${normalizedWs}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${sessId}:${expiresAt}`;
     const signature = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
 
     const challenge: OperatorConfirmationChallenge = {
@@ -186,6 +195,7 @@ export class OperatorConfirmationManager {
       providerId: options?.providerId,
       runtimePreference: options?.runtimePreference,
       runtimeInstanceId: options?.runtimeInstanceId,
+      sessionId: options?.sessionId,
       intent,
       expiresAt,
       signature,
@@ -200,6 +210,7 @@ export class OperatorConfirmationManager {
       providerId: options?.providerId,
       runtimePreference: options?.runtimePreference,
       runtimeInstanceId: options?.runtimeInstanceId,
+      sessionId: options?.sessionId,
       intent,
       issuedAt: Date.now(),
       expiresAt,
@@ -241,6 +252,7 @@ export class OperatorConfirmationManager {
       providerId?: string;
       runtimePreference?: string;
       runtimeInstanceId?: string;
+      sessionId?: string;
       intent?: string;
     },
     options?: {
@@ -278,8 +290,9 @@ export class OperatorConfirmationManager {
     const provider = parsed.providerId || '';
     const runtimePref = parsed.runtimePreference || '';
     const runtimeInst = parsed.runtimeInstanceId || '';
+    const sessId = parsed.sessionId || '';
     const intent = parsed.intent || 'task_execution';
-    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normWsForSig}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${parsed.expiresAt}`;
+    const payload = `${parsed.token}:${parsed.studioId}:${parsed.promptHash}:${normWsForSig}:${model}:${provider}:${runtimePref}:${runtimeInst}:${intent}:${sessId}:${parsed.expiresAt}`;
     const expectedSig = crypto.createHmac('sha256', this.secret).update(payload, 'utf8').digest('hex');
 
     const sigBuf = Buffer.from(parsed.signature, 'hex');
@@ -432,6 +445,16 @@ export class OperatorConfirmationManager {
       };
     }
 
+    // Session ID match (when expected.sessionId is present)
+    if (expected.sessionId !== undefined && expected.sessionId !== null && expected.sessionId.trim().length > 0) {
+      if (!parsed.sessionId || parsed.sessionId !== expected.sessionId) {
+        return {
+          valid: false,
+          reason: 'Session ID mismatch in confirmation challenge',
+        };
+      }
+    }
+
     // Intent match
     const expectedIntent = expected.intent ?? 'task_execution';
     const parsedIntent = parsed.intent ?? 'task_execution';
@@ -462,6 +485,7 @@ export class OperatorConfirmationManager {
       providerId?: string;
       runtimePreference?: string;
       runtimeInstanceId?: string;
+      sessionId?: string;
       intent?: string;
     },
     options?: {
@@ -560,15 +584,17 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
     id: 'task.submit',
     name: 'Task Submission',
     tier: 'TASK_SUBMISSION_READY',
-    enabled: false, // Gated: requires operator confirmation and daemon default model acknowledgment
+    enabled: false, // Statically disabled in production; requires operator confirmation and verified capability gates
     rustCrate: 'agent-studios-ipc-transport',
-    prReference: 'PR #19',
+    prReference: 'PR #28',
     limitation:
-      'Backend routes exclusively via daemon defaults (AGENT_STUDIOS_DEFAULT_MODEL). Per-task model overrides in BatchTaskSpec are unsupported.',
+      'Mutating task submission requires verified daemon readiness, multi-runtime instance selection, model routing via daemon catalog defaults or explicit per-task configuration, and cryptographically bound operator confirmation.',
     requirements: [
       'Explicit studio ID',
-      'Operator confirmation for mutating tasks',
-      'No per-task model override requested',
+      'Operator confirmation challenge bound to session identity',
+      'Verified daemon readiness and multi-runtime instance health',
+      'Authoritative model catalog routing',
+      'Workspace containment verification',
       'Authenticated client credentials',
     ],
   },
@@ -616,24 +642,24 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
   'model.per_task_override': {
     id: 'model.per_task_override',
     name: 'Per-Task Model Selection',
-    tier: 'UNSUPPORTED',
-    enabled: false,
-    rustCrate: 'agent-studios-protocol',
-    prReference: 'PR #19',
+    tier: 'TASK_SUBMISSION_READY',
+    enabled: true,
+    rustCrate: 'agent-studios-ipc-transport',
+    prReference: 'PR #28',
     limitation:
-      'BatchTaskSpec lacks model_ref and provider_instance_id. All tasks inherit daemon default model.',
-    requirements: ['Backend PR-M15-01: Add model_ref to BatchTaskSpec'],
+      'Backend supports per-task model_id and provider_instance_id in TaskExecutionSpec (connection.rs:1771-1827).',
+    requirements: ['Authoritative daemon model catalog verification'],
   },
   'runtime.per_task_adapter': {
     id: 'runtime.per_task_adapter',
     name: 'Per-Task Runtime Adapter Routing',
-    tier: 'UNSUPPORTED',
-    enabled: false,
+    tier: 'TASK_SUBMISSION_READY',
+    enabled: true,
     rustCrate: 'agent-studios-ipc-transport',
-    prReference: 'PR #19',
+    prReference: 'PR #28',
     limitation:
-      'IpcServerBuilder configures a singleton runtime adapter. Multi-adapter dynamic routing requires backend changes.',
-    requirements: ['Backend PR-M15-02: Runtime adapter registry in ServerState'],
+      'Backend supports multi-runtime adapter registry and per-task runtime_instance_id / runtime_preference routing (connection.rs:1898-1935).',
+    requirements: ['Authoritative daemon runtime instance health verification'],
   },
   'chat.multi_turn_prompt': {
     id: 'chat.multi_turn_prompt',
@@ -673,6 +699,7 @@ export interface TaskSubmissionPreflightRequest {
   daemonRepoRoot?: string;
   daemonEffectiveModel?: string;
   daemonEffectiveProvider?: string;
+  sessionId?: string;
   customKey?: string;
   requireAuthoritativeCheck?: boolean;
   requireChallenge?: boolean;
@@ -789,12 +816,11 @@ export class CapabilityMatrix {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('Dynamic capability overrides are prohibited in production mode.');
     }
-    const isTestEnv =
-      typeof (global as any).describe === 'function' ||
-      typeof (global as any).it === 'function' ||
-      process.env.NODE_ENV === 'test';
-    if (!isTestEnv) {
-      throw new Error('Dynamic capability overrides are strictly prohibited outside automated test environments.');
+    const isTestRunner =
+      typeof (global as any).it === 'function' &&
+      typeof (global as any).describe === 'function';
+    if (!isTestRunner) {
+      throw new Error('Dynamic capability overrides are strictly prohibited outside active test runner environments.');
     }
     this.dynamicOverrides.set(capabilityId, enabled);
   }
@@ -826,7 +852,6 @@ export class CapabilityMatrix {
     },
     options?: RuntimeValidationOptions
   ): RuntimeValidationResult {
-    const action = options?.action ?? 'task_execution';
     if (!readiness) {
       return {
         valid: false,
@@ -983,54 +1008,66 @@ export class CapabilityMatrix {
     }
 
     // Tri-state runtime capability validation
-    // If readiness.runtime_capabilities is omitted or null (legacy M15-01 response),
-    // preserve backward-compatible operation without error.
-    if (readiness.runtime_capabilities !== undefined && readiness.runtime_capabilities !== null) {
-      const instanceCaps = readiness.runtime_capabilities[resolvedInstance.instance_id];
+    if (!readiness.runtime_capabilities) {
+      if (options?.action === 'task_execution' || options?.action === 'task_cancellation') {
+        const requiredCaps = options.action === 'task_cancellation' ? ['stop'] : ['streaming_events', 'stop'];
+        return {
+          valid: false,
+          reason: `Runtime capabilities metadata missing from daemon readiness report. Action '${options.action}' requires verified capabilities: ${requiredCaps.join(', ')}.`,
+        };
+      }
+      // Preserve backward-compatible read-only operation for legacy M15-01 daemon responses or inspection queries
+      return {
+        valid: true,
+        runtimePreference: resolvedInstance.implementation,
+        runtimeInstanceId: resolvedInstance.instance_id,
+      };
+    }
 
-      let requiredCaps: string[] = [];
-      if (action === 'task_execution') {
-        requiredCaps = ['streaming_events', 'stop'];
-      } else if (action === 'task_cancellation') {
-        requiredCaps = ['stop'];
-      } else if (action === 'read_only') {
-        requiredCaps = [];
+    const action = options?.action ?? 'task_execution';
+    let requiredCaps: string[] = [];
+    if (action === 'task_execution') {
+      requiredCaps = ['streaming_events', 'stop'];
+    } else if (action === 'task_cancellation') {
+      requiredCaps = ['stop'];
+    } else if (action === 'read_only') {
+      requiredCaps = [];
+    }
+
+    if (requiredCaps.length > 0) {
+      const instanceCaps = readiness.runtime_capabilities[resolvedInstance.instance_id];
+      if (!instanceCaps) {
+        return {
+          valid: false,
+          reason: `Runtime instance '${resolvedInstance.instance_id}' has missing runtime capabilities in daemon readiness. Required: ${requiredCaps.join(', ')}.`,
+        };
       }
 
-      if (requiredCaps.length > 0) {
-        if (!instanceCaps) {
+      for (const cap of requiredCaps) {
+        const status = instanceCaps[cap];
+        if (!status) {
           return {
             valid: false,
-            reason: `Runtime instance '${resolvedInstance.instance_id}' has missing runtime capabilities in daemon readiness. Required: ${requiredCaps.join(', ')}.`,
+            reason: `Runtime instance '${resolvedInstance.instance_id}' is missing required '${cap}' capability for action '${action}'.`,
           };
         }
-
-        for (const cap of requiredCaps) {
-          const status = instanceCaps[cap];
-          if (!status) {
-            return {
-              valid: false,
-              reason: `Runtime instance '${resolvedInstance.instance_id}' is missing required '${cap}' capability for action '${action}'.`,
-            };
-          }
-          if (status === 'unsupported') {
-            return {
-              valid: false,
-              reason: `Runtime instance '${resolvedInstance.instance_id}' does not support required '${cap}' capability (status: unsupported) for action '${action}'.`,
-            };
-          }
-          if (status === 'unknown') {
-            return {
-              valid: false,
-              reason: `Runtime instance '${resolvedInstance.instance_id}' has unknown support for required '${cap}' capability (status: unknown) for action '${action}'.`,
-            };
-          }
-          if (status !== 'supported') {
-            return {
-              valid: false,
-              reason: `Runtime instance '${resolvedInstance.instance_id}' capability '${cap}' has invalid status '${status}' (must be 'supported') for action '${action}'.`,
-            };
-          }
+        if (status === 'unsupported') {
+          return {
+            valid: false,
+            reason: `Runtime instance '${resolvedInstance.instance_id}' does not support required '${cap}' capability (status: unsupported) for action '${action}'.`,
+          };
+        }
+        if (status === 'unknown') {
+          return {
+            valid: false,
+            reason: `Runtime instance '${resolvedInstance.instance_id}' has unknown support for required '${cap}' capability (status: unknown) for action '${action}'.`,
+          };
+        }
+        if (status !== 'supported') {
+          return {
+            valid: false,
+            reason: `Runtime instance '${resolvedInstance.instance_id}' capability '${cap}' has invalid status '${status}' (must be 'supported') for action '${action}'.`,
+          };
         }
       }
     }
@@ -1147,29 +1184,6 @@ export class CapabilityMatrix {
       }
     }
 
-    // 4.6. Runtime instance selection validation against authoritative daemon readiness
-    if (req.readiness !== undefined && req.readiness !== null) {
-      const runtimeVal = this.validateRuntimeInstanceSelection(
-        req.readiness,
-        {
-          runtimePreference: req.runtimePreference,
-          runtimeInstanceId: req.runtimeInstanceId,
-        },
-        {
-          action: 'task_execution',
-        }
-      );
-      if (!runtimeVal.valid) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: runtimeVal.reason || 'Runtime selection validation failed against daemon readiness.',
-        };
-      }
-      req.runtimePreference = runtimeVal.runtimePreference;
-      req.runtimeInstanceId = runtimeVal.runtimeInstanceId;
-    }
-
     // 5. Operator confirmation challenge: reject untrusted raw boolean without verification token
     if (req.requireChallenge || req.confirmationChallenge !== undefined) {
       if (!req.confirmationChallenge) {
@@ -1192,6 +1206,7 @@ export class CapabilityMatrix {
           providerId: req.requestedProviderId,
           runtimePreference: req.runtimePreference,
           runtimeInstanceId: req.runtimeInstanceId,
+          sessionId: req.sessionId,
           intent: 'task_execution',
         },
         {
@@ -1208,71 +1223,78 @@ export class CapabilityMatrix {
       }
     }
 
-    // 5. Authoritative Model & Provider validation (Parity with connection.rs:1771-1827 / M15 multi-model catalog)
-    let resolvedModelId: string | undefined;
-    let resolvedProviderId: string | undefined;
-
+    // 6. Authoritative execution readiness report check
     if (req.readiness !== undefined && req.readiness !== null) {
       const availableModels = req.readiness.available_models || [];
+
+      // 7. Runtime instance selection validation against authoritative daemon readiness
+      const runtimeVal = this.validateRuntimeInstanceSelection(
+        req.readiness,
+        {
+          runtimePreference: req.runtimePreference,
+          runtimeInstanceId: req.runtimeInstanceId,
+        },
+        {
+          action: 'task_execution',
+        }
+      );
+      if (!runtimeVal.valid) {
+        return {
+          allowed: false,
+          tier: 'TASK_SUBMISSION_READY',
+          error: runtimeVal.reason || 'Runtime selection validation failed against daemon readiness.',
+        };
+      }
+      req.runtimePreference = runtimeVal.runtimePreference;
+      req.runtimeInstanceId = runtimeVal.runtimeInstanceId;
+
+      // 8. Authoritative Model & Provider validation (Parity with connection.rs:1771-1827 / M15 multi-model catalog)
+      let resolvedModelId: string | undefined;
+      let resolvedProviderId: string | undefined;
 
       if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
         const trimmedModelId = req.requestedModelId.trim();
 
-        if (availableModels.length > 0) {
-          const matchingModels = availableModels.filter((m) => m.model_id === trimmedModelId);
-          if (matchingModels.length === 0) {
-            return {
-              allowed: false,
-              tier: 'TASK_SUBMISSION_READY',
-              error: `Model routing rejected: Requested model '${trimmedModelId}' not found in daemon available models.`,
-            };
-          }
-
-          if (req.requestedProviderId && req.requestedProviderId.trim().length > 0 && req.requestedProviderId !== 'default') {
-            const trimmedProvId = req.requestedProviderId.trim();
-            const providerMatch = matchingModels.find((m) => m.provider_instance_id === trimmedProvId);
-            if (!providerMatch) {
-              return {
-                allowed: false,
-                tier: 'TASK_SUBMISSION_READY',
-                error: `Provider routing mismatch: Requested model '${trimmedModelId}' with provider '${trimmedProvId}' not found in daemon available models.`,
-              };
-            }
-            resolvedModelId = trimmedModelId;
-            resolvedProviderId = trimmedProvId;
-          } else if (matchingModels.length > 1) {
-            // Parity: connection.rs:1980 - ambiguous provider instance
-            const matchedProvIds = matchingModels.map((m) => m.provider_instance_id).join(', ');
-            return {
-              allowed: false,
-              tier: 'TASK_SUBMISSION_READY',
-              error: `Model routing ambiguous: Requested model '${trimmedModelId}' matches multiple provider instances (${matchedProvIds}). Explicit provider ID required.`,
-            };
-          } else {
-            resolvedModelId = trimmedModelId;
-            resolvedProviderId = matchingModels[0].provider_instance_id;
-          }
-        } else if (req.daemonEffectiveModel && trimmedModelId !== req.daemonEffectiveModel) {
+        const matchingModels = availableModels.filter((m) => m.model_id === trimmedModelId);
+        if (matchingModels.length === 0) {
           return {
             allowed: false,
             tier: 'TASK_SUBMISSION_READY',
-            error: `Model routing mismatch: Requested model '${trimmedModelId}' differs from daemon effective configuration ('${req.daemonEffectiveModel}'). Per-task model override is rejected.`,
+            error: `Model routing rejected: Requested model '${trimmedModelId}' not found in daemon available models.`,
+          };
+        }
+
+        if (req.requestedProviderId && req.requestedProviderId.trim().length > 0 && req.requestedProviderId !== 'default') {
+          const trimmedProvId = req.requestedProviderId.trim();
+          const providerMatch = matchingModels.find((m) => m.provider_instance_id === trimmedProvId);
+          if (!providerMatch) {
+            return {
+              allowed: false,
+              tier: 'TASK_SUBMISSION_READY',
+              error: `Provider routing mismatch: Requested model '${trimmedModelId}' with provider '${trimmedProvId}' not found in daemon available models.`,
+            };
+          }
+          resolvedModelId = trimmedModelId;
+          resolvedProviderId = trimmedProvId;
+        } else if (matchingModels.length > 1) {
+          const matchedProvIds = matchingModels.map((m) => m.provider_instance_id).join(', ');
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Model routing ambiguous: Requested model '${trimmedModelId}' matches multiple provider instances (${matchedProvIds}). Explicit provider ID required.`,
           };
         } else {
           resolvedModelId = trimmedModelId;
-          resolvedProviderId =
-            req.requestedProviderId && req.requestedProviderId !== 'default'
-              ? req.requestedProviderId
-              : req.daemonEffectiveProvider;
+          resolvedProviderId = matchingModels[0].provider_instance_id;
         }
       } else {
         // No explicit model requested (or 'default') — resolve daemon default model
         const defaultModelId =
           req.readiness.defaults?.default_model_id ||
-          (availableModels.length === 1 ? availableModels[0].model_id : req.daemonEffectiveModel);
+          (availableModels.length === 1 ? availableModels[0].model_id : undefined);
         const defaultProviderId =
           req.readiness.defaults?.default_provider_instance_id ||
-          (availableModels.length === 1 ? availableModels[0].provider_instance_id : req.daemonEffectiveProvider);
+          (availableModels.length === 1 ? availableModels[0].provider_instance_id : undefined);
 
         if (!defaultModelId && availableModels.length > 1) {
           return {
@@ -1285,11 +1307,42 @@ export class CapabilityMatrix {
         resolvedModelId = defaultModelId;
         resolvedProviderId = defaultProviderId;
       }
+
+      // 9. Workspace verification (Parity with connection.rs:1568-1574)
+      if (req.workspacePath || req.requireWorkspace) {
+        const wsVer = WorkspaceVerification.verify(req.workspacePath, req.readiness);
+        if (!wsVer.isAuthorized) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Workspace authorization failed (${wsVer.status}): ${wsVer.reason}`,
+          };
+        }
+      }
+
+      return {
+        allowed: true,
+        tier: 'TASK_SUBMISSION_READY',
+        resolvedRuntimePreference: req.runtimePreference,
+        resolvedRuntimeInstanceId: req.runtimeInstanceId,
+        resolvedModelId,
+        resolvedProviderId,
+        sanitizedSpec: {
+          key: sanitizedSpec.key,
+          title: sanitizedSpec.title,
+          description: sanitizedSpec.description,
+          displayTitle: sanitizedSpec.displayTitle,
+          rawPrompt: sanitizedSpec.title,
+        },
+      };
     } else {
-      // Legacy path without readiness report: validate against daemonEffectiveModel / daemonEffectiveProvider
+      // Legacy path without readiness report (for M14 regression compatibility)
       const parsedDefaultModel = parseDefaultModelEnv();
       const effectiveModel = req.daemonEffectiveModel || parsedDefaultModel?.modelId;
       const effectiveProvider = req.daemonEffectiveProvider || parsedDefaultModel?.providerId;
+
+      let resolvedModelId: string | undefined;
+      let resolvedProviderId: string | undefined;
 
       if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
         if (!effectiveModel) {
@@ -1323,87 +1376,85 @@ export class CapabilityMatrix {
       } else {
         resolvedProviderId = effectiveProvider;
       }
-    }
 
-    // 6. Workspace mismatch check (Parity with connection.rs:1568-1574)
-    // If the user's active VS Code workspace folder does not match the daemon's actual execution repository, task execution must FAIL CLOSED.
-    const effectiveDaemonRepo = req.daemonRepoRoot || process.env.AGENT_STUDIOS_REPO_PATH;
+      const effectiveDaemonRepo = req.daemonRepoRoot || process.env.AGENT_STUDIOS_REPO_PATH;
 
-    if (effectiveDaemonRepo) {
-      if (!req.workspacePath || req.workspacePath.trim().length === 0) {
+      if (effectiveDaemonRepo) {
+        if (!req.workspacePath || req.workspacePath.trim().length === 0) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: 'Workspace directory is required when daemon repository root is configured.',
+          };
+        }
+
+        if (req.workspacePath.includes('\0')) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: 'Null byte injection detected in workspace path.',
+          };
+        }
+
+        if (req.workspacePath.startsWith('\\\\') || req.workspacePath.startsWith('//')) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: 'UNC network paths rejected in workspace path.',
+          };
+        }
+
+        if (/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(req.workspacePath)) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: 'Path traversal sequences rejected in workspace path.',
+          };
+        }
+
+        let normalizedWs: string;
+        let normalizedRepo: string;
+        try {
+          normalizedWs = normalizeWorkspacePath(req.workspacePath);
+          normalizedRepo = normalizeWorkspacePath(effectiveDaemonRepo);
+        } catch (err: unknown) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Workspace normalization error: ${(err as Error).message}`,
+          };
+        }
+
+        if (normalizedWs !== normalizedRepo) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Workspace mismatch: Task workspace directory '${req.workspacePath}' does not match daemon repository root '${effectiveDaemonRepo}'. Task execution rejected (fail-closed) to prevent unauthorized cross-repository modification.`,
+          };
+        }
+      } else if (req.requireWorkspace && (!req.workspacePath || req.workspacePath.trim().length === 0)) {
         return {
           allowed: false,
           tier: 'TASK_SUBMISSION_READY',
-          error: 'Workspace directory is required when daemon repository root is configured.',
+          error: 'Active VS Code workspace folder is required for task execution. Task execution rejected (fail-closed).',
         };
       }
 
-      if (req.workspacePath.includes('\0')) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: 'Null byte injection detected in workspace path.',
-        };
-      }
-
-      if (req.workspacePath.startsWith('\\\\') || req.workspacePath.startsWith('//')) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: 'UNC network paths rejected in workspace path.',
-        };
-      }
-
-      if (/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(req.workspacePath)) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: 'Path traversal sequences rejected in workspace path.',
-        };
-      }
-
-      let normalizedWs: string;
-      let normalizedRepo: string;
-      try {
-        normalizedWs = normalizeWorkspacePath(req.workspacePath);
-        normalizedRepo = normalizeWorkspacePath(effectiveDaemonRepo);
-      } catch (err: unknown) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: `Workspace normalization error: ${(err as Error).message}`,
-        };
-      }
-
-      if (normalizedWs !== normalizedRepo) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: `Workspace mismatch: Task workspace directory '${req.workspacePath}' does not match daemon repository root '${effectiveDaemonRepo}'. Task execution rejected (fail-closed) to prevent unauthorized cross-repository modification.`,
-        };
-      }
-    } else if (req.requireWorkspace && (!req.workspacePath || req.workspacePath.trim().length === 0)) {
       return {
-        allowed: false,
+        allowed: true,
         tier: 'TASK_SUBMISSION_READY',
-        error: 'Active VS Code workspace folder is required for task execution. Task execution rejected (fail-closed).',
+        resolvedRuntimePreference: req.runtimePreference,
+        resolvedRuntimeInstanceId: req.runtimeInstanceId,
+        resolvedModelId,
+        resolvedProviderId,
+        sanitizedSpec: {
+          key: sanitizedSpec.key,
+          title: sanitizedSpec.title,
+          description: sanitizedSpec.description,
+          displayTitle: sanitizedSpec.displayTitle,
+          rawPrompt: sanitizedSpec.title,
+        },
       };
     }
-
-    return {
-      allowed: true,
-      tier: 'TASK_SUBMISSION_READY',
-      resolvedRuntimePreference: req.runtimePreference,
-      resolvedRuntimeInstanceId: req.runtimeInstanceId,
-      resolvedModelId,
-      resolvedProviderId,
-      sanitizedSpec: {
-        key: sanitizedSpec.key,
-        title: sanitizedSpec.title,
-        description: sanitizedSpec.description,
-        displayTitle: sanitizedSpec.displayTitle,
-        rawPrompt: sanitizedSpec.title,
-      },
-    };
   }
 }

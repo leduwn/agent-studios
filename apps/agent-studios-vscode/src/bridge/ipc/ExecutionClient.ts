@@ -1,16 +1,17 @@
 /**
  * Agent Studios — Typed IPC Execution Client
- * Milestone M15 UI-01: Interactive Agent Execution Workbench
+ * Milestone M15: Multi-Runtime Backend Integration & Authoritative Dispatch
  *
  * Implements typed submission and cancellation against the authoritative Rust daemon commands:
- * - `IpcCommand::SubmitTask { studio_id, task_spec }`
+ * - `IpcCommand::SubmitTask { studio_id, task_spec }` with TaskExecutionSpec
  * - `IpcCommand::CancelTask { studio_id, task_id, reason }`
  *
  * Strict Architectural Invariants:
  * - Fail-closed capability checking before wire dispatch (task.submit, task.cancel).
  * - Exact wire framing parity with backend (connection.rs:1758-1769).
  * - Multi-line Markdown preserved verbatim in title, description empty, frame size < 4 MiB.
- * - Single-use cryptographic operator confirmation token required for submission.
+ * - Single-use cryptographic operator confirmation token bound to session identity required.
+ * - Authoritative readiness report required for runtime capability validation.
  * - Zero simulated task success, zero synthetic cancellation state.
  */
 
@@ -119,7 +120,7 @@ export class ExecutionClient {
   }
 
   /**
-   * Cancels an active task on the daemon with preflight capability gate validation.
+   * Cancels an active task on the daemon with preflight capability gate and runtime capability validation.
    */
   public static async cancelTask(
     transport: IpcCommandTransport,
@@ -134,7 +135,7 @@ export class ExecutionClient {
       );
     }
 
-    // 1.1 Action-specific runtime capability verification if readiness report is provided
+    // 1.1 Action-specific runtime capability verification
     if (req.readiness !== undefined && req.readiness !== null) {
       const runtimeVal = CapabilityMatrix.validateRuntimeInstanceSelection(
         req.readiness,
@@ -153,6 +154,12 @@ export class ExecutionClient {
           req.taskId
         );
       }
+    } else if (req.runtimeInstanceId || req.runtimePreference) {
+      throw new TaskCancellationError(
+        'Task cancellation rejected: execution readiness report is required when validating runtime capabilities for task_cancellation.',
+        req.studioId,
+        req.taskId
+      );
     }
 
     // 2. Parameter presence validation

@@ -1,17 +1,20 @@
 /**
  * Agent Studios — Submit Task IPC Adapter
- * Milestone M14 Integration Freeze & M15 UI Execution Preparation
+ * Milestone M15: Multi-Runtime Backend Integration & Authoritative Dispatch
  *
  * Implements typed submission of tasks against the authoritative Rust daemon command:
- * `IpcCommand::SubmitTask` with payload `task_spec: BatchTaskSpec`.
+ * `IpcCommand::SubmitTask` with payload `task_spec: BatchTaskSpec` and `execution: TaskExecutionSpec`.
  *
  * Strict Architectural Invariants:
  * - Active studio identity is explicit.
  * - Prompt text and task description are preserved verbatim.
- * - Operator confirmation is required before dispatching mutating coding tasks.
+ * - Single-use cryptographic operator confirmation token bound to session identity is required.
+ * - Verified daemon readiness report is mandatory for mutating task execution.
+ * - Multi-runtime adapter selection and capability validation prior to dispatch.
+ * - Per-task model and provider routing validated against authoritative daemon catalog.
  * - Task correlation uses genuine Rust-assigned UUIDs from `IpcResponse::TasksSubmitted`.
  * - Backend submission errors remain visible and are never swallowed.
- * - No fake or synthetic task success.
+ * - Zero simulated task success, zero synthetic cancellation state.
  * - No secrets or credentials transmitted or leaked into view state.
  */
 
@@ -135,8 +138,24 @@ export class SubmitTaskAdapter {
     if (options?.readiness?.defaults?.default_model_id) {
       defaultModelId = options.readiness.defaults.default_model_id;
       defaultProviderId = options.readiness.defaults.default_provider_instance_id ?? undefined;
+
+      // Verify defaultModelId exists in availableModels
+      if (availableModels.length > 0) {
+        const matched = availableModels.find((m) => {
+          if (defaultProviderId) {
+            return m.provider_instance_id === defaultProviderId && m.id === defaultModelId;
+          }
+          return m.id === defaultModelId;
+        });
+
+        if (!matched) {
+          throw new TaskSubmissionError(
+            `Daemon default model '${defaultProviderId ? `${defaultProviderId}/${defaultModelId}` : defaultModelId}' not found in daemon provider catalog.`
+          );
+        }
+      }
     } else {
-      const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv);
+      const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv || process.env.AGENT_STUDIOS_DEFAULT_MODEL);
       if (parsedEnv) {
         // Find model in catalog
         const matched = availableModels.find((m) => {
@@ -163,7 +182,7 @@ export class SubmitTaskAdapter {
           defaultModelId = availableModels[0].id;
           defaultProviderId = availableModels[0].provider_instance_id;
         } else {
-          // Multiple models in catalog without explicit AGENT_STUDIOS_DEFAULT_MODEL
+          // Multiple models in catalog without explicit default in readiness or catalog
           // Backend agsd fails closed at connection.rs line 1809
           throw new TaskSubmissionError(
             `Multiple models available (${availableModels.length}) in daemon catalog, but no explicit model route configured. Set AGENT_STUDIOS_DEFAULT_MODEL (parity: connection.rs:1816).`
@@ -172,7 +191,10 @@ export class SubmitTaskAdapter {
       }
     }
 
-    const daemonRepoRoot = options?.explicitRepoPath || process.env.AGENT_STUDIOS_REPO_PATH;
+    const daemonRepoRoot =
+      options?.readiness?.defaults?.default_repo_path ??
+      options?.explicitRepoPath ??
+      process.env.AGENT_STUDIOS_REPO_PATH;
 
     return {
       healthy: true,
@@ -186,13 +208,14 @@ export class SubmitTaskAdapter {
   }
 
   /**
-   * Evaluates preflight criteria and dispatches IpcCommand::SubmitTask to the real daemon.
+   * Evaluates preflight criteria against verified daemon readiness and dispatches IpcCommand::SubmitTask.
+   * Enforces fail-closed validation of runtime capabilities, model catalog routes, and operator confirmation.
    */
   public static async submitTask(
     transport: { sendCommand: (cmd: RustIpcCommand, timeoutMs?: number) => Promise<RustIpcResponse> } | NativeIpcTransport,
     req: SubmitTaskRequest
   ): Promise<SubmitTaskResult> {
-    // 0. Dynamic daemon configuration verification if requested
+    // Dynamic daemon configuration verification if requested
     let effectiveRepo = req.daemonRepoRoot;
     let effectiveModel = req.daemonEffectiveModel;
     let effectiveProvider = req.daemonEffectiveProvider;

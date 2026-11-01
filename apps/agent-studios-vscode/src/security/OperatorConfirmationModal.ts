@@ -30,6 +30,7 @@ export interface OperatorConfirmationDialogRequest {
   workspacePath?: string;
   prompt: string;
   actionDescription?: string;
+  sessionId?: string;
 }
 
 export interface OperatorConfirmationDialogResult {
@@ -52,15 +53,14 @@ export class OperatorConfirmationModal {
    * Prohibited in production mode and outside automated test environments.
    */
   public static setDialogHandlerForTesting(handler?: OperatorConfirmationDialogHandler): void {
-    if (process.env.NODE_ENV === 'production' && handler !== undefined) {
+    if (process.env.NODE_ENV === 'production') {
       throw new Error('Test dialog handler cannot be injected in production mode.');
     }
-    const isTestEnv =
-      typeof (global as any).describe === 'function' ||
-      typeof (global as any).it === 'function' ||
-      process.env.NODE_ENV === 'test';
-    if (!isTestEnv && handler !== undefined) {
-      throw new Error('Test dialog handler can only be set in an active test environment.');
+    if (
+      typeof (global as any).it !== 'function' ||
+      typeof (global as any).describe !== 'function'
+    ) {
+      throw new Error('Test dialog handler can only be set in an active test runner context.');
     }
     this.customDialogHandler = handler;
   }
@@ -148,7 +148,8 @@ export class OperatorConfirmationModal {
         runtimePreference: request.runtime,
         runtimeInstanceId: request.runtimeInstanceId,
         intent: 'task_execution',
-      }
+        sessionId: request.sessionId,
+      } as any
     );
 
     return {

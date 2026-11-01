@@ -44,6 +44,7 @@ import {
   SubmitTaskAdapter,
   SubmitTaskRequest,
   SubmitTaskResult,
+  TaskSubmissionError,
 } from './ipc/SubmitTaskAdapter';
 import {
   ExecutionClient,
@@ -120,6 +121,10 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
 
   public get endpoint(): string | null {
     return this._transport?.endpoint ?? null;
+  }
+
+  public get sessionId(): string | null {
+    return this._transport?.getSessionId() ?? null;
   }
 
   /**
@@ -420,19 +425,38 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
     this.assertConnected();
     const workspacePath = req.workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    let readiness = req.readiness;
-    if (readiness === undefined) {
-      try {
-        readiness = await this.getExecutionReadiness(1500);
-      } catch {
-        readiness = null;
+
+    const freshReadiness = await this.getExecutionReadiness(2000);
+    if (!freshReadiness || !freshReadiness.is_ready) {
+      throw new TaskSubmissionError(
+        `Daemon is not execution-ready: ${freshReadiness?.blocking_reasons?.join(', ') || 'Readiness report unavailable'}`,
+        req.studioId
+      );
+    }
+
+    if (req.readiness) {
+      const runtimeVal = CapabilityMatrix.validateRuntimeInstanceSelection(
+        freshReadiness,
+        {
+          runtimeInstanceId: req.runtimeInstanceId,
+          runtimePreference: req.runtimePreference,
+        },
+        { action: 'task_execution' }
+      );
+      if (!runtimeVal.valid) {
+        throw new TaskSubmissionError(
+          `Execution readiness degraded during operator confirmation: ${runtimeVal.reason}. Fresh confirmation required.`,
+          req.studioId
+        );
       }
     }
+
     return SubmitTaskAdapter.submitTask(this._transport!, {
       ...req,
       workspacePath,
-      readiness,
-    });
+      readiness: freshReadiness,
+      sessionId: this.sessionId ?? undefined,
+    } as any);
   }
 
   /**

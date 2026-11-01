@@ -794,6 +794,7 @@ export class FixtureBridge implements AgentStudiosBridge {
   }
 
   public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+    /* eslint-disable @typescript-eslint/naming-convention */
     return {
       is_ready: true,
       available_runtimes: ['claude-code'],
@@ -804,6 +805,12 @@ export class FixtureBridge implements AgentStudiosBridge {
           healthy: true,
         },
       ],
+      runtime_capabilities: {
+        'claude-code-local': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         {
           provider_instance_id: 'provider-anthropic-01',
@@ -820,6 +827,7 @@ export class FixtureBridge implements AgentStudiosBridge {
       },
       blocking_reasons: [],
     };
+    /* eslint-enable @typescript-eslint/naming-convention */
   }
 
   public async listSessions(): Promise<SessionSummary[]> {

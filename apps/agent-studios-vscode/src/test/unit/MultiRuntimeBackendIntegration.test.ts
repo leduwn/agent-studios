@@ -88,6 +88,10 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
         { instance_id: 'rt-inst-alpha-01', implementation: 'fake-alpha', healthy: true },
         { instance_id: 'rt-inst-beta-01', implementation: 'fake-beta', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-inst-alpha-01': { streaming_events: 'supported', stop: 'supported' },
+        'rt-inst-beta-01': { streaming_events: 'supported', stop: 'supported' },
+      },
       available_models: [],
       authorized_workspaces: [],
       defaults: {
@@ -597,6 +601,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [],
       authorized_workspaces: [],
       defaults: {},
@@ -645,6 +655,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { provider_instance_id: 'provider-test', model_id: 'model-test-01', display_name: 'Test Model' },
       ],
@@ -689,6 +705,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { model_id: 'default-model-01', provider_instance_id: 'default-provider' },
         { model_id: 'custom-model-02', provider_instance_id: 'custom-provider' },
@@ -737,6 +759,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { model_id: 'default-model-01', provider_instance_id: 'default-provider' },
       ],
@@ -785,6 +813,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { model_id: 'model-a', provider_instance_id: 'provider-alpha' },
       ],
@@ -832,6 +866,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { model_id: 'common-model', provider_instance_id: 'provider-alpha' },
         { model_id: 'common-model', provider_instance_id: 'provider-beta' },
@@ -878,6 +918,12 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
       runtime_instances: [
         { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
       ],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
       available_models: [
         { model_id: 'default-model', provider_instance_id: 'default-provider' },
         { model_id: 'other-model', provider_instance_id: 'other-provider' },
