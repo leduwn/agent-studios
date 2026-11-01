@@ -25,6 +25,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 bytes = "1.6"
+base64 = "0.22"
 tokio = { version = "1.40", features = ["sync", "time", "macros", "rt", "rt-multi-thread", "io-util", "net", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"

@@ -11,8 +11,11 @@ use agent_studios_ipc_protocol::{
 use agent_studios_ipc_transport::{
     DaemonAdminBootstrapInfo, DaemonBootstrapInfo, IpcCommand, IpcResponse,
 };
+use agent_studios_protocol::artifact::{
+    ArtifactKind, ArtifactRecord, DiffSummary, TaskDiffResponse,
+};
 use agent_studios_protocol::cancellation::CancellationSummary;
-use agent_studios_protocol::id::{AgentId, RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{AgentId, ArtifactId, RunId, StudioId, TaskId, WorktreeId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{
@@ -893,4 +896,296 @@ fn test_legacy_readiness_json_deserializes_without_optional_multi_runtime_fields
     assert!(!report.is_ready);
     assert!(report.registered_runtimes.is_empty());
     assert!(report.runtime_capabilities.is_empty());
+}
+
+#[test]
+fn test_fixture_artifact_and_diff_endpoints_flat_wire_schema() {
+    let studio_id = StudioId::new();
+    let task_id = TaskId::new();
+    let artifact_id = ArtifactId::new();
+    let run_id = RunId::new();
+    let wt_id = WorktreeId::new();
+    let agent_id = AgentId::new();
+
+    // 1. ListTaskArtifacts command and response
+    let list_cmd = IpcCommand::ListTaskArtifacts { studio_id, task_id };
+    let list_json = serde_json::to_string_pretty(&list_cmd).expect("serialize ListTaskArtifacts");
+    let list_val: Value = serde_json::from_str(&list_json).expect("parse json");
+    assert_eq!(list_val["type"], "list_task_artifacts");
+    assert_eq!(list_val["studio_id"], studio_id.to_string());
+    assert_eq!(list_val["task_id"], task_id.to_string());
+    assert!(list_val.get("payload").is_none());
+
+    let now = Utc.timestamp_opt(1793400000, 0).unwrap();
+    let artifact_rec = ArtifactRecord {
+        id: artifact_id,
+        studio_id,
+        task_id,
+        producer_agent_id: agent_id,
+        kind: ArtifactKind::Patch,
+        logical_name: "task-patch.diff".to_string(),
+        content_hash: Some(
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        ),
+        location: "blobs/sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            .to_string(),
+        created_at: now,
+        run_id: Some(run_id),
+        worktree_id: Some(wt_id),
+        version: 1,
+        supersedes: None,
+        relative_path: None,
+        size_bytes: Some(33),
+    };
+
+    let list_resp = IpcResponse::TaskArtifacts {
+        artifacts: vec![artifact_rec.clone()],
+    };
+    let list_resp_json = serde_json::to_string_pretty(&list_resp).expect("serialize TaskArtifacts");
+    let list_resp_val: Value = serde_json::from_str(&list_resp_json).expect("parse json");
+    assert_eq!(list_resp_val["type"], "task_artifacts");
+    assert_eq!(list_resp_val["artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(list_resp_val["artifacts"][0]["id"], artifact_id.to_string());
+
+    // 2. GetArtifact command and response (flat wire format)
+    let get_art_cmd = IpcCommand::GetArtifact {
+        studio_id,
+        artifact_id,
+        offset: Some(0),
+        limit: Some(1048576),
+    };
+    let get_art_json = serde_json::to_string_pretty(&get_art_cmd).expect("serialize GetArtifact");
+    let get_art_val: Value = serde_json::from_str(&get_art_json).expect("parse json");
+    assert_eq!(get_art_val["type"], "get_artifact");
+    assert_eq!(get_art_val["studio_id"], studio_id.to_string());
+    assert_eq!(get_art_val["artifact_id"], artifact_id.to_string());
+    assert_eq!(get_art_val["offset"], 0);
+    assert_eq!(get_art_val["limit"], 1048576);
+    assert!(get_art_val.get("payload").is_none());
+
+    let art_resp = IpcResponse::Artifact {
+        artifact: Some(artifact_rec.clone()),
+        content: Some("diff content".to_string()),
+        content_base64: Some("ZGlmZiBjb250ZW50".to_string()),
+        encoding: Some("base64".to_string()),
+        offset: Some(0),
+        limit: Some(1048576),
+        total_bytes: Some(12),
+        has_more: Some(false),
+        sha256: Some(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+        ),
+    };
+    let art_resp_json = serde_json::to_string_pretty(&art_resp).expect("serialize Artifact");
+    let art_resp_val: Value = serde_json::from_str(&art_resp_json).expect("parse json");
+    assert_eq!(art_resp_val["type"], "artifact");
+    assert_eq!(art_resp_val["artifact"]["id"], artifact_id.to_string());
+    assert_eq!(art_resp_val["content"], "diff content");
+    assert_eq!(art_resp_val["content_base64"], "ZGlmZiBjb250ZW50");
+    assert_eq!(art_resp_val["encoding"], "base64");
+    assert_eq!(art_resp_val["offset"], 0);
+    assert_eq!(art_resp_val["limit"], 1048576);
+    assert_eq!(art_resp_val["total_bytes"], 12);
+    assert_eq!(art_resp_val["has_more"], false);
+    assert_eq!(
+        art_resp_val["sha256"],
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert!(art_resp_val.get("payload").is_none());
+    assert!(art_resp_val.get("result").is_none());
+
+    // 3. GetTaskDiff command and response (flat wire format)
+    let get_diff_cmd = IpcCommand::GetTaskDiff {
+        studio_id,
+        task_id,
+        offset: Some(0),
+        limit: Some(1048576),
+    };
+    let get_diff_json = serde_json::to_string_pretty(&get_diff_cmd).expect("serialize GetTaskDiff");
+    let get_diff_val: Value = serde_json::from_str(&get_diff_json).expect("parse json");
+    assert_eq!(get_diff_val["type"], "get_task_diff");
+    assert_eq!(get_diff_val["studio_id"], studio_id.to_string());
+    assert_eq!(get_diff_val["task_id"], task_id.to_string());
+    assert_eq!(get_diff_val["offset"], 0);
+    assert_eq!(get_diff_val["limit"], 1048576);
+
+    let diff_resp = IpcResponse::TaskDiff {
+        diff: TaskDiffResponse {
+            studio_id,
+            task_id,
+            artifact_id: Some(artifact_id),
+            base_commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+            head_commit: Some("fedcba9876543210fedcba9876543210fedcba98".to_string()),
+            summary: DiffSummary {
+                files_changed: 1,
+                added_files: vec!["file.txt".to_string()],
+                modified_files: vec![],
+                deleted_files: vec![],
+                renamed_files: vec![],
+                binary_files: vec![],
+                patch_size_bytes: 33,
+                base_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            },
+            patch: "diff content".to_string(),
+            offset: 0,
+            limit: 1048576,
+            total_bytes: 33,
+            has_more: false,
+            patch_base64: Some("ZGlmZiBjb250ZW50".to_string()),
+            encoding: Some("base64".to_string()),
+            patch_sha256: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
+            ),
+            chunk_bytes: Some(12),
+        },
+    };
+    let diff_resp_json = serde_json::to_string_pretty(&diff_resp).expect("serialize TaskDiff");
+    let diff_resp_val: Value = serde_json::from_str(&diff_resp_json).expect("parse json");
+    assert_eq!(diff_resp_val["type"], "task_diff");
+    assert_eq!(diff_resp_val["diff"]["studio_id"], studio_id.to_string());
+    assert_eq!(diff_resp_val["diff"]["task_id"], task_id.to_string());
+    assert_eq!(diff_resp_val["diff"]["patch_base64"], "ZGlmZiBjb250ZW50");
+    assert_eq!(diff_resp_val["diff"]["encoding"], "base64");
+    assert_eq!(diff_resp_val["diff"]["chunk_bytes"], 12);
+}
+
+#[test]
+fn test_fixture_disk_files_roundtrip() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let fixtures_dir = std::path::Path::new(&manifest_dir).join("tests/fixtures/golden_wire");
+
+    // 1. get_artifact_request.json
+    let req_str = std::fs::read_to_string(fixtures_dir.join("get_artifact_request.json"))
+        .expect("read get_artifact_request.json");
+    let req: IpcCommand = serde_json::from_str(&req_str).expect("deserialize get_artifact_request");
+    match req {
+        IpcCommand::GetArtifact {
+            studio_id,
+            artifact_id,
+            offset,
+            limit,
+        } => {
+            assert_eq!(
+                studio_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000001"
+            );
+            assert_eq!(
+                artifact_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000002"
+            );
+            assert_eq!(offset, Some(0));
+            assert_eq!(limit, Some(1048576));
+        }
+        other => panic!("Unexpected command: {:?}", other),
+    }
+
+    // 2. artifact_response.json
+    let resp_str = std::fs::read_to_string(fixtures_dir.join("artifact_response.json"))
+        .expect("read artifact_response.json");
+    let resp: IpcResponse = serde_json::from_str(&resp_str).expect("deserialize artifact_response");
+    match resp {
+        IpcResponse::Artifact {
+            artifact,
+            content_base64,
+            encoding,
+            offset,
+            total_bytes,
+            sha256,
+            ..
+        } => {
+            assert!(artifact.is_some());
+            assert_eq!(
+                content_base64.as_deref(),
+                Some("ZGlmZiAtLWdpdCBhL2ZpbGUudHh0IGIvZmlsZS50eHQK")
+            );
+            assert_eq!(encoding.as_deref(), Some("base64"));
+            assert_eq!(offset, Some(0));
+            assert_eq!(total_bytes, Some(33));
+            assert_eq!(
+                sha256.as_deref(),
+                Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+            );
+        }
+        other => panic!("Unexpected response: {:?}", other),
+    }
+
+    // 3. get_task_diff_request.json
+    let diff_req_str = std::fs::read_to_string(fixtures_dir.join("get_task_diff_request.json"))
+        .expect("read get_task_diff_request.json");
+    let diff_req: IpcCommand =
+        serde_json::from_str(&diff_req_str).expect("deserialize get_task_diff_request");
+    match diff_req {
+        IpcCommand::GetTaskDiff {
+            studio_id,
+            task_id,
+            offset,
+            limit,
+        } => {
+            assert_eq!(
+                studio_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000001"
+            );
+            assert_eq!(task_id.to_string(), "c0a80101-0000-0000-0000-000000000003");
+            assert_eq!(offset, Some(0));
+            assert_eq!(limit, Some(1048576));
+        }
+        other => panic!("Unexpected command: {:?}", other),
+    }
+
+    // 4. task_diff_response.json
+    let diff_resp_str = std::fs::read_to_string(fixtures_dir.join("task_diff_response.json"))
+        .expect("read task_diff_response.json");
+    let diff_resp: IpcResponse =
+        serde_json::from_str(&diff_resp_str).expect("deserialize task_diff_response");
+    match diff_resp {
+        IpcResponse::TaskDiff { diff } => {
+            assert_eq!(
+                diff.studio_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000001"
+            );
+            assert_eq!(
+                diff.task_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000003"
+            );
+            assert_eq!(
+                diff.patch_base64.as_deref(),
+                Some("ZGlmZiAtLWdpdCBhL2ZpbGUudHh0IGIvZmlsZS50eHQK")
+            );
+            assert_eq!(diff.encoding.as_deref(), Some("base64"));
+            assert_eq!(diff.chunk_bytes, Some(33));
+            assert_eq!(diff.summary.files_changed, 1);
+        }
+        other => panic!("Unexpected response: {:?}", other),
+    }
+
+    // 5. list_task_artifacts_request.json
+    let list_req_str =
+        std::fs::read_to_string(fixtures_dir.join("list_task_artifacts_request.json"))
+            .expect("read list_task_artifacts_request.json");
+    let list_req: IpcCommand =
+        serde_json::from_str(&list_req_str).expect("deserialize list_task_artifacts_request");
+    match list_req {
+        IpcCommand::ListTaskArtifacts { studio_id, task_id } => {
+            assert_eq!(
+                studio_id.to_string(),
+                "c0a80101-0000-0000-0000-000000000001"
+            );
+            assert_eq!(task_id.to_string(), "c0a80101-0000-0000-0000-000000000003");
+        }
+        other => panic!("Unexpected command: {:?}", other),
+    }
+
+    // 6. task_artifacts_response.json
+    let list_resp_str = std::fs::read_to_string(fixtures_dir.join("task_artifacts_response.json"))
+        .expect("read task_artifacts_response.json");
+    let list_resp: IpcResponse =
+        serde_json::from_str(&list_resp_str).expect("deserialize task_artifacts_response");
+    match list_resp {
+        IpcResponse::TaskArtifacts { artifacts } => {
+            assert_eq!(artifacts.len(), 1);
+            assert_eq!(artifacts[0].logical_name, "task-patch.diff");
+            assert_eq!(artifacts[0].kind, ArtifactKind::Patch);
+        }
+        other => panic!("Unexpected response: {:?}", other),
+    }
 }

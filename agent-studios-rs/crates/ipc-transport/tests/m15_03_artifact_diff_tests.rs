@@ -30,11 +30,20 @@ use agent_studios_provider::{
     ModelLimits, ProtocolFamily, ProviderCatalog, ProviderId, ProviderInstance, ProviderInstanceId,
 };
 
+#[allow(dead_code)]
 #[derive(Clone)]
 enum MutationBehavior {
     AddModifyDelete,
-    LargeDiff { line_count: usize },
-    FailAfterMutate { error: String },
+    LargeDiff {
+        line_count: usize,
+    },
+    FailAfterMutate {
+        error: String,
+    },
+    CorruptWorktreeMetadata {
+        work_file_name: String,
+        work_file_content: String,
+    },
 }
 
 #[derive(Clone)]
@@ -134,6 +143,21 @@ impl AgentRuntime for MutatingRuntimeMock {
                 std::fs::write(&fail_file, "Work in progress before crash\n")
                     .map_err(|e| RuntimeError::startup_failed(e.to_string()))?;
             }
+            MutationBehavior::CorruptWorktreeMetadata {
+                work_file_name,
+                work_file_content,
+            } => {
+                let work_file = wt_root.join(work_file_name);
+                std::fs::write(&work_file, work_file_content)
+                    .map_err(|e| RuntimeError::startup_failed(e.to_string()))?;
+
+                let git_path = wt_root.join(".git");
+                if git_path.is_file() {
+                    let _ = std::fs::remove_file(&git_path);
+                } else if git_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&git_path);
+                }
+            }
         }
 
         let handle = RuntimeSessionHandle::new(
@@ -158,7 +182,9 @@ impl AgentRuntime for MutatingRuntimeMock {
 
         // Emit terminal event according to configured behavior
         match &self.behavior {
-            MutationBehavior::AddModifyDelete | MutationBehavior::LargeDiff { .. } => {
+            MutationBehavior::AddModifyDelete
+            | MutationBehavior::LargeDiff { .. }
+            | MutationBehavior::CorruptWorktreeMetadata { .. } => {
                 let _ = hub
                     .emit(RuntimeEventKind::Completed {
                         summary: Some("Deterministic mutations complete".to_string()),

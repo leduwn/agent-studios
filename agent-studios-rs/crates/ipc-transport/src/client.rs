@@ -770,13 +770,50 @@ impl IpcClient {
             &IpcCommand::GetArtifact {
                 studio_id,
                 artifact_id,
+                offset: None,
+                limit: None,
             },
         )
         .await?;
 
         let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
         match resp {
-            IpcResponse::Artifact { artifact, content } => Ok((artifact, content)),
+            IpcResponse::Artifact {
+                artifact, content, ..
+            } => Ok((artifact, content)),
+            IpcResponse::Error { message } => Err(TransportError::Protocol(
+                ProtocolError::InvalidState(message),
+            )),
+            other => Err(TransportError::InvalidState {
+                expected: "Artifact".into(),
+                actual: format!("{:?}", other),
+            }),
+        }
+    }
+
+    /// Retrieves an artifact chunk with pagination parameters (M15-03.1).
+    pub async fn get_artifact_chunk(
+        &mut self,
+        studio_id: StudioId,
+        artifact_id: ArtifactId,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<IpcResponse, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(
+            &mut inner.writer,
+            &IpcCommand::GetArtifact {
+                studio_id,
+                artifact_id,
+                offset,
+                limit,
+            },
+        )
+        .await?;
+
+        let resp: IpcResponse = recv_msg(&mut inner.reader, self.config.max_frame_size).await?;
+        match resp {
+            IpcResponse::Artifact { .. } => Ok(resp),
             IpcResponse::Error { message } => Err(TransportError::Protocol(
                 ProtocolError::InvalidState(message),
             )),

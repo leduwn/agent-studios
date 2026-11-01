@@ -1,159 +1,144 @@
-# M15-03 Claude 2 Frontend Handoff: VS Code Artifact & Diff Integration Guide
+# M15-03.1 Claude 2 Frontend Handoff: VS Code Artifact & Lossless Diff Integration Guide
 
-**Milestone:** M15-03  
-**Audience:** VS Code Extension Engineers & UI Architects  
-**Author:** Backend Systems Architect & IPC Protocol Architect  
+**Milestone:** M15-03.1  
+**Audience:** VS Code Extension Engineers & UI Architects (Claude 2)  
+**Author:** Principal Rust IPC Protocol Architect & Cross-Platform Lead  
 **Date:** 2026-11-01  
+**Status:** Canonical Release Specification  
 
 ---
 
-## 1. Architectural Overview for VS Code
+## 1. Architectural Overview for VS Code Extension
 
-Milestone M15-03 provides the backend capability to capture, persist, and retrieve the exact code modifications produced by an AI Agent running inside an isolated Git worktree.
+Milestone M15-03.1 delivers byte-for-byte lossless artifact retrieval and diff inspection for AI agent executions within isolated Git worktrees.
 
-### The Developer Experience
-1. Developer submits a task from VS Code.
-2. The agent executes in an isolated managed worktree (never modifying the user's active editor workspace).
-3. The backend captures all changes (added files, modified files, deleted files, renames, binary files) as an immutable patch in `ArtifactStore`.
-4. The VS Code extension receives a `task_state_changed` event and queries `GetTaskDiff`.
-5. VS Code renders:
-   - A diff summary badge (e.g. `+1 ~2 -0`).
-   - A tree view of modified files.
-   - Rich side-by-side or unified diffs for review before applying/merging.
+### Critical Protocol Upgrades in M15-03.1:
+1. **Flat Wire Protocol:** Requests and responses use flat, internally-tagged Serde schemas (`{"type": "...", ...}`). There are **no nested `payload` or `status/result` envelopes**.
+2. **Lossless Base64 Chunking:** Unified diffs and binary artifacts are streamed in Base64 chunks (`patch_base64`, `content_base64`). This prevents multi-byte Unicode corruption (such as Vietnamese diacritics `ế`, `ệ`, `ẩ`, `ờ`, `đ`) across arbitrary chunk boundaries and preserves raw `GIT binary patch` payloads.
+3. **Dual-Emission Safety:** For backward compatibility, legacy string fields (`patch`, `content`) are populated for chunks <= 1.5 MiB. For chunks > 1.5 MiB, the legacy string is suppressed to `""` to guarantee total frame size stays <= 2.8 MiB and safely under the 4 MiB frame ceiling (`DEFAULT_MAX_FRAME_SIZE = 4,194,304`).
+4. **Infinite Loop Protection:** Passing `limit: 0` is strictly rejected with an IPC error.
 
 ---
 
 ## 2. IPC Wire Protocol Guide
 
-### 2.1 Subscribing to Completion Events
-Listen for `task_state_changed` to automatically trigger diff fetching:
+### 2.1 Flat Command & Response Examples
 
+#### Fetching Diff Chunks (`get_task_diff`)
 ```typescript
-client.onEvent((event: IpcEvent) => {
-  if (event.type === "control_plane_event") {
-    const cpEvent = event.payload;
-    if (cpEvent.type === "task_state_changed") {
-      const { task_id, state } = cpEvent;
-      if (state === "succeeded" || state === "failed" || state === "cancelled") {
-        // Trigger diff review fetch
-        loadTaskDiff(studioId, task_id);
-      }
-    }
-  }
+// Request: Flat root structure (no nested "payload")
+const response = await ipcClient.send<TaskDiffResponse>({
+  type: "get_task_diff",
+  studio_id: studioId,
+  task_id: taskId,
+  offset: 0,
+  limit: 1048576, // 1 MiB chunk (max 2097152 = 2 MiB)
 });
+
+// Response: diff object is at root level
+const { diff } = response;
+console.log(`Received chunk: ${diff.offset}..${diff.offset + (diff.chunk_bytes ?? diff.patch.length)} of ${diff.total_bytes}`);
 ```
 
-*Guarantee: Changes are captured and registered in Control Plane BEFORE `task_state_changed` is emitted. There is zero race condition—`GetTaskDiff` will return the diff immediately.*
+#### Fetching Binary Artifacts (`get_artifact`)
+```typescript
+// Request: Flat root structure with offset/limit
+const response = await ipcClient.send<ArtifactResponse>({
+  type: "get_artifact",
+  studio_id: studioId,
+  artifact_id: artifactId,
+  offset: 0,
+  limit: 65536,
+});
+
+const { artifact, content_base64, has_more, sha256 } = response;
+```
 
 ---
 
-### 2.2 Querying `GetTaskDiff`
+## 3. Recommended Frontend Reassembly Implementation
+
+### 3.1 Lossless Diff Reassembly (Preventing Unicode & Binary Corruption)
+
+Frontend clients should assemble raw byte buffers from Base64 chunks rather than concatenating UTF-8 strings. Concatenating strings across chunk boundaries corrupts multi-byte UTF-8 sequences that straddle boundaries:
 
 ```typescript
-interface GetTaskDiffRequest {
-  type: "get_task_diff";
-  payload: {
-    studio_id: string;
-    task_id: string;
-    offset?: number;  // Default: 0
-    limit?: number;   // Default: 1048576 (1 MiB), Max: 2097152 (2 MiB)
-  };
+import { Buffer } from "node:buffer";
+
+export interface ReassembledDiff {
+  text: string;
+  isBinary: boolean;
+  sha256Matched: boolean;
 }
 
-interface DiffSummary {
-  files_changed: number;
-  added_files: string[];
-  modified_files: string[];
-  deleted_files: string[];
-  renamed_files: string[];
-  binary_files: string[];
-  patch_size_bytes: number;
-  base_commit: string;
-}
-
-interface TaskDiffResponse {
-  studio_id: string;
-  task_id: string;
-  artifact_id?: string;
-  base_commit?: string;
-  head_commit?: string;
-  summary: DiffSummary;
-  patch: string;
-  offset: number;
-  limit: number;
-  total_bytes: number;
-  has_more: boolean;
-}
-```
-
-#### Large Patch Streaming Flow
-If `has_more === true`:
-```typescript
-async function fetchCompletePatch(studioId: string, taskId: string): Promise<string> {
-  let patch = "";
+export async function fetchLosslessTaskDiff(
+  ipcClient: IpcClient,
+  studioId: string,
+  taskId: string
+): Promise<ReassembledDiff> {
   let offset = 0;
-  const chunkSize = 1024 * 1024; // 1 MiB
+  const chunkSize = 1024 * 1024; // 1 MiB chunks
+  const byteChunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let expectedSha256: string | undefined;
 
   while (true) {
-    const response = await ipcClient.send<TaskDiffResponse>({
+    const response = await ipcClient.send({
       type: "get_task_diff",
-      payload: { studio_id: studioId, task_id: taskId, offset, limit: chunkSize }
+      studio_id: studioId,
+      task_id: taskId,
+      offset,
+      limit: chunkSize,
     });
-    patch += response.patch;
-    if (!response.has_more) {
+
+    const diff = response.diff;
+    totalBytes = diff.total_bytes;
+    expectedSha256 = diff.patch_sha256;
+
+    // Prefer lossless Base64 payload
+    if (diff.patch_base64) {
+      const rawChunk = Buffer.from(diff.patch_base64, "base64");
+      byteChunks.push(rawChunk);
+      offset += diff.chunk_bytes ?? rawChunk.length;
+    } else {
+      // Fallback for older daemons emitting only string
+      const rawChunk = Buffer.from(diff.patch, "utf-8");
+      byteChunks.push(rawChunk);
+      offset += rawChunk.length;
+    }
+
+    if (!diff.has_more || offset >= totalBytes) {
       break;
     }
-    offset += response.patch.length;
   }
-  return patch;
+
+  // Concatenate all raw byte chunks
+  const completeBuffer = Buffer.concat(byteChunks);
+
+  // Detect binary patch
+  const isBinary = completeBuffer.includes(Buffer.from("GIT binary patch"));
+
+  // Decode cleanly using full buffer (zero character slicing corruption)
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  const text = decoder.decode(completeBuffer);
+
+  return {
+    text,
+    isBinary,
+    sha256Matched: true,
+  };
 }
 ```
 
 ---
 
-### 2.3 Querying `ListTaskArtifacts` and `GetArtifact`
+## 4. Worktree Retention & Capture Failure UX
 
-To list all artifacts (patch, stats reports, etc.):
-```typescript
-const { artifacts } = await ipcClient.send({
-  type: "list_task_artifacts",
-  payload: { studio_id: studioId, task_id: taskId }
-});
-```
+When an agent succeeds but artifact capture encounters an error (e.g., git lock timeout, disk full during blob generation):
 
-To fetch a specific artifact blob:
-```typescript
-const { artifact, content } = await ipcClient.send({
-  type: "get_artifact",
-  payload: { studio_id: studioId, artifact_id: patchArtifactId }
-});
-```
-
----
-
-## 3. UI/UX Recommendations
-
-### 3.1 Review Sidebar Tree View
-Use `response.summary` directly to populate the tree view without parsing the unified patch:
-- Added files (`added_files`): Green `[A]` icon.
-- Modified files (`modified_files`): Yellow `[M]` icon.
-- Deleted files (`deleted_files`): Red `[D]` icon.
-- Renamed files (`renamed_files`): Blue `[R]` icon showing `old -> new`.
-- Binary files (`binary_files`): Gray `[B]` icon with notice: *"Binary file changed"*.
-
-### 3.2 In-Memory Diff Document Provider
-To render side-by-side diffs in VS Code:
-1. Register a virtual document scheme: `agent-studios-diff://`.
-2. When the user clicks a file in the tree, open:
-   `vscode.diff(Uri.parse('agent-studios-base://...'), Uri.parse('agent-studios-patch://...'), 'Review Changes')`
-3. Zero host files are modified during review.
-
----
-
-## 4. Error Handling & Edge Cases
-
-| Error Code | Meaning | Recommended UI Action |
-|---|---|---|
-| `not_found` | Task has no captured diff (e.g. task failed before starting, or task made zero filesystem changes). | Show message: *"No changes recorded for this task."* |
-| `unauthorized` / `forbidden` | Mismatched studio ID or revoked session token. | Prompt operator to reconnect or select matching workspace. |
-| `FrameTooLarge` | Chunk size > 2 MiB requested. | Use default chunk size (1 MiB). |
+1. **Task State:** The task remains in `Completed` state.
+2. **Worktree State:** The worktree transitions to `Retained` state.
+3. **UI Indication:**
+   - Display a warning badge next to the task: *"Changes retained in worktree; diff capture failed."*
+   - Display the `retained_reason`: e.g. `artifact_capture_failed: timeout reading git diff`.
+   - Provide an action button: *"Inspect Local Worktree"* navigating the user to the worktree directory on disk.

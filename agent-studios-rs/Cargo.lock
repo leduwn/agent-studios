@@ -206,6 +206,7 @@ dependencies = [
  "agent-studios-provider",
  "agent-studios-workspace",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",

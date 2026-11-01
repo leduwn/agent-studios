@@ -166,9 +166,22 @@ pub struct TaskDiffResponse {
     pub base_commit: Option<String>,
     pub head_commit: Option<String>,
     pub summary: DiffSummary,
+    /// Legacy UTF-8 representation of the patch chunk (lossy across arbitrary chunk boundaries).
     pub patch: String,
     pub offset: usize,
     pub limit: usize,
     pub total_bytes: usize,
     pub has_more: bool,
+    /// Lossless base64-encoded chunk for exact byte-for-byte reconstruction across arbitrary boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_base64: Option<String>,
+    /// Encoding descriptor for `patch_base64` (e.g. "base64").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+    /// Full SHA-256 hex digest of the complete unchunked raw patch for end-to-end integrity verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_sha256: Option<String>,
+    /// Exact byte length of this chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_bytes: Option<usize>,
 }
