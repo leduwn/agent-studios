@@ -253,6 +253,55 @@ export interface DaemonBootstrapInfo {
   created_at: number;
 }
 
+export type RustArtifactKind = 'file' | 'patch' | 'log' | 'report' | 'plan' | 'other';
+
+export interface RustArtifactRecord {
+  id: string;
+  studio_id: string;
+  task_id: string;
+  producer_agent_id: string;
+  kind: RustArtifactKind;
+  logical_name: string;
+  content_hash: string | null;
+  location: string;
+  created_at: string;
+  run_id?: string | null;
+  worktree_id?: string | null;
+  version?: number;
+  supersedes?: string | null;
+  relative_path?: string | null;
+  size_bytes?: number | null;
+}
+
+export interface RustDiffSummary {
+  files_changed: number;
+  added_files: string[];
+  modified_files: string[];
+  deleted_files: string[];
+  renamed_files: string[];
+  binary_files: string[];
+  patch_size_bytes: number;
+  base_commit: string;
+}
+
+export interface RustTaskDiffResponse {
+  studio_id: string;
+  task_id: string;
+  artifact_id?: string | null;
+  base_commit?: string | null;
+  head_commit?: string | null;
+  summary: RustDiffSummary;
+  patch: string;
+  offset: number;
+  limit: number;
+  total_bytes: number;
+  has_more: boolean;
+  patch_base64?: string | null;
+  encoding?: string | null;
+  patch_sha256?: string | null;
+  chunk_bytes?: number | null;
+}
+
 export type RustIpcCommand =
   | {
       type: 'negotiate_capabilities';
@@ -338,6 +387,25 @@ export type RustIpcCommand =
     }
   | {
       type: 'get_execution_readiness';
+    }
+  | {
+      type: 'list_task_artifacts';
+      studio_id: string;
+      task_id: string;
+    }
+  | {
+      type: 'get_artifact';
+      studio_id: string;
+      artifact_id: string;
+      offset?: number;
+      limit?: number;
+    }
+  | {
+      type: 'get_task_diff';
+      studio_id: string;
+      task_id: string;
+      offset?: number;
+      limit?: number;
     }
   | {
       type: 'shutdown';
@@ -430,6 +498,26 @@ export type RustIpcResponse =
   | {
       type: 'execution_readiness';
       readiness: RustExecutionReadinessReport;
+    }
+  | {
+      type: 'task_artifacts';
+      artifacts: RustArtifactRecord[];
+    }
+  | {
+      type: 'artifact';
+      artifact?: RustArtifactRecord | null;
+      content?: string | null;
+      content_base64?: string | null;
+      encoding?: string | null;
+      offset?: number | null;
+      limit?: number | null;
+      total_bytes?: number | null;
+      has_more?: boolean | null;
+      sha256?: string | null;
+    }
+  | {
+      type: 'task_diff';
+      diff: RustTaskDiffResponse;
     }
   | {
       type: 'shutdown_acknowledged';
