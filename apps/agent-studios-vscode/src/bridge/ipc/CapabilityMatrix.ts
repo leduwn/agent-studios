@@ -30,6 +30,10 @@ export interface RuntimeValidationResult {
   reason?: string;
 }
 
+export interface RuntimeValidationOptions {
+  action?: 'task_execution' | 'task_cancellation' | 'read_only';
+}
+
 export interface OperatorConfirmationChallenge {
   token: string;
   studioId: string;
@@ -750,6 +754,10 @@ export interface TaskSubmissionPreflightResult {
   tier: CapabilityTier;
   error?: string;
   limitationWarning?: string;
+  resolvedRuntimePreference?: string;
+  resolvedRuntimeInstanceId?: string;
+  resolvedModelId?: string;
+  resolvedProviderId?: string;
   sanitizedSpec?: {
     key: string;
     title: string;
@@ -775,11 +783,18 @@ export class CapabilityMatrix {
 
   /**
    * Dynamically overrides or enables/disables capability authorization.
-   * Prohibited in production mode.
+   * Prohibited in production mode and strictly isolated to automated test environments.
    */
   public static setCapabilityEnabled(capabilityId: string, enabled: boolean): void {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('Dynamic capability overrides are prohibited in production mode.');
+    }
+    const isTestEnv =
+      typeof (global as any).describe === 'function' ||
+      typeof (global as any).it === 'function' ||
+      process.env.NODE_ENV === 'test';
+    if (!isTestEnv) {
+      throw new Error('Dynamic capability overrides are strictly prohibited outside automated test environments.');
     }
     this.dynamicOverrides.set(capabilityId, enabled);
   }
@@ -808,8 +823,10 @@ export class CapabilityMatrix {
       runtime?: string;
       runtimePreference?: string;
       runtimeInstanceId?: string;
-    }
+    },
+    options?: RuntimeValidationOptions
   ): RuntimeValidationResult {
+    const action = options?.action ?? 'task_execution';
     if (!readiness) {
       return {
         valid: false,
@@ -965,14 +982,56 @@ export class CapabilityMatrix {
       }
     }
 
-    // Capability check if declared
-    if (readiness.runtime_capabilities && readiness.runtime_capabilities[resolvedInstance.instance_id]) {
-      const caps = readiness.runtime_capabilities[resolvedInstance.instance_id];
-      if (caps['streaming_events'] === 'unsupported' && caps['stop'] === 'unsupported') {
-        return {
-          valid: false,
-          reason: `Runtime instance '${resolvedInstance.instance_id}' does not support streaming_events or stop capabilities.`,
-        };
+    // Tri-state runtime capability validation
+    // If readiness.runtime_capabilities is omitted or null (legacy M15-01 response),
+    // preserve backward-compatible operation without error.
+    if (readiness.runtime_capabilities !== undefined && readiness.runtime_capabilities !== null) {
+      const instanceCaps = readiness.runtime_capabilities[resolvedInstance.instance_id];
+
+      let requiredCaps: string[] = [];
+      if (action === 'task_execution') {
+        requiredCaps = ['streaming_events', 'stop'];
+      } else if (action === 'task_cancellation') {
+        requiredCaps = ['stop'];
+      } else if (action === 'read_only') {
+        requiredCaps = [];
+      }
+
+      if (requiredCaps.length > 0) {
+        if (!instanceCaps) {
+          return {
+            valid: false,
+            reason: `Runtime instance '${resolvedInstance.instance_id}' has missing runtime capabilities in daemon readiness. Required: ${requiredCaps.join(', ')}.`,
+          };
+        }
+
+        for (const cap of requiredCaps) {
+          const status = instanceCaps[cap];
+          if (!status) {
+            return {
+              valid: false,
+              reason: `Runtime instance '${resolvedInstance.instance_id}' is missing required '${cap}' capability for action '${action}'.`,
+            };
+          }
+          if (status === 'unsupported') {
+            return {
+              valid: false,
+              reason: `Runtime instance '${resolvedInstance.instance_id}' does not support required '${cap}' capability (status: unsupported) for action '${action}'.`,
+            };
+          }
+          if (status === 'unknown') {
+            return {
+              valid: false,
+              reason: `Runtime instance '${resolvedInstance.instance_id}' has unknown support for required '${cap}' capability (status: unknown) for action '${action}'.`,
+            };
+          }
+          if (status !== 'supported') {
+            return {
+              valid: false,
+              reason: `Runtime instance '${resolvedInstance.instance_id}' capability '${cap}' has invalid status '${status}' (must be 'supported') for action '${action}'.`,
+            };
+          }
+        }
       }
     }
 
@@ -1089,11 +1148,17 @@ export class CapabilityMatrix {
     }
 
     // 4.6. Runtime instance selection validation against authoritative daemon readiness
-    if (req.readiness !== undefined) {
-      const runtimeVal = this.validateRuntimeInstanceSelection(req.readiness, {
-        runtimePreference: req.runtimePreference,
-        runtimeInstanceId: req.runtimeInstanceId,
-      });
+    if (req.readiness !== undefined && req.readiness !== null) {
+      const runtimeVal = this.validateRuntimeInstanceSelection(
+        req.readiness,
+        {
+          runtimePreference: req.runtimePreference,
+          runtimeInstanceId: req.runtimeInstanceId,
+        },
+        {
+          action: 'task_execution',
+        }
+      );
       if (!runtimeVal.valid) {
         return {
           allowed: false,
@@ -1143,40 +1208,120 @@ export class CapabilityMatrix {
       }
     }
 
-    // 5. Model & Provider routing mismatch check (Parity with connection.rs:1771-1827)
-    // The backend routes exclusively via daemon defaults.
-    // If the user requested a specific model (requestedModelId) that differs from the verified daemon default,
-    // or if requestedProviderId differs from the daemon's provider, task submission must be REJECTED (fail closed).
-    const parsedDefaultModel = parseDefaultModelEnv();
-    const readinessDefaultModel = req.readiness?.defaults?.default_model_id || (req.readiness?.available_models?.length === 1 ? req.readiness.available_models[0].model_id : undefined);
-    const readinessDefaultProvider = req.readiness?.defaults?.default_provider_instance_id || (req.readiness?.available_models?.length === 1 ? req.readiness.available_models[0].provider_instance_id : undefined);
-    const effectiveModel = req.daemonEffectiveModel || readinessDefaultModel || parsedDefaultModel?.modelId;
-    const effectiveProvider = req.daemonEffectiveProvider || readinessDefaultProvider || parsedDefaultModel?.providerId;
+    // 5. Authoritative Model & Provider validation (Parity with connection.rs:1771-1827 / M15 multi-model catalog)
+    let resolvedModelId: string | undefined;
+    let resolvedProviderId: string | undefined;
 
-    if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
-      if (!effectiveModel) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: `Model routing rejected (fail-closed): requested model '${req.requestedModelId}', but daemon default model could not be verified. agsd (commit ce0396c1f1) routes exclusively via daemon defaults; per-task model overrides are unsupported.`,
-        };
-      }
-      if (req.requestedModelId !== effectiveModel) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: `Model routing mismatch: Requested model '${req.requestedModelId}' differs from daemon effective configuration ('${effectiveModel}'). Per-task model override is rejected.`,
-        };
-      }
-    }
+    if (req.readiness !== undefined && req.readiness !== null) {
+      const availableModels = req.readiness.available_models || [];
 
-    if (req.requestedProviderId && req.requestedProviderId.trim().length > 0 && req.requestedProviderId !== 'default') {
-      if (effectiveProvider && req.requestedProviderId !== effectiveProvider) {
-        return {
-          allowed: false,
-          tier: 'TASK_SUBMISSION_READY',
-          error: `Provider routing mismatch: Requested provider '${req.requestedProviderId}' differs from daemon verified default provider ('${effectiveProvider}'). Per-task provider override is rejected.`,
-        };
+      if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
+        const trimmedModelId = req.requestedModelId.trim();
+
+        if (availableModels.length > 0) {
+          const matchingModels = availableModels.filter((m) => m.model_id === trimmedModelId);
+          if (matchingModels.length === 0) {
+            return {
+              allowed: false,
+              tier: 'TASK_SUBMISSION_READY',
+              error: `Model routing rejected: Requested model '${trimmedModelId}' not found in daemon available models.`,
+            };
+          }
+
+          if (req.requestedProviderId && req.requestedProviderId.trim().length > 0 && req.requestedProviderId !== 'default') {
+            const trimmedProvId = req.requestedProviderId.trim();
+            const providerMatch = matchingModels.find((m) => m.provider_instance_id === trimmedProvId);
+            if (!providerMatch) {
+              return {
+                allowed: false,
+                tier: 'TASK_SUBMISSION_READY',
+                error: `Provider routing mismatch: Requested model '${trimmedModelId}' with provider '${trimmedProvId}' not found in daemon available models.`,
+              };
+            }
+            resolvedModelId = trimmedModelId;
+            resolvedProviderId = trimmedProvId;
+          } else if (matchingModels.length > 1) {
+            // Parity: connection.rs:1980 - ambiguous provider instance
+            const matchedProvIds = matchingModels.map((m) => m.provider_instance_id).join(', ');
+            return {
+              allowed: false,
+              tier: 'TASK_SUBMISSION_READY',
+              error: `Model routing ambiguous: Requested model '${trimmedModelId}' matches multiple provider instances (${matchedProvIds}). Explicit provider ID required.`,
+            };
+          } else {
+            resolvedModelId = trimmedModelId;
+            resolvedProviderId = matchingModels[0].provider_instance_id;
+          }
+        } else if (req.daemonEffectiveModel && trimmedModelId !== req.daemonEffectiveModel) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Model routing mismatch: Requested model '${trimmedModelId}' differs from daemon effective configuration ('${req.daemonEffectiveModel}'). Per-task model override is rejected.`,
+          };
+        } else {
+          resolvedModelId = trimmedModelId;
+          resolvedProviderId =
+            req.requestedProviderId && req.requestedProviderId !== 'default'
+              ? req.requestedProviderId
+              : req.daemonEffectiveProvider;
+        }
+      } else {
+        // No explicit model requested (or 'default') — resolve daemon default model
+        const defaultModelId =
+          req.readiness.defaults?.default_model_id ||
+          (availableModels.length === 1 ? availableModels[0].model_id : req.daemonEffectiveModel);
+        const defaultProviderId =
+          req.readiness.defaults?.default_provider_instance_id ||
+          (availableModels.length === 1 ? availableModels[0].provider_instance_id : req.daemonEffectiveProvider);
+
+        if (!defaultModelId && availableModels.length > 1) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Multiple models available (${availableModels.length}) in daemon catalog, but no default model configured. Explicit model selection required.`,
+          };
+        }
+
+        resolvedModelId = defaultModelId;
+        resolvedProviderId = defaultProviderId;
+      }
+    } else {
+      // Legacy path without readiness report: validate against daemonEffectiveModel / daemonEffectiveProvider
+      const parsedDefaultModel = parseDefaultModelEnv();
+      const effectiveModel = req.daemonEffectiveModel || parsedDefaultModel?.modelId;
+      const effectiveProvider = req.daemonEffectiveProvider || parsedDefaultModel?.providerId;
+
+      if (req.requestedModelId && req.requestedModelId.trim().length > 0 && req.requestedModelId !== 'default') {
+        if (!effectiveModel) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Model routing rejected (fail-closed): requested model '${req.requestedModelId}', but daemon default model could not be verified.`,
+          };
+        }
+        if (req.requestedModelId !== effectiveModel) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Model routing mismatch: Requested model '${req.requestedModelId}' differs from daemon effective configuration ('${effectiveModel}'). Per-task model override is rejected.`,
+          };
+        }
+        resolvedModelId = req.requestedModelId;
+      } else {
+        resolvedModelId = effectiveModel;
+      }
+
+      if (req.requestedProviderId && req.requestedProviderId.trim().length > 0 && req.requestedProviderId !== 'default') {
+        if (effectiveProvider && req.requestedProviderId !== effectiveProvider) {
+          return {
+            allowed: false,
+            tier: 'TASK_SUBMISSION_READY',
+            error: `Provider routing mismatch: Requested provider '${req.requestedProviderId}' differs from daemon verified default provider ('${effectiveProvider}'). Per-task provider override is rejected.`,
+          };
+        }
+        resolvedProviderId = req.requestedProviderId;
+      } else {
+        resolvedProviderId = effectiveProvider;
       }
     }
 
@@ -1248,6 +1393,10 @@ export class CapabilityMatrix {
     return {
       allowed: true,
       tier: 'TASK_SUBMISSION_READY',
+      resolvedRuntimePreference: req.runtimePreference,
+      resolvedRuntimeInstanceId: req.runtimeInstanceId,
+      resolvedModelId,
+      resolvedProviderId,
       sanitizedSpec: {
         key: sanitizedSpec.key,
         title: sanitizedSpec.title,

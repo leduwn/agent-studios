@@ -592,14 +592,28 @@ describe('Tier 2: Mock Daemon Mission Control Projection E2E (MOCK_PROJECTED_TAS
 
       const adminContent = JSON.parse(await fs.promises.readFile(realAdminRuntimePath, 'utf8'));
 
-      // Connect admin transport to real daemon
-      realAdmin = new NativeIpcTransport({
-        endpoint: adminContent.endpoint,
-        keyId: adminContent.key_id,
-        clientKey: adminContent.admin_key,
-        commandTimeoutMs: 5000,
-      });
-      await realAdmin.connect();
+      // Connect admin transport to real daemon with retry for pipe listener ready
+      let connected = false;
+      const connectDeadline = Date.now() + 5000;
+      while (!connected && Date.now() < connectDeadline) {
+        try {
+          realAdmin = new NativeIpcTransport({
+            endpoint: adminContent.endpoint,
+            keyId: adminContent.key_id,
+            clientKey: adminContent.admin_key,
+            commandTimeoutMs: 5000,
+          });
+          await realAdmin.connect();
+          connected = true;
+        } catch (err: any) {
+          if (err.code === 'ENOENT' || err.message?.includes('ENOENT')) {
+            await new Promise((r) => setTimeout(r, 100));
+          } else {
+            throw err;
+          }
+        }
+      }
+      assert.ok(connected && realAdmin, 'realAdmin must connect to real agsd');
       assert.strictEqual(realAdmin.getState(), 'ready');
 
       // Seed real studio in real agsd

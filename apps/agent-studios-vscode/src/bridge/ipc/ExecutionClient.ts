@@ -37,6 +37,9 @@ export interface CancelTaskRequest {
   studioId: string;
   taskId: string;
   reason?: string;
+  readiness?: RustExecutionReadinessReport;
+  runtimeInstanceId?: string;
+  runtimePreference?: string;
 }
 
 export interface CancelTaskResult {
@@ -129,6 +132,27 @@ export class ExecutionClient {
         req.studioId,
         req.taskId
       );
+    }
+
+    // 1.1 Action-specific runtime capability verification if readiness report is provided
+    if (req.readiness !== undefined && req.readiness !== null) {
+      const runtimeVal = CapabilityMatrix.validateRuntimeInstanceSelection(
+        req.readiness,
+        {
+          runtimeInstanceId: req.runtimeInstanceId,
+          runtimePreference: req.runtimePreference,
+        },
+        {
+          action: 'task_cancellation',
+        }
+      );
+      if (!runtimeVal.valid) {
+        throw new TaskCancellationError(
+          `Task cancellation rejected: runtime instance does not support cancellation: ${runtimeVal.reason}`,
+          req.studioId,
+          req.taskId
+        );
+      }
     }
 
     // 2. Parameter presence validation

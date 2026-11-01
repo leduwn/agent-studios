@@ -22,6 +22,8 @@
  * 16. Backward compatibility: M15-01 readiness payload without M15-02 optional fields
  */
 
+/* eslint-disable @typescript-eslint/naming-convention */
+
 import * as assert from 'assert';
 import {
   CapabilityMatrix,
@@ -218,7 +220,7 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
   });
 
   // =========================================================================
-  // Scenario 4: Unsupported/unknown runtime capability
+  // Scenario 4: Tri-state runtime capability validation & action gates
   // =========================================================================
   it('Scenario 4: fails closed when runtime reports unsupported required capabilities', () => {
     const readiness: RustExecutionReadinessReport = {
@@ -245,8 +247,208 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
 
     assert.strictEqual(validation.valid, false);
     assert.ok(
-      validation.reason?.includes('does not support streaming_events or stop capabilities')
+      validation.reason?.includes("does not support required 'streaming_events' capability")
     );
+  });
+
+  it('Scenario 4a: fails closed when runtime reports unknown capability for task_execution', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'unknown',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
+      runtimeInstanceId: 'rt-alpha-01',
+    });
+
+    assert.strictEqual(validation.valid, false);
+    assert.ok(
+      validation.reason?.includes("has unknown support for required 'stop' capability")
+    );
+  });
+
+  it('Scenario 4b: fails closed when required capability is missing from instance map', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
+      runtimeInstanceId: 'rt-alpha-01',
+    });
+
+    assert.strictEqual(validation.valid, false);
+    assert.ok(
+      validation.reason?.includes("is missing required 'stop' capability")
+    );
+  });
+
+  it('Scenario 4c: fails closed when instance is missing entirely from runtime_capabilities map', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {},
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
+      runtimeInstanceId: 'rt-alpha-01',
+    });
+
+    assert.strictEqual(validation.valid, false);
+    assert.ok(
+      validation.reason?.includes("has missing runtime capabilities in daemon readiness")
+    );
+  });
+
+  it('Scenario 4d: passes task_cancellation when stop is supported even if streaming_events is unsupported', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'unsupported',
+          stop: 'supported',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(
+      readiness,
+      { runtimeInstanceId: 'rt-alpha-01' },
+      { action: 'task_cancellation' }
+    );
+
+    assert.strictEqual(validation.valid, true);
+    assert.strictEqual(validation.runtimeInstanceId, 'rt-alpha-01');
+  });
+
+  it('Scenario 4e: fails task_cancellation when stop capability is unsupported or unknown', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'unsupported',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(
+      readiness,
+      { runtimeInstanceId: 'rt-alpha-01' },
+      { action: 'task_cancellation' }
+    );
+
+    assert.strictEqual(validation.valid, false);
+    assert.ok(
+      validation.reason?.includes("does not support required 'stop' capability")
+    );
+  });
+
+  it('Scenario 4f: passes read_only action for runtimes lacking mutating capabilities', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'unsupported',
+          stop: 'unsupported',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(
+      readiness,
+      { runtimeInstanceId: 'rt-alpha-01' },
+      { action: 'read_only' }
+    );
+
+    assert.strictEqual(validation.valid, true);
+    assert.strictEqual(validation.runtimeInstanceId, 'rt-alpha-01');
+  });
+
+  it('Scenario 4g: passes task_execution when both streaming_events and stop are supported', () => {
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_capabilities: {
+        'rt-alpha-01': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const validation = CapabilityMatrix.validateRuntimeInstanceSelection(
+      readiness,
+      { runtimeInstanceId: 'rt-alpha-01' },
+      { action: 'task_execution' }
+    );
+
+    assert.strictEqual(validation.valid, true);
+    assert.strictEqual(validation.runtimeInstanceId, 'rt-alpha-01');
+    assert.strictEqual(validation.runtimePreference, 'fake-alpha');
   });
 
   // =========================================================================
@@ -475,6 +677,239 @@ describe('M15-02 Multi-Runtime Backend Integration Tests', () => {
     if (sent.type === 'submit_task') {
       assert.strictEqual(sent.task_spec.execution?.model_id, 'model-test-01');
       assert.strictEqual(sent.task_spec.execution?.provider_instance_id, 'provider-test');
+    }
+  });
+
+  it('Scenario 10b: permits explicit per-task model differing from daemon default when model exists in available_models', async () => {
+    CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [
+        { model_id: 'default-model-01', provider_instance_id: 'default-provider' },
+        { model_id: 'custom-model-02', provider_instance_id: 'custom-provider' },
+      ],
+      authorized_workspaces: [],
+      defaults: {
+        default_model_id: 'default-model-01',
+        default_provider_instance_id: 'default-provider',
+      },
+      blocking_reasons: [],
+    };
+
+    const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt', {
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      modelId: 'custom-model-02',
+      providerId: 'custom-provider',
+    });
+
+    await SubmitTaskAdapter.submitTask(transport, {
+      studioId: validStudioId,
+      prompt: 'test prompt',
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      requestedModelId: 'custom-model-02',
+      requestedProviderId: 'custom-provider',
+      confirmedByUser: true,
+      confirmationChallenge: challenge,
+      readiness,
+    });
+
+    const sent = transport.sentCommands[transport.sentCommands.length - 1];
+    assert.strictEqual(sent.type, 'submit_task');
+    if (sent.type === 'submit_task') {
+      assert.strictEqual(sent.task_spec.execution?.model_id, 'custom-model-02');
+      assert.strictEqual(sent.task_spec.execution?.provider_instance_id, 'custom-provider');
+    }
+  });
+
+  it('Scenario 10c: rejects explicit per-task model when model does not exist in available_models (prevents silent substitution)', async () => {
+    CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [
+        { model_id: 'default-model-01', provider_instance_id: 'default-provider' },
+      ],
+      authorized_workspaces: [],
+      defaults: {
+        default_model_id: 'default-model-01',
+        default_provider_instance_id: 'default-provider',
+      },
+      blocking_reasons: [],
+    };
+
+    const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt', {
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      modelId: 'non-existent-model',
+    });
+
+    await assert.rejects(
+      async () => {
+        await SubmitTaskAdapter.submitTask(transport, {
+          studioId: validStudioId,
+          prompt: 'test prompt',
+          runtimePreference: 'fake-alpha',
+          runtimeInstanceId: 'rt-alpha-01',
+          requestedModelId: 'non-existent-model',
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          readiness,
+        });
+      },
+      (err: Error) => {
+        return (
+          err instanceof TaskSubmissionError &&
+          err.message.includes("Requested model 'non-existent-model' not found in daemon available models")
+        );
+      }
+    );
+  });
+
+  it('Scenario 10d: rejects explicit per-task model when provider instance does not match', async () => {
+    CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [
+        { model_id: 'model-a', provider_instance_id: 'provider-alpha' },
+      ],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt', {
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      modelId: 'model-a',
+      providerId: 'provider-beta',
+    });
+
+    await assert.rejects(
+      async () => {
+        await SubmitTaskAdapter.submitTask(transport, {
+          studioId: validStudioId,
+          prompt: 'test prompt',
+          runtimePreference: 'fake-alpha',
+          runtimeInstanceId: 'rt-alpha-01',
+          requestedModelId: 'model-a',
+          requestedProviderId: 'provider-beta',
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          readiness,
+        });
+      },
+      (err: Error) => {
+        return (
+          err instanceof TaskSubmissionError &&
+          err.message.includes("Requested model 'model-a' with provider 'provider-beta' not found in daemon available models")
+        );
+      }
+    );
+  });
+
+  it('Scenario 10e: rejects ambiguous model when multiple provider instances exist without explicit provider selection', async () => {
+    CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [
+        { model_id: 'common-model', provider_instance_id: 'provider-alpha' },
+        { model_id: 'common-model', provider_instance_id: 'provider-beta' },
+      ],
+      authorized_workspaces: [],
+      defaults: {},
+      blocking_reasons: [],
+    };
+
+    const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt', {
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      modelId: 'common-model',
+    });
+
+    await assert.rejects(
+      async () => {
+        await SubmitTaskAdapter.submitTask(transport, {
+          studioId: validStudioId,
+          prompt: 'test prompt',
+          runtimePreference: 'fake-alpha',
+          runtimeInstanceId: 'rt-alpha-01',
+          requestedModelId: 'common-model',
+          confirmedByUser: true,
+          confirmationChallenge: challenge,
+          readiness,
+        });
+      },
+      (err: Error) => {
+        return (
+          err instanceof TaskSubmissionError &&
+          err.message.includes("matches multiple provider instances (provider-alpha, provider-beta)")
+        );
+      }
+    );
+  });
+
+  it('Scenario 10f: falls back to daemon default model when no explicit model is requested', async () => {
+    CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+
+    const readiness: RustExecutionReadinessReport = {
+      is_ready: true,
+      available_runtimes: ['fake-alpha'],
+      runtime_instances: [
+        { instance_id: 'rt-alpha-01', implementation: 'fake-alpha', healthy: true },
+      ],
+      available_models: [
+        { model_id: 'default-model', provider_instance_id: 'default-provider' },
+        { model_id: 'other-model', provider_instance_id: 'other-provider' },
+      ],
+      authorized_workspaces: [],
+      defaults: {
+        default_model_id: 'default-model',
+        default_provider_instance_id: 'default-provider',
+      },
+      blocking_reasons: [],
+    };
+
+    const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt', {
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+    });
+
+    await SubmitTaskAdapter.submitTask(transport, {
+      studioId: validStudioId,
+      prompt: 'test prompt',
+      runtimePreference: 'fake-alpha',
+      runtimeInstanceId: 'rt-alpha-01',
+      confirmedByUser: true,
+      confirmationChallenge: challenge,
+      readiness,
+    });
+
+    const sent = transport.sentCommands[transport.sentCommands.length - 1];
+    assert.strictEqual(sent.type, 'submit_task');
+    if (sent.type === 'submit_task') {
+      assert.strictEqual(sent.task_spec.execution?.model_id, 'default-model');
+      assert.strictEqual(sent.task_spec.execution?.provider_instance_id, 'default-provider');
     }
   });
 

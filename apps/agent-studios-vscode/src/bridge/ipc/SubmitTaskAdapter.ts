@@ -78,6 +78,12 @@ export class TaskSubmissionError extends Error {
   }
 }
 
+export interface VerifyDaemonOptions {
+  explicitRepoPath?: string;
+  defaultModelEnv?: string;
+  readiness?: RustExecutionReadinessReport | null;
+}
+
 export class SubmitTaskAdapter {
   /**
    * Verifies effective daemon configuration over IPC:
@@ -89,10 +95,7 @@ export class SubmitTaskAdapter {
    */
   public static async verifyDaemonConfiguration(
     transport: { sendCommand: (cmd: RustIpcCommand, timeoutMs?: number) => Promise<RustIpcResponse> } | NativeIpcTransport,
-    options?: {
-      explicitRepoPath?: string;
-      defaultModelEnv?: string;
-    }
+    options?: VerifyDaemonOptions
   ): Promise<VerifiedDaemonConfig> {
     // 1. Verify health & liveness via IpcCommand::GetHealth
     const healthResp = await transport.sendCommand({ type: 'get_health' });
@@ -129,38 +132,43 @@ export class SubmitTaskAdapter {
     let defaultModelId: string | undefined;
     let defaultProviderId: string | undefined;
 
-    const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv);
-    if (parsedEnv) {
-      // Find model in catalog
-      const matched = availableModels.find((m) => {
-        if (parsedEnv.providerId) {
-          return m.provider_instance_id === parsedEnv.providerId && m.id === parsedEnv.modelId;
-        }
-        return m.id === parsedEnv.modelId;
-      });
-
-      if (!matched) {
-        throw new TaskSubmissionError(
-          `Configured default model '${parsedEnv.providerId ? `${parsedEnv.providerId}/${parsedEnv.modelId}` : parsedEnv.modelId}' not found in daemon provider catalog (parity: connection.rs:1788).`
-        );
-      }
-      defaultModelId = matched.id;
-      defaultProviderId = matched.provider_instance_id;
+    if (options?.readiness?.defaults?.default_model_id) {
+      defaultModelId = options.readiness.defaults.default_model_id;
+      defaultProviderId = options.readiness.defaults.default_provider_instance_id ?? undefined;
     } else {
-      if (availableModels.length === 0) {
-        // Catalog empty (test fixture backward compatibility)
-        defaultModelId = undefined;
-        defaultProviderId = undefined;
-      } else if (availableModels.length === 1) {
-        // Unambiguous single-model catalog (parity: connection.rs:1806)
-        defaultModelId = availableModels[0].id;
-        defaultProviderId = availableModels[0].provider_instance_id;
+      const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv);
+      if (parsedEnv) {
+        // Find model in catalog
+        const matched = availableModels.find((m) => {
+          if (parsedEnv.providerId) {
+            return m.provider_instance_id === parsedEnv.providerId && m.id === parsedEnv.modelId;
+          }
+          return m.id === parsedEnv.modelId;
+        });
+
+        if (!matched) {
+          throw new TaskSubmissionError(
+            `Configured default model '${parsedEnv.providerId ? `${parsedEnv.providerId}/${parsedEnv.modelId}` : parsedEnv.modelId}' not found in daemon provider catalog (parity: connection.rs:1788).`
+          );
+        }
+        defaultModelId = matched.id;
+        defaultProviderId = matched.provider_instance_id;
       } else {
-        // Multiple models in catalog without explicit AGENT_STUDIOS_DEFAULT_MODEL
-        // Backend agsd fails closed at connection.rs line 1809
-        throw new TaskSubmissionError(
-          `Multiple models available (${availableModels.length}) in daemon catalog, but no explicit model route configured. Set AGENT_STUDIOS_DEFAULT_MODEL (parity: connection.rs:1816).`
-        );
+        if (availableModels.length === 0) {
+          // Catalog empty (test fixture backward compatibility)
+          defaultModelId = undefined;
+          defaultProviderId = undefined;
+        } else if (availableModels.length === 1) {
+          // Unambiguous single-model catalog (parity: connection.rs:1806)
+          defaultModelId = availableModels[0].id;
+          defaultProviderId = availableModels[0].provider_instance_id;
+        } else {
+          // Multiple models in catalog without explicit AGENT_STUDIOS_DEFAULT_MODEL
+          // Backend agsd fails closed at connection.rs line 1809
+          throw new TaskSubmissionError(
+            `Multiple models available (${availableModels.length}) in daemon catalog, but no explicit model route configured. Set AGENT_STUDIOS_DEFAULT_MODEL (parity: connection.rs:1816).`
+          );
+        }
       }
     }
 
@@ -193,6 +201,7 @@ export class SubmitTaskAdapter {
       const verified = await this.verifyDaemonConfiguration(transport, {
         explicitRepoPath: req.daemonRepoRoot,
         defaultModelEnv: req.daemonEffectiveModel,
+        readiness: req.readiness,
       });
       effectiveRepo = verified.daemonRepoRoot ?? effectiveRepo;
       effectiveModel = verified.defaultModelId ?? effectiveModel;
@@ -246,10 +255,14 @@ export class SubmitTaskAdapter {
       execution: {
         initial_prompt: req.prompt,
         repository_path: req.workspacePath ?? null,
-        runtime_instance_id: req.runtimeInstanceId ?? null,
-        runtime_preference: req.runtimePreference ?? null,
-        provider_instance_id: req.requestedProviderId ?? effectiveProvider ?? null,
-        model_id: req.requestedModelId ?? effectiveModel ?? null,
+        runtime_instance_id:
+          req.runtimeInstanceId ?? preflight.resolvedRuntimeInstanceId ?? null,
+        runtime_preference:
+          req.runtimePreference ?? preflight.resolvedRuntimePreference ?? null,
+        provider_instance_id:
+          req.requestedProviderId ?? preflight.resolvedProviderId ?? effectiveProvider ?? null,
+        model_id:
+          req.requestedModelId ?? preflight.resolvedModelId ?? effectiveModel ?? null,
       },
     };
 
