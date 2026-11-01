@@ -11,12 +11,17 @@ use agent_studios_ipc_protocol::{
     ProtocolVersion, RuntimeInstanceReadiness, SessionId,
 };
 use agent_studios_protocol::agent::AgentKind;
+use agent_studios_protocol::artifact::{
+    ArtifactKind, ArtifactRecord, DiffSummary, TaskDiffResponse,
+};
 use agent_studios_protocol::cancellation::{CancellationScope, CancellationSummary};
-use agent_studios_protocol::id::{RunId, StudioId, TaskId};
+use agent_studios_protocol::id::{ArtifactId, RunId, StudioId, TaskId};
 use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
+use agent_studios_protocol::worktree::WorktreeState;
 use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstanceId};
+use agent_studios_workspace::capture::parse_git_diff_summary;
 
 use crate::error::TransportError;
 use crate::framing::{DEFAULT_MAX_FRAME_SIZE, recv_msg, send_msg};
@@ -135,6 +140,26 @@ pub enum IpcCommand {
         instance_id: Option<ProviderInstanceId>,
     },
     GetExecutionReadiness,
+    ListTaskArtifacts {
+        studio_id: StudioId,
+        task_id: TaskId,
+    },
+    GetArtifact {
+        studio_id: StudioId,
+        artifact_id: ArtifactId,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    GetTaskDiff {
+        studio_id: StudioId,
+        task_id: TaskId,
+        #[serde(default)]
+        offset: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Shutdown,
 }
 
@@ -208,6 +233,31 @@ pub enum IpcResponse {
     },
     ExecutionReadiness {
         readiness: ExecutionReadinessReport,
+    },
+    TaskArtifacts {
+        artifacts: Vec<ArtifactRecord>,
+    },
+    Artifact {
+        artifact: Option<ArtifactRecord>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_base64: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        has_more: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+    },
+    TaskDiff {
+        diff: TaskDiffResponse,
     },
     ShutdownAcknowledged,
     Error {
@@ -1310,6 +1360,395 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         .await
                         .map_err(|_| TransportError::ConnectionClosed)?;
                 }
+                IpcCommand::ListTaskArtifacts { studio_id, task_id } => {
+                    let artifacts = {
+                        let cp = server_state.control_plane.read().await;
+                        if let Some(task) = cp.get_task(task_id) {
+                            if task.studio_id != studio_id {
+                                tx.send(IpcResponse::Error {
+                                    message: format!(
+                                        "Task {task_id} does not belong to studio {studio_id}"
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                                continue;
+                            }
+                        } else {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Task {task_id} not found in studio {studio_id}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+
+                        let mut list: Vec<_> = cp
+                            .all_artifacts()
+                            .filter(|a| a.studio_id == studio_id && a.task_id == task_id)
+                            .cloned()
+                            .collect();
+                        list.sort_by_key(|a| (a.created_at, a.id));
+                        list
+                    };
+                    tx.send(IpcResponse::TaskArtifacts { artifacts })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetArtifact {
+                    studio_id,
+                    artifact_id,
+                    offset,
+                    limit,
+                } => {
+                    if limit == Some(0) {
+                        tx.send(IpcResponse::Error {
+                            message: "Invalid argument: limit must be greater than zero"
+                                .to_string(),
+                        })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                        continue;
+                    }
+
+                    let (artifact_rec, content_hash) = {
+                        let cp = server_state.control_plane.read().await;
+                        match cp.get_artifact(artifact_id) {
+                            Some(art) => {
+                                if art.studio_id != studio_id {
+                                    tx.send(IpcResponse::Error {
+                                        message: format!(
+                                            "Artifact {artifact_id} does not belong to studio {studio_id}"
+                                        ),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                    continue;
+                                }
+                                if let Some(_task) = cp
+                                    .get_task(art.task_id)
+                                    .filter(|t| t.studio_id != studio_id)
+                                {
+                                    tx.send(IpcResponse::Error {
+                                        message: format!(
+                                            "Artifact {artifact_id} task {} does not belong to studio {studio_id}",
+                                            art.task_id
+                                        ),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                    continue;
+                                }
+                                (Some(art.clone()), art.content_hash.clone())
+                            }
+                            None => (None, None),
+                        }
+                    };
+
+                    if let (Some(_), Some(hash_str)) = (&artifact_rec, &content_hash) {
+                        if let Some(ref orchestrator) = server_state.workspace_orchestrator {
+                            match orchestrator.artifact_store().read_bytes(hash_str) {
+                                Ok(raw_bytes) => {
+                                    let total_bytes = raw_bytes.len();
+                                    let offset_val = offset.unwrap_or(0);
+                                    const MAX_ARTIFACT_CHUNK: usize = 2 * 1024 * 1024;
+                                    let limit_val =
+                                        limit.unwrap_or(1024 * 1024).min(MAX_ARTIFACT_CHUNK);
+
+                                    let start = offset_val.min(total_bytes);
+                                    let end = offset_val.saturating_add(limit_val).min(total_bytes);
+                                    let chunk = &raw_bytes[start..end];
+                                    let chunk_len = chunk.len();
+                                    let has_more = end < total_bytes;
+
+                                    let base64_payload = base64::Engine::encode(
+                                        &base64::engine::general_purpose::STANDARD,
+                                        chunk,
+                                    );
+                                    let clean_sha256 = hash_str
+                                        .strip_prefix("sha256:")
+                                        .unwrap_or(hash_str)
+                                        .to_string();
+
+                                    let legacy_content = if chunk_len <= 1_048_576 {
+                                        Some(String::from_utf8_lossy(chunk).to_string())
+                                    } else {
+                                        None
+                                    };
+
+                                    let response = IpcResponse::Artifact {
+                                        artifact: artifact_rec,
+                                        content: legacy_content,
+                                        content_base64: Some(base64_payload),
+                                        encoding: Some("base64".to_string()),
+                                        offset: Some(start),
+                                        limit: Some(limit_val),
+                                        total_bytes: Some(total_bytes),
+                                        has_more: Some(has_more),
+                                        sha256: Some(clean_sha256),
+                                    };
+
+                                    let serialized_size =
+                                        serde_json::to_vec(&response).map(|v| v.len()).unwrap_or(0);
+                                    if serialized_size > DEFAULT_MAX_FRAME_SIZE {
+                                        tx.send(IpcResponse::Error {
+                                            message: format!(
+                                                "Artifact response frame size ({serialized_size} bytes) exceeds maximum limit ({DEFAULT_MAX_FRAME_SIZE} bytes)"
+                                            ),
+                                        })
+                                        .await
+                                        .map_err(|_| TransportError::ConnectionClosed)?;
+                                        continue;
+                                    }
+
+                                    tx.send(response)
+                                        .await
+                                        .map_err(|_| TransportError::ConnectionClosed)?;
+                                }
+                                Err(e) => {
+                                    tx.send(IpcResponse::Error {
+                                        message: format!("Failed to read artifact blob: {e}"),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                }
+                            }
+                        } else {
+                            tx.send(IpcResponse::Artifact {
+                                artifact: artifact_rec,
+                                content: None,
+                                content_base64: None,
+                                encoding: None,
+                                offset: None,
+                                limit: None,
+                                total_bytes: None,
+                                has_more: None,
+                                sha256: None,
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    } else {
+                        tx.send(IpcResponse::Artifact {
+                            artifact: None,
+                            content: None,
+                            content_base64: None,
+                            encoding: None,
+                            offset: None,
+                            limit: None,
+                            total_bytes: None,
+                            has_more: None,
+                            sha256: None,
+                        })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                    }
+                }
+                IpcCommand::GetTaskDiff {
+                    studio_id,
+                    task_id,
+                    offset,
+                    limit,
+                } => {
+                    if limit == Some(0) {
+                        tx.send(IpcResponse::Error {
+                            message: "Invalid argument: limit must be greater than zero"
+                                .to_string(),
+                        })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
+                        continue;
+                    }
+                    let task_lookup = {
+                        let cp = server_state.control_plane.read().await;
+                        if let Some(task) = cp.get_task(task_id) {
+                            if task.studio_id != studio_id {
+                                tx.send(IpcResponse::Error {
+                                    message: format!(
+                                        "Task {task_id} does not belong to studio {studio_id}"
+                                    ),
+                                })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                                continue;
+                            }
+                        } else {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Task {task_id} not found in studio {studio_id}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+
+                        let wt = cp.state().worktrees.values().find(|w| {
+                            w.studio_id == studio_id && w.assigned_task_id == Some(task_id)
+                        });
+                        let base_commit = wt.map(|w| w.base_commit.clone());
+                        let head_commit = wt.and_then(|w| w.last_captured_commit.clone());
+
+                        if let Some(w) = wt.filter(|w| {
+                            w.retained
+                                && w.retained_reason
+                                    .as_deref()
+                                    .unwrap_or("")
+                                    .starts_with("artifact_capture_failed:")
+                        }) {
+                            let reason = w.retained_reason.as_deref().unwrap_or("unknown");
+                            tx.send(IpcResponse::Error {
+                                message: format!(
+                                    "Artifact capture failed for task {task_id}: {reason}"
+                                ),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                            continue;
+                        }
+
+                        let mut patch_art = wt.and_then(|w| w.patch_artifact_id).and_then(|id| {
+                            cp.get_artifact(id)
+                                .filter(|a| a.studio_id == studio_id)
+                                .cloned()
+                        });
+                        if patch_art.is_none() {
+                            patch_art = cp
+                                .all_artifacts()
+                                .filter(|a| {
+                                    a.studio_id == studio_id
+                                        && a.task_id == task_id
+                                        && a.kind == ArtifactKind::Patch
+                                })
+                                .max_by_key(|a| a.created_at)
+                                .cloned();
+                        }
+                        (base_commit, head_commit, patch_art)
+                    };
+
+                    let (base_commit, head_commit, patch_art) = task_lookup;
+
+                    let diff_response = if let Some(ref patch_record) = patch_art {
+                        if let (Some(hash_str), Some(orchestrator)) = (
+                            &patch_record.content_hash,
+                            &server_state.workspace_orchestrator,
+                        ) {
+                            match orchestrator.artifact_store().read_bytes(hash_str) {
+                                Ok(patch_bytes) => {
+                                    let base_sha = base_commit.clone().unwrap_or_default();
+                                    let summary = parse_git_diff_summary(&patch_bytes, &base_sha);
+
+                                    let total_bytes = patch_bytes.len();
+                                    let offset_val = offset.unwrap_or(0);
+                                    const MAX_CHUNK_LIMIT: usize = 2 * 1024 * 1024;
+                                    let limit_val =
+                                        limit.unwrap_or(1024 * 1024).min(MAX_CHUNK_LIMIT);
+
+                                    let start = offset_val.min(total_bytes);
+                                    let end = offset_val.saturating_add(limit_val).min(total_bytes);
+                                    let chunk_slice = &patch_bytes[start..end];
+                                    let patch = if chunk_slice.len() > 1_500_000 {
+                                        String::new()
+                                    } else {
+                                        String::from_utf8_lossy(chunk_slice).to_string()
+                                    };
+                                    let has_more = end < total_bytes;
+
+                                    TaskDiffResponse {
+                                        studio_id,
+                                        task_id,
+                                        artifact_id: Some(patch_record.id),
+                                        base_commit,
+                                        head_commit,
+                                        summary,
+                                        patch,
+                                        offset: start,
+                                        limit: limit_val,
+                                        total_bytes,
+                                        has_more,
+                                        patch_base64: Some(base64::Engine::encode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            chunk_slice,
+                                        )),
+                                        encoding: Some("base64".to_string()),
+                                        patch_sha256: patch_record.content_hash.as_ref().map(|h| {
+                                            h.strip_prefix("sha256:").unwrap_or(h).to_string()
+                                        }),
+                                        chunk_bytes: Some(chunk_slice.len()),
+                                    }
+                                }
+                                Err(e) => {
+                                    tx.send(IpcResponse::Error {
+                                        message: format!("Failed to read patch artifact blob: {e}"),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            let base_sha = base_commit.clone().unwrap_or_default();
+                            TaskDiffResponse {
+                                studio_id,
+                                task_id,
+                                artifact_id: Some(patch_record.id),
+                                base_commit,
+                                head_commit,
+                                summary: DiffSummary {
+                                    files_changed: 0,
+                                    added_files: Vec::new(),
+                                    modified_files: Vec::new(),
+                                    deleted_files: Vec::new(),
+                                    renamed_files: Vec::new(),
+                                    binary_files: Vec::new(),
+                                    patch_size_bytes: 0,
+                                    base_commit: base_sha,
+                                },
+                                patch: String::new(),
+                                offset: 0,
+                                limit: limit.unwrap_or(1024 * 1024),
+                                total_bytes: 0,
+                                has_more: false,
+                                patch_base64: None,
+                                encoding: None,
+                                patch_sha256: None,
+                                chunk_bytes: Some(0),
+                            }
+                        }
+                    } else {
+                        let base_sha = base_commit.clone().unwrap_or_default();
+                        TaskDiffResponse {
+                            studio_id,
+                            task_id,
+                            artifact_id: None,
+                            base_commit,
+                            head_commit,
+                            summary: DiffSummary {
+                                files_changed: 0,
+                                added_files: Vec::new(),
+                                modified_files: Vec::new(),
+                                deleted_files: Vec::new(),
+                                renamed_files: Vec::new(),
+                                binary_files: Vec::new(),
+                                patch_size_bytes: 0,
+                                base_commit: base_sha,
+                            },
+                            patch: String::new(),
+                            offset: 0,
+                            limit: limit.unwrap_or(1024 * 1024),
+                            total_bytes: 0,
+                            has_more: false,
+                            patch_base64: None,
+                            encoding: None,
+                            patch_sha256: None,
+                            chunk_bytes: Some(0),
+                        }
+                    };
+
+                    tx.send(IpcResponse::TaskDiff {
+                        diff: diff_response,
+                    })
+                    .await
+                    .map_err(|_| TransportError::ConnectionClosed)?;
+                }
                 IpcCommand::Shutdown => {
                     if session.role == ClientRole::Admin {
                         info!(
@@ -1552,6 +1991,343 @@ async fn build_execution_readiness_report(
         defaults,
         blocking_reasons,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_capture_failure(
+    server_state: &Arc<ServerState>,
+    studio_id: StudioId,
+    task_id: TaskId,
+    agent_id: agent_studios_protocol::id::AgentId,
+    run_id: RunId,
+    wt_id: agent_studios_protocol::id::WorktreeId,
+    wt_root: &std::path::Path,
+    error_detail: &str,
+) {
+    tracing::error!(
+        task_id = %task_id,
+        run_id = %run_id,
+        worktree_id = %wt_id,
+        worktree_root = %wt_root.display(),
+        error = %error_detail,
+        "Worktree artifact capture failed; retaining worktree directory for partial work preservation"
+    );
+
+    let failure_reason = format!("artifact_capture_failed: {error_detail}");
+
+    // 1. Mark worktree as Retained in Control Plane so it is never purged by cleanup sweeps
+    {
+        let mut cp = server_state.control_plane.write().await;
+        let _ = cp.record_worktree_retained(wt_id, Some(failure_reason.clone()));
+        let envs = cp.drain_committed_events();
+        drop(cp);
+        let _ = server_state.publish_control_plane_events(envs);
+    }
+
+    // 2. Best-effort persistence of failure artifact report
+    if let Some(ref orchestrator) = server_state.workspace_orchestrator {
+        let failure_payload = serde_json::json!({
+            "task_id": task_id,
+            "run_id": run_id,
+            "worktree_id": wt_id,
+            "worktree_root": wt_root.to_string_lossy(),
+            "error": error_detail,
+            "retained": true,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        });
+        let payload_bytes = serde_json::to_vec_pretty(&failure_payload).unwrap_or_default();
+        let options = agent_studios_workspace::artifact_store::ArtifactOptions::new()
+            .with_run_id(Some(run_id))
+            .with_worktree_id(Some(wt_id))
+            .with_version(1);
+
+        if let Ok(fail_artifact) = orchestrator.artifact_store().store_artifact(
+            studio_id,
+            task_id,
+            agent_id,
+            ArtifactKind::Report,
+            format!("task-{task_id}-capture-failure.json"),
+            &payload_bytes,
+            options,
+        ) {
+            let mut cp = server_state.control_plane.write().await;
+            if cp.register_artifact_record(fail_artifact).is_ok() {
+                let envs = cp.drain_committed_events();
+                drop(cp);
+                let _ = server_state.publish_control_plane_events(envs);
+            }
+        }
+    }
+
+    // 3. Emit structured diagnostic and capture failure event
+    let _ = server_state.emit_event(
+        "diagnostic",
+        serde_json::json!({
+            "studio_id": studio_id,
+            "task_id": task_id,
+            "run_id": run_id,
+            "level": "error",
+            "message": format!(
+                "Artifact capture failed for task {task_id}: {error_detail}. Worktree retained at {}",
+                wt_root.display()
+            )
+        }),
+    );
+
+    let _ = server_state.emit_event(
+        "artifact_capture_failed",
+        serde_json::json!({
+            "studio_id": studio_id,
+            "task_id": task_id,
+            "run_id": run_id,
+            "worktree_id": wt_id,
+            "error": error_detail,
+            "retained": true,
+            "worktree_path": wt_root.to_string_lossy()
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn capture_and_register_worktree_artifact(
+    server_state: &Arc<ServerState>,
+    studio_id: StudioId,
+    task_id: TaskId,
+    agent_id: agent_studios_protocol::id::AgentId,
+    run_id: RunId,
+    wt_id: agent_studios_protocol::id::WorktreeId,
+    wt_root: &std::path::Path,
+    wt_base_sha: &str,
+) {
+    // 1. Idempotency & Pre-flight Check (Transient Read Lock)
+    {
+        let cp = server_state.control_plane.read().await;
+        if let Some(wt) = cp.get_worktree(wt_id) {
+            if wt.state == WorktreeState::ChangeCaptured && wt.patch_artifact_id.is_some() {
+                tracing::info!(
+                    task_id = %task_id,
+                    patch_id = ?wt.patch_artifact_id,
+                    "Worktree changes already captured for worktree; skipping duplicate capture"
+                );
+                return;
+            }
+            if wt.state == WorktreeState::Retained
+                && wt
+                    .retained_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("artifact_capture_failed:")
+            {
+                tracing::info!(
+                    task_id = %task_id,
+                    "Worktree capture failure already recorded; skipping duplicate capture"
+                );
+                return;
+            }
+        }
+    }
+
+    let Some(ref orchestrator) = server_state.workspace_orchestrator else {
+        tracing::warn!(
+            task_id = %task_id,
+            "No workspace orchestrator configured; skipping artifact capture"
+        );
+        return;
+    };
+
+    if !wt_root.exists() {
+        handle_capture_failure(
+            server_state,
+            studio_id,
+            task_id,
+            agent_id,
+            run_id,
+            wt_id,
+            wt_root,
+            "Worktree root directory does not exist on disk",
+        )
+        .await;
+        return;
+    }
+
+    // 2. Bounded & Idempotent Retry of capture_changes_async (No locks held)
+    const MAX_CAPTURE_ATTEMPTS: u32 = 3;
+    const INITIAL_BACKOFF_MS: u64 = 50;
+
+    let mut capture_result = None;
+    let mut last_capture_error = None;
+
+    for attempt in 1..=MAX_CAPTURE_ATTEMPTS {
+        match orchestrator
+            .capture_changes_async(wt_root.to_path_buf(), wt_base_sha.to_string())
+            .await
+        {
+            Ok(captured) => {
+                capture_result = Some(captured);
+                break;
+            }
+            Err(e) => {
+                if attempt < MAX_CAPTURE_ATTEMPTS {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        attempt,
+                        max_attempts = MAX_CAPTURE_ATTEMPTS,
+                        error = %e,
+                        "Transient failure capturing worktree changes; retrying after backoff"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        INITIAL_BACKOFF_MS * (attempt as u64),
+                    ))
+                    .await;
+                } else {
+                    last_capture_error = Some(e);
+                }
+            }
+        }
+    }
+
+    let captured = match capture_result {
+        Some(c) => c,
+        None => {
+            let err_msg = last_capture_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown capture error".to_string());
+            handle_capture_failure(
+                server_state,
+                studio_id,
+                task_id,
+                agent_id,
+                run_id,
+                wt_id,
+                wt_root,
+                &format!(
+                    "capture_changes_async failed after {MAX_CAPTURE_ATTEMPTS} attempts: {err_msg}"
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // 3. Store stats summary artifact (outside Control Plane lock)
+    let stats_rec = if !captured.stats_summary.is_empty() {
+        let options = agent_studios_workspace::artifact_store::ArtifactOptions::new()
+            .with_run_id(Some(run_id))
+            .with_worktree_id(Some(wt_id))
+            .with_version(1);
+        orchestrator
+            .artifact_store()
+            .store_artifact(
+                studio_id,
+                task_id,
+                agent_id,
+                ArtifactKind::Report,
+                format!("task-{task_id}-stats.txt"),
+                captured.stats_summary.as_bytes(),
+                options,
+            )
+            .ok()
+    } else {
+        None
+    };
+
+    // 4. Store patch artifact (outside Control Plane lock)
+    let patch_record = match orchestrator.store_patch_artifact(
+        studio_id,
+        task_id,
+        agent_id,
+        Some(run_id),
+        Some(wt_id),
+        &captured,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            handle_capture_failure(
+                server_state,
+                studio_id,
+                task_id,
+                agent_id,
+                run_id,
+                wt_id,
+                wt_root,
+                &format!("store_patch_artifact failed: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // 5. Atomic Control Plane Registration (Short Write Lock)
+    let mut cp = server_state.control_plane.write().await;
+    if let Some(_wt) = cp
+        .get_worktree(wt_id)
+        .filter(|wt| wt.state == WorktreeState::ChangeCaptured && wt.patch_artifact_id.is_some())
+    {
+        tracing::info!(
+            task_id = %task_id,
+            "Worktree changes already captured during registration lock; skipping"
+        );
+        return;
+    }
+
+    let registered_patch = match cp.register_artifact_record(patch_record) {
+        Ok(p) => p,
+        Err(e) => {
+            drop(cp);
+            handle_capture_failure(
+                server_state,
+                studio_id,
+                task_id,
+                agent_id,
+                run_id,
+                wt_id,
+                wt_root,
+                &format!("register_artifact_record failed: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let registered_stats = if let Some(stats) = stats_rec {
+        cp.register_artifact_record(stats).ok()
+    } else {
+        None
+    };
+
+    if let Err(e) = cp.record_worktree_change_captured(
+        wt_id,
+        Some(run_id),
+        wt_base_sha.to_string(),
+        captured.head_commit.clone(),
+        registered_patch.id,
+        registered_stats.map(|s| s.id),
+        captured.files_changed,
+    ) {
+        drop(cp);
+        handle_capture_failure(
+            server_state,
+            studio_id,
+            task_id,
+            agent_id,
+            run_id,
+            wt_id,
+            wt_root,
+            &format!("record_worktree_change_captured failed: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    let envs = cp.drain_committed_events();
+    drop(cp);
+    let _ = server_state.publish_control_plane_events(envs);
+    tracing::info!(
+        task_id = %task_id,
+        files_changed = captured.files_changed,
+        patch_id = %registered_patch.id,
+        "Worktree changes captured and patch artifact registered successfully"
+    );
 }
 
 async fn execute_task_lifecycle(
@@ -2167,11 +2943,11 @@ async fn execute_task_lifecycle(
 
     let workspace = agent_studios_protocol::worktree::ExecutionWorkspace::managed(
         wt_id,
-        wt_root,
+        wt_root.clone(),
         wt_cwd,
         wt_source_root,
         wt_source_cwd.clone(),
-        wt_base_sha,
+        wt_base_sha.clone(),
     );
 
     let correlation = agent_studios_external_runtime::RuntimeCorrelation::new()
@@ -2645,6 +3421,18 @@ async fn execute_task_lifecycle(
             }
             agent_studios_external_runtime::RuntimeEventKind::Completed { summary } => {
                 terminal_seen = true;
+                capture_and_register_worktree_artifact(
+                    &server_state,
+                    studio_id,
+                    task_id,
+                    agent_id,
+                    run_id,
+                    wt_id,
+                    &wt_root,
+                    &wt_base_sha,
+                )
+                .await;
+
                 let mut cp = server_state.control_plane.write().await;
                 let is_task_terminal = cp
                     .get_task(task_id)
@@ -2667,6 +3455,18 @@ async fn execute_task_lifecycle(
             }
             agent_studios_external_runtime::RuntimeEventKind::Failed { safe_error_summary } => {
                 terminal_seen = true;
+                capture_and_register_worktree_artifact(
+                    &server_state,
+                    studio_id,
+                    task_id,
+                    agent_id,
+                    run_id,
+                    wt_id,
+                    &wt_root,
+                    &wt_base_sha,
+                )
+                .await;
+
                 let mut cp = server_state.control_plane.write().await;
                 let is_task_terminal = cp
                     .get_task(task_id)
@@ -2693,6 +3493,18 @@ async fn execute_task_lifecycle(
             }
             agent_studios_external_runtime::RuntimeEventKind::Stopped => {
                 terminal_seen = true;
+                capture_and_register_worktree_artifact(
+                    &server_state,
+                    studio_id,
+                    task_id,
+                    agent_id,
+                    run_id,
+                    wt_id,
+                    &wt_root,
+                    &wt_base_sha,
+                )
+                .await;
+
                 let mut cp = server_state.control_plane.write().await;
                 let is_task_terminal = cp
                     .get_task(task_id)
@@ -2719,6 +3531,18 @@ async fn execute_task_lifecycle(
             }
             agent_studios_external_runtime::RuntimeEventKind::Interrupted { reason } => {
                 terminal_seen = true;
+                capture_and_register_worktree_artifact(
+                    &server_state,
+                    studio_id,
+                    task_id,
+                    agent_id,
+                    run_id,
+                    wt_id,
+                    &wt_root,
+                    &wt_base_sha,
+                )
+                .await;
+
                 let mut cp = server_state.control_plane.write().await;
                 let is_task_terminal = cp
                     .get_task(task_id)
@@ -2745,6 +3569,18 @@ async fn execute_task_lifecycle(
     }
 
     if !terminal_seen {
+        capture_and_register_worktree_artifact(
+            &server_state,
+            studio_id,
+            task_id,
+            agent_id,
+            run_id,
+            wt_id,
+            &wt_root,
+            &wt_base_sha,
+        )
+        .await;
+
         let mut cp = server_state.control_plane.write().await;
         if let Some(r) = cp.state().runs.get(&run_id)
             && !r.state.is_terminal()

@@ -5,7 +5,7 @@ pub mod orchestrator;
 pub mod reconciliation;
 
 pub use artifact_store::{ArtifactOptions, ArtifactStore};
-pub use capture::{CapturedChanges, capture_changes};
+pub use capture::{CapturedChanges, capture_changes, parse_git_diff_summary};
 pub use error::{ArtifactStoreError, WorkspaceError};
 pub use orchestrator::{OwnershipMismatch, WorkspaceOrchestrator, WorkspaceRecoveryReport};
 pub use reconciliation::{
