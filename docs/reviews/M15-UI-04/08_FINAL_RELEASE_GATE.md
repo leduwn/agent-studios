@@ -42,6 +42,8 @@ Milestone M15 UI-04 has completed the end-to-end integration between the VSCode 
 | **Crash Recovery Suite** | Clean restart, SIGKILL, redaction, resync, safety | `RealRustDaemonRecoveryE2E.test.ts` 5/5 passing | **PASSED** |
 | **Role Path Redaction** | Standard clients receive null DB path | Verified in Unit & E2E tests | **PASSED** |
 | **Zero Auto-Resumption** | Reconnect never auto-resumes crashed tasks | Verified in `RealRustDaemonRecoveryE2E` | **PASSED** |
+| **Remote Ubuntu CI** | GitHub Actions `ubuntu-latest` | Run 41383213765: All jobs green | **PASSED** |
+| **Remote Windows CI** | GitHub Actions `windows-latest` | Run 41383213765: All jobs green | **PASSED** |
 
 ---
 

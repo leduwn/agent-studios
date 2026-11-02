@@ -105,3 +105,18 @@ Command: npm run lint
 Output:
 ✖ 324 problems (0 errors, 324 warnings)
 ```
+
+---
+
+## 4. GitHub Actions Remote CI Verification
+
+- **Workflow**: `Agent Studios M14 UI CI` (`.github/workflows/agent-studios-m14-ui-ci.yml`)
+- **Run ID**: `41383213765` (Commit `1a081f37173b0a2426c35a48540fa5f0e3e23383`)
+- **URL**: https://github.com/leduwn/agent-studios/actions/runs/41383213765
+- **Conclusion**: **`success`** (100% Green on all platforms)
+
+| Platform Runner | Job Name | Duration | Status | Key Steps Verified |
+|---|---|---|---|---|
+| `ubuntu-latest` | Build & Test (ubuntu-latest) | 1m 55s | **SUCCESS** | Checkout pinned backend `dcbcb39b`, Build native `agsd`, Unit tests, Real daemon E2E tests (Linux), Extension host integration tests, VSIX packaging |
+| `windows-latest` | Build & Test (windows-latest) | 3m 48s | **SUCCESS** | Checkout pinned backend `dcbcb39b`, Build native `agsd.exe`, Unit tests, Real daemon E2E tests (Windows), Extension host integration tests, VSIX packaging |
+
