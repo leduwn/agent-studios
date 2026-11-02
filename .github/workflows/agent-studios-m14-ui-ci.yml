@@ -41,7 +41,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         shell: bash
         run: |
-          PINNED_SHA="cc1c3e8f398a5acfa24cf643cfcb2b043f6e163b"
+          PINNED_SHA="dcbcb39bf61225a4660be5b533cf1ffd5de14b29"
           echo "Fetching pinned backend commit: $PINNED_SHA"
           git fetch --depth=1 --force origin "$PINNED_SHA":backend-pin || {
             echo "::error::Failed to fetch pinned backend commit $PINNED_SHA. Branch fallback disabled."
@@ -64,7 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent-studios-rs
-          key: cc1c3e8f398a5acfa24cf643cfcb2b043f6e163b
+          key: dcbcb39bf61225a4660be5b533cf1ffd5de14b29
 
       - name: Build agsd native daemon
         working-directory: ${{ github.workspace }}

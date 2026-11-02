@@ -90,33 +90,33 @@ async function spawnAgsd(
   dbPath: string
 ): Promise<SpawnedDaemon> {
   const isWindows = process.platform === 'win32';
-  const uuid = crypto.randomUUID();
+  const uuid = crypto.randomUUID().slice(0, 8);
   const pipeOrSocketPath = isWindows
     ? `\\\\.\\pipe\\ags-recov-${uuid}`
-    : path.join(stateDir, `ags-recov-${uuid}.sock`);
+    : path.join(stateDir, `ags-${uuid}.sock`);
 
   const runtimePath = path.join(stateDir, `agsd-${uuid}.json`);
   const adminRuntimePath = path.join(stateDir, `agsd-admin-${uuid}.json`);
 
   const args = [
-    '--state_dir',
+    '--state-dir',
     stateDir,
-    '--db_path',
+    '--db-path',
     dbPath,
-    '--runtime_info_path',
+    '--runtime-info-path',
     runtimePath,
-    '--admin_runtime_info_path',
+    '--admin-runtime-info-path',
     adminRuntimePath,
-    '--key_id',
+    '--key-id',
     'recovery-e2e-client',
     '--durability',
     'full',
   ];
 
   if (isWindows) {
-    args.push('--pipe_name', pipeOrSocketPath);
+    args.push('--pipe-name', pipeOrSocketPath);
   } else {
-    args.push('--socket_path', pipeOrSocketPath);
+    args.push('--socket-path', pipeOrSocketPath);
   }
 
   const child = childProcess.spawn(binaryPath, args, {
@@ -124,8 +124,14 @@ async function spawnAgsd(
     env: { ...process.env, RUST_LOG: 'info', CARGO_INCREMENTAL: '0' },
   });
 
-  child.stderr?.on('data', () => {});
-  child.stdout?.on('data', () => {});
+  let stdoutData = '';
+  let stderrData = '';
+  child.stdout?.on('data', (d: Buffer) => {
+    stdoutData += d.toString();
+  });
+  child.stderr?.on('data', (d: Buffer) => {
+    stderrData += d.toString();
+  });
 
   // Wait for bootstrap discovery files
   const startTime = Date.now();
@@ -152,7 +158,12 @@ async function spawnAgsd(
     } catch {
       // Ignore
     }
-    throw new Error(`[RealRustDaemonRecoveryE2E] Daemon process failed to become ready within 12s`);
+    throw new Error(
+      `[RealRustDaemonRecoveryE2E] Daemon process failed to become ready within 12s.\n` +
+        `ExitCode: ${child.exitCode}, Signal: ${child.signalCode}\n` +
+        `Stdout: ${stdoutData.slice(-1000)}\n` +
+        `Stderr: ${stderrData.slice(-1000)}`
+    );
   }
 
   return {
@@ -210,6 +221,13 @@ describe('Tier 3: Real Compiled Rust agsd Crash Recovery E2E Test Suite (REAL_DA
   before(async () => {
     agsdBinaryPath = resolveAgsdBinaryPath();
     testRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'agsd-crash-recovery-'));
+    if (process.platform !== 'win32') {
+      try {
+        await fs.promises.chmod(testRoot, 0o700);
+      } catch {
+        // Ignore on platforms without chmod support
+      }
+    }
   });
 
   after(async () => {
