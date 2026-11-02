@@ -302,6 +302,18 @@ export interface RustTaskDiffResponse {
   chunk_bytes?: number | null;
 }
 
+export interface RustRecoveryStatusReport {
+  last_recovery_at?: string | null;
+  interrupted_tasks_count: number;
+  interrupted_runs_count: number;
+  worktrees_reconciled: number;
+  worktrees_missing: number;
+  worktrees_foreign: number;
+  database_healthy: boolean;
+  database_path?: string | null;
+  total_persisted_events: number;
+}
+
 export type RustIpcCommand =
   | {
       type: 'negotiate_capabilities';
@@ -406,6 +418,9 @@ export type RustIpcCommand =
       task_id: string;
       offset?: number;
       limit?: number;
+    }
+  | {
+      type: 'get_recovery_status';
     }
   | {
       type: 'shutdown';
@@ -518,6 +533,10 @@ export type RustIpcResponse =
   | {
       type: 'task_diff';
       diff: RustTaskDiffResponse;
+    }
+  | {
+      type: 'recovery_status';
+      status: RustRecoveryStatusReport;
     }
   | {
       type: 'shutdown_acknowledged';

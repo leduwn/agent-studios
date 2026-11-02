@@ -23,7 +23,11 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
-import { RustArtifactRecord, RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import {
+  RustArtifactRecord,
+  RustExecutionReadinessReport,
+  RustRecoveryStatusReport,
+} from './ipc/RustIpcProtocolTypes';
 import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
 
 /**
@@ -72,6 +76,7 @@ export interface AgentStudiosBridge extends vscode.Disposable {
   submitTask?(req: SubmitTaskRequest): Promise<SubmitTaskResult>;
   cancelTask?(taskId: string, reason?: string): Promise<CancelTaskResult>;
   getExecutionReadiness?(): Promise<RustExecutionReadinessReport>;
+  getRecoveryStatus?(): Promise<RustRecoveryStatusReport>;
   cancelCurrentRun(): Promise<void>;
   listSessions(): Promise<SessionSummary[]>;
   createSession(goal?: string): Promise<SessionInfo>;

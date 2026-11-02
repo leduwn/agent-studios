@@ -65,6 +65,7 @@ import {
   RustHealthResponse,
   RustExecutionReadinessReport,
   RustArtifactRecord,
+  RustRecoveryStatusReport,
 } from './ipc/RustIpcProtocolTypes';
 import {
   ArtifactClient,
@@ -616,6 +617,23 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     }
 
     return resp;
+  }
+
+  /**
+   * Retrieves durable recovery and persistence health status (M15-04 / M15-UI-04).
+   */
+  public async getRecoveryStatus(): Promise<RustRecoveryStatusReport> {
+    this.assertConnected();
+
+    const resp = await this._transport!.sendCommand({ type: 'get_recovery_status' });
+    if (resp.type === 'error') {
+      throw new Error(`Get recovery status failed: ${resp.message}`);
+    }
+    if (resp.type !== 'recovery_status') {
+      throw new Error(`Unexpected response type for get_recovery_status: ${resp.type}`);
+    }
+
+    return resp.status;
   }
 
   /**

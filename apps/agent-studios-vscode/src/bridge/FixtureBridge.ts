@@ -26,7 +26,11 @@ import {
 } from './types';
 import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
 import { CancelTaskResult } from './ipc/ExecutionClient';
-import { RustArtifactRecord, RustExecutionReadinessReport } from './ipc/RustIpcProtocolTypes';
+import {
+  RustArtifactRecord,
+  RustExecutionReadinessReport,
+  RustRecoveryStatusReport,
+} from './ipc/RustIpcProtocolTypes';
 import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
 
 /**
@@ -932,8 +936,22 @@ index 1111111..2222222 100644
       },
       blocking_reasons: [],
     };
-    /* eslint-enable @typescript-eslint/naming-convention */
   }
+
+  public async getRecoveryStatus(): Promise<RustRecoveryStatusReport> {
+    return {
+      last_recovery_at: new Date().toISOString(),
+      interrupted_tasks_count: 0,
+      interrupted_runs_count: 0,
+      worktrees_reconciled: 0,
+      worktrees_missing: 0,
+      worktrees_foreign: 0,
+      database_healthy: true,
+      database_path: null,
+      total_persisted_events: this._timeline.length,
+    };
+  }
+  /* eslint-enable @typescript-eslint/naming-convention */
 
   public async listSessions(): Promise<SessionSummary[]> {
     return this._sessions.map(s => ({
