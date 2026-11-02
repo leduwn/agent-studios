@@ -279,6 +279,7 @@ impl DatabaseLock {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .mode(0o600)
             .open(&lock_path)
             .map_err(LockError::Io)?;
@@ -301,6 +302,7 @@ impl DatabaseLock {
             )));
         }
 
+        let _ = file.set_len(0);
         let pid_info = format!(
             "pid={}\ntimestamp={}\n",
             std::process::id(),
