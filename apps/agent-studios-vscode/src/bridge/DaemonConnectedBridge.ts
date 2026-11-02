@@ -684,6 +684,29 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       this.handleIncomingDaemonEvent(rustEvent);
     });
 
+    transport.on('subscription_error', async (err: Error) => {
+      console.warn('[DaemonConnectedBridge] Subscription error received:', err.message);
+      if (
+        err.message.includes('Sequence gap') ||
+        err.message.includes('SequenceGapRecoverable') ||
+        err.message.includes('Failed to replay events')
+      ) {
+        // Sequence gap encountered (e.g. unhydrated in-memory ReplayBuffer on restarted daemon).
+        // Fall back to clean subscription without sequence filter and re-hydrate domain state.
+        try {
+          this._lastWatermark = 0;
+          this._seenEventSequences.clear();
+          await this._transport?.subscribeEvents(0);
+          await this.syncDomainState();
+        } catch (retryErr) {
+          console.error('[DaemonConnectedBridge] Re-subscription recovery failed:', retryErr);
+          this.setConnectionState('degraded');
+        }
+      } else {
+        this.setConnectionState('degraded');
+      }
+    });
+
     transport.on('error', (err: Error) => {
       console.error('[DaemonConnectedBridge] Transport error:', err);
       this.setConnectionState('degraded');
@@ -694,6 +717,22 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
         this.setConnectionState('disconnected');
       }
     });
+  }
+
+  /**
+   * Synchronizes domain state from daemon after reconnection or sequence gap recovery.
+   */
+  public async syncDomainState(): Promise<void> {
+    try {
+      const studios = await this.listStudiosInternal();
+      if (studios.length > 0) {
+        if (!this._activeStudioId || !studios.some((s) => s.id === this._activeStudioId)) {
+          this._activeStudioId = studios[0].id;
+        }
+      }
+    } catch {
+      // Non-fatal hydration attempt
+    }
   }
 
   private handleTransportStateChange(tState: TransportState): void {

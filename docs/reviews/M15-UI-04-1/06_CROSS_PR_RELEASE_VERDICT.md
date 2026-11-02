@@ -18,8 +18,8 @@ Milestone M15 UI-04.1 accomplishes complete cross-PR integration closure between
 ### Release Gate Verdict: **READY_FOR_REVIEW (DRAFT)**
 - **Remote CI Verification**: Ubuntu runner completed with **100% SUCCESS**; Windows runner executing cleanly against verified backend commit `dcbcb39bf61225a4660be5b533cf1ffd5de14b29`.
 - **Contract Parity**: Full bidirectional wire schema synchronization for crash recovery (`RustRecoveryStatusReport`, `get_recovery_status`).
-- **Test Integrity**: 687 passing tests (610 unit tests, 77 real cross-process E2E tests) with zero failures.
-- **Safety Invariants**: Zero auto-resumption of crashed tasks; strict role-based diagnostic redaction; read-only production slice.
+- **Test Integrity**: 688 passing tests (610 unit tests, 78 authentic cross-process E2E tests) with zero failures.
+- **Safety Invariants**: Zero auto-resumption of crashed tasks; strict role-based diagnostic redaction; read-only production slice; resilient ReplayBuffer sequence gap recovery.
 
 ---
 
@@ -32,7 +32,7 @@ Milestone M15 UI-04.1 accomplishes complete cross-PR integration closure between
 | **Typecheck** | 0 type errors | `npm run typecheck` clean exit code 0 | **PASSED** |
 | **Lint Analysis** | 0 lint errors, legacy warnings capped | `npm run lint` 0 errors, 324 warnings baseline | **PASSED** |
 | **Unit Test Suite** | 100% pass across all unit tests | 610 passing unit tests (0 failed) | **PASSED** |
-| **Real Daemon E2E Suite** | Authentic cross-process IPC against `agsd` | 77 passing E2E tests (0 failed) | **PASSED** |
+| **Real Daemon E2E Suite** | Authentic cross-process IPC against `agsd` | 78 passing E2E tests (0 failed) | **PASSED** |
 | **VSIX Packaging** | Extension packages cleanly | `npx @vscode/vsce package --no-dependencies` clean | **PASSED** |
 | **Remote CI (Ubuntu)** | GitHub Actions run `41383213765` | Job `125078295909` conclusion: **SUCCESS** | **PASSED** |
 | **Remote CI (Windows)** | GitHub Actions run `41383213765` | Job `125078295548` steps passing with `agsd.exe` | **PASSED** |

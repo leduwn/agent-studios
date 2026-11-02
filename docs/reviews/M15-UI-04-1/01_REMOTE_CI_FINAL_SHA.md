@@ -125,3 +125,36 @@ Commit `1a081f37173b0a2426c35a48540fa5f0e3e23383` resolved all three root causes
 | `agsd` Binary Target | `--bin agsd -p agent-studios-ipc-transport` | Compiles clean | **PASSED** |
 | Wire Schema Support | Supports `get_recovery_status` | Tested & verified in `RealRustDaemonRecoveryE2E` | **PASSED** |
 | Security Constraints | Strictly READ-ONLY on backend; no modifications to Rust | Checked: 0 edits to `agent-studios-rs/` | **PASSED** |
+
+---
+
+## 6. Ancestry, Diff & Path-Triggered CI Trigger Dynamics
+
+### Ancestry Verification
+- **Base CI Passing Commit**: `1a081f37173b0a2426c35a48540fa5f0e3e23383` (Run ID: `41383213765`, 100% Green on Ubuntu & Windows)
+- **Commit 2**: `c0d597ece04e1bc52308e7343e0d867c29e16ca7` (Parent: `1a081f3717`) — added reports in `docs/reviews/M15-UI-04-1/`
+- **Commit 3**: `596c0816eab3e570a74334baeb26e017edcd8c58` (Parent: `c0d597ece0`) — updated `docs/reviews/M15-UI-04/` reports
+
+```
+1a081f3717 (CI Run 41383213765: PASS)
+    │
+    ▼
+c0d597ece0 (docs only)
+    │
+    ▼
+596c0816ea (docs only)
+    │
+    ▼
+[Final Release HEAD] (code fix: NativeIpcTransport.ts, DaemonConnectedBridge.ts, RealRustDaemonRecoveryE2E.test.ts)
+```
+
+### Path-Trigger Explanation
+The GitHub Actions workflow `.github/workflows/agent-studios-m14-ui-ci.yml` defines the following path triggers:
+```yaml
+paths:
+  - 'apps/agent-studios-vscode/**'
+  - '.github/workflows/agent-studios-m14-ui-ci.yml'
+```
+Because commits `c0d597ece0` and `596c0816ea` only touched files under `docs/reviews/`, GitHub Actions deliberately did not trigger on those commits. 
+
+To ensure the final release HEAD achieves authoritative remote CI verification without artificial empty commits, the functional hardening for the `ReplayBuffer` sequence gap across daemon restart modifies `apps/agent-studios-vscode/src/bridge/ipc/NativeIpcTransport.ts`, `apps/agent-studios-vscode/src/bridge/DaemonConnectedBridge.ts`, and adds Test 6 to `apps/agent-studios-vscode/src/test/e2e/RealRustDaemonRecoveryE2E.test.ts`. This touches `apps/agent-studios-vscode/**` with substantive, functional code, triggering GitHub Actions naturally on the final release HEAD.

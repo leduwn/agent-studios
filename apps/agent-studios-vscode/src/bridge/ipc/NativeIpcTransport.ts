@@ -298,6 +298,13 @@ export class NativeIpcTransport extends EventEmitter {
 
   private handleCommandResponse(response: RustIpcResponse): void {
     if (!this.inFlight) {
+      if (response.type === 'error') {
+        const err = new Error(response.message);
+        this.emit('subscription_error', err);
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', err);
+        }
+      }
       return;
     }
 

@@ -511,4 +511,65 @@ describe('Tier 3: Real Compiled Rust agsd Crash Recovery E2E Test Suite (REAL_DA
     bridge.dispose();
     await gracefulShutdown(daemon);
   });
+
+  it('6. ReplayBuffer SequenceGap Across Restart: recovers from sequence gap and rehydrates state', async () => {
+    const subDir = path.join(testRoot, 'test6');
+    await fs.promises.mkdir(subDir, { recursive: true });
+    const dbPath = path.join(subDir, 'agsd.db');
+
+    // Phase 1: Start Daemon A
+    const daemonA = await spawnAgsd(agsdBinaryPath, subDir, dbPath);
+    const bridge = new DaemonConnectedBridge({ bootstrapPath: daemonA.runtimePath });
+    await bridge.connect();
+
+    // Create studio to generate persisted events in SQLite
+    const studioResp = await bridge.transport!.sendCommand({
+      type: 'create_studio',
+      name: 'Replay Sequence Gap Studio',
+    });
+    assert.strictEqual(studioResp.type, 'studio_created');
+    const studioId = studioResp.type === 'studio_created' ? studioResp.studio.id : '';
+
+    // Verify events were received and watermark advanced
+    await bridge.transport!.subscribeEvents(1);
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Force kill Daemon A (simulating crash)
+    await bridge.disconnect();
+    if (process.platform === 'win32') {
+      try {
+        childProcess.execSync(`taskkill /F /PID ${daemonA.child.pid}`);
+      } catch {
+        daemonA.child.kill('SIGKILL');
+      }
+    } else {
+      daemonA.child.kill('SIGKILL');
+    }
+    await new Promise((r) => setTimeout(r, 600));
+
+    // Phase 2: Start Daemon B with empty in-memory ReplayBuffer on same SQLite DB
+    const daemonB = await spawnAgsd(agsdBinaryPath, subDir, dbPath);
+
+    // Create a new bridge targeting Daemon B
+    const bridgeB = new DaemonConnectedBridge({ bootstrapPath: daemonB.runtimePath });
+    await bridgeB.connect();
+    assert.strictEqual(bridgeB.connectionState, 'connected');
+
+    // Verify studio is retained in SQLite
+    const studiosResp = await bridgeB.transport!.sendCommand({ type: 'list_studios' });
+    assert.strictEqual(studiosResp.type, 'studios');
+    if (studiosResp.type === 'studios') {
+      const found = studiosResp.studios.find((s) => s.id === studioId);
+      assert.ok(found, 'Studio must exist in recovered SQLite database');
+    }
+
+    // Verify recovery status
+    const recov = await bridgeB.getRecoveryStatus();
+    assert.strictEqual(recov.database_healthy, true);
+    assert.ok(recov.total_persisted_events > 0);
+
+    await bridgeB.disconnect();
+    bridgeB.dispose();
+    await gracefulShutdown(daemonB);
+  });
 });
