@@ -40,6 +40,10 @@ export class ArtifactReviewPanel implements vscode.Disposable {
   public readonly extensionUri: vscode.Uri;
   private _disposables: vscode.Disposable[] = [];
   private _options: ArtifactReviewOptions;
+  private _expectedStudioId: string;
+  private _expectedTaskId: string;
+  private _activeRequestId: number = 0;
+  private _activeAbortController: AbortController | null = null;
   private _diffData: ReassembledTaskDiff | null = null;
   private _parsedDiff: ParsedDiff | null = null;
   private _selectedFileIndex: number = 0;
@@ -57,6 +61,8 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     this._panel = panel;
     this.extensionUri = extensionUri;
     this._options = options;
+    this._expectedStudioId = options.studioId;
+    this._expectedTaskId = options.taskId;
     this._onRefreshCallback = onRefresh;
 
     this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
@@ -91,6 +97,26 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     this._updateWebview();
   }
 
+  public get isLoading(): boolean {
+    return this._isLoading;
+  }
+
+  public get activeRequestId(): number {
+    return this._activeRequestId;
+  }
+
+  public get diffData(): ReassembledTaskDiff | null {
+    return this._diffData;
+  }
+
+  public get expectedTaskId(): string {
+    return this._expectedTaskId;
+  }
+
+  public get errorMessage(): string | null {
+    return this._errorMessage;
+  }
+
   public static createOrShow(
     extensionUri: vscode.Uri,
     options: ArtifactReviewOptions,
@@ -101,15 +127,42 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       : undefined;
 
     if (ArtifactReviewPanel.currentPanel) {
-      ArtifactReviewPanel.currentPanel._panel.reveal(column || vscode.ViewColumn.Beside);
-      ArtifactReviewPanel.currentPanel._options = options;
-      ArtifactReviewPanel.currentPanel._onRefreshCallback = loadDiffFn;
-      if (loadDiffFn) {
-        ArtifactReviewPanel.currentPanel.refresh();
-      } else {
-        ArtifactReviewPanel.currentPanel._updateWebview();
+      const panel = ArtifactReviewPanel.currentPanel;
+      panel._panel.reveal(column || vscode.ViewColumn.Beside);
+
+      const isSwitchingTask =
+        panel._options.taskId !== options.taskId ||
+        panel._options.studioId !== options.studioId;
+
+      if (isSwitchingTask) {
+        // Abort in-flight retrieval for previous task
+        if (panel._activeAbortController) {
+          panel._activeAbortController.abort();
+          panel._activeAbortController = null;
+        }
+        if (!loadDiffFn) {
+          panel._activeRequestId++;
+        }
+
+        // Reset diff state immediately so stale diff data is never displayed
+        panel._diffData = null;
+        panel._parsedDiff = null;
+        panel._selectedFileIndex = 0;
+        panel._errorMessage = null;
+        panel._isLoading = !!loadDiffFn;
       }
-      return ArtifactReviewPanel.currentPanel;
+
+      panel._options = options;
+      panel._expectedStudioId = options.studioId;
+      panel._expectedTaskId = options.taskId;
+      panel._onRefreshCallback = loadDiffFn;
+
+      if (loadDiffFn) {
+        panel.refresh();
+      } else {
+        panel._updateWebview();
+      }
+      return panel;
     }
 
     const panel = vscode.window.createWebviewPanel(
@@ -137,7 +190,13 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     return ArtifactReviewPanel.currentPanel;
   }
 
-  public setDiffData(diff: ReassembledTaskDiff): void {
+  public setDiffData(diff: ReassembledTaskDiff, requestId?: number): void {
+    if (requestId !== undefined && requestId !== this._activeRequestId) {
+      return;
+    }
+    if (diff.studioId !== this._expectedStudioId || diff.taskId !== this._expectedTaskId) {
+      return;
+    }
     this._diffData = diff;
     this._parsedDiff = DiffParser.parseUnifiedDiff(diff.text);
     this._selectedFileIndex = 0;
@@ -146,7 +205,10 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     this._updateWebview();
   }
 
-  public setError(message: string): void {
+  public setError(message: string, requestId?: number): void {
+    if (requestId !== undefined && requestId !== this._activeRequestId) {
+      return;
+    }
     this._errorMessage = message;
     this._isLoading = false;
     this._updateWebview();
@@ -156,21 +218,72 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     if (!this._onRefreshCallback) {
       return;
     }
+
+    // Abort any prior in-flight fetch
+    if (this._activeAbortController) {
+      this._activeAbortController.abort();
+    }
+    const abortController = new AbortController();
+    this._activeAbortController = abortController;
+    const currentRequestId = ++this._activeRequestId;
+    const targetStudioId = this._options.studioId;
+    const targetTaskId = this._options.taskId;
+
     this._isLoading = true;
     this._errorMessage = null;
     this._updateWebview();
 
     try {
       const diff = await this._onRefreshCallback();
-      this.setDiffData(diff);
+
+      // Guard: Ignore stale response if request ID changed or was aborted
+      if (currentRequestId !== this._activeRequestId || abortController.signal.aborted) {
+        return;
+      }
+
+      // Guard: Validate diff identity matches snapshot
+      if (diff.studioId !== targetStudioId || diff.taskId !== targetTaskId) {
+        this.setError(
+          `Received diff for task ${diff.taskId} in studio ${diff.studioId}, but current view is task ${targetTaskId} in studio ${targetStudioId}.`,
+          currentRequestId
+        );
+        return;
+      }
+
+      this.setDiffData(diff, currentRequestId);
     } catch (err: unknown) {
-      this.setError((err as Error).message || 'Failed to fetch task diff.');
+      // Guard: Ignore stale errors if request ID changed or was aborted
+      if (currentRequestId !== this._activeRequestId || abortController.signal.aborted) {
+        return;
+      }
+      this.setError((err as Error).message || 'Failed to fetch task diff.', currentRequestId);
+    } finally {
+      if (this._activeAbortController === abortController) {
+        this._activeAbortController = null;
+      }
     }
   }
 
   private async _handleCopyPatch(): Promise<void> {
+    if (this._isLoading) {
+      vscode.window.showWarningMessage('Cannot copy patch while loading.');
+      return;
+    }
     if (!this._diffData || !this._diffData.text) {
       vscode.window.showWarningMessage('No diff content available to copy.');
+      return;
+    }
+    if (
+      this._diffData.studioId !== this._options.studioId ||
+      this._diffData.taskId !== this._options.taskId
+    ) {
+      vscode.window.showErrorMessage('Diff data does not match active task identity.');
+      return;
+    }
+    if (this._diffData.integrity === 'INTEGRITY_FAILED') {
+      vscode.window.showErrorMessage(
+        'Cannot copy patch: Cryptographic SHA-256 integrity verification failed.'
+      );
       return;
     }
     await vscode.env.clipboard.writeText(this._diffData.text);
@@ -178,9 +291,37 @@ export class ArtifactReviewPanel implements vscode.Disposable {
   }
 
   private async _handleExportPatch(): Promise<void> {
+    if (this._isLoading) {
+      vscode.window.showWarningMessage('Cannot export patch while loading.');
+      return;
+    }
     if (!this._diffData || !this._diffData.rawBuffer) {
       vscode.window.showWarningMessage('No patch data available to export.');
       return;
+    }
+    if (
+      this._diffData.studioId !== this._options.studioId ||
+      this._diffData.taskId !== this._options.taskId
+    ) {
+      vscode.window.showErrorMessage('Diff data does not match active task identity.');
+      return;
+    }
+    if (this._diffData.integrity === 'INTEGRITY_FAILED') {
+      vscode.window.showErrorMessage(
+        'Cannot export patch: Cryptographic SHA-256 integrity verification failed.'
+      );
+      return;
+    }
+
+    if (this._diffData.integrity === 'UNVERIFIED') {
+      const choice = await vscode.window.showWarningMessage(
+        'Warning: This patch is UNVERIFIED (daemon did not provide authoritative SHA-256 hash). Export anyway?',
+        { modal: true },
+        'Export Unverified Patch'
+      );
+      if (choice !== 'Export Unverified Patch') {
+        return;
+      }
     }
 
     const defaultUri = vscode.Uri.file(`task-${this._options.taskId}.patch`);
@@ -214,7 +355,11 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       ? files.filter((f) => f.displayPath.toLowerCase().includes(this._filterText.toLowerCase()))
       : files;
 
-    const selectedFile: ParsedDiffFile | undefined = filteredFiles[this._selectedFileIndex] || files[0];
+    const safeIndex = Math.min(
+      Math.max(0, this._selectedFileIndex),
+      Math.max(0, filteredFiles.length - 1)
+    );
+    const selectedFile: ParsedDiffFile | undefined = filteredFiles[safeIndex];
 
     // Status badge colors and labels
     const integrityBadgeHtml = this._diffData
@@ -228,6 +373,8 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     const captureStatusHtml = this._options.retainedReason
       ? `<div class="warning-banner">⚠️ <strong>Worktree Retained:</strong> ${escapeHtml(this._options.retainedReason)} (Artifact capture incomplete)</div>`
       : '';
+
+    const isActionsDisabled = this._isLoading || !this._diffData;
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -277,64 +424,79 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       align-items: center;
     }
     .header-title {
-      font-size: 1.2em;
       font-weight: 600;
+      font-size: 1.1em;
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
     }
-    .badge {
-      font-size: 0.75em;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-weight: bold;
-      text-transform: uppercase;
-    }
-    .badge.verified { background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #3fb950; }
-    .badge.failed { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #f85149; }
-    .badge.unverified { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid #d29922; }
-    .badge.added { color: var(--add-fg); }
-    .badge.deleted { color: var(--del-fg); }
-    .badge.modified { color: #d29922; }
-    .badge.renamed { color: #a371f7; }
-    .badge.binary { color: #58a6ff; }
-    .meta-details {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-      font-size: 0.85em;
-      color: var(--vscode-descriptionForeground);
-    }
-    .btn-group {
+    .header-actions {
       display: flex;
       gap: 8px;
     }
-    button {
+    .btn {
       background: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
       border: none;
       padding: 4px 10px;
-      border-radius: 2px;
       cursor: pointer;
       font-size: 0.85em;
+      border-radius: 2px;
     }
-    button:hover {
+    .btn:hover:not(:disabled) {
       background: var(--vscode-button-hoverBackground);
     }
-    button.secondary {
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .btn.secondary {
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
     }
-    button.secondary:hover {
+    .btn.secondary:hover:not(:disabled) {
       background: var(--vscode-button-secondaryHoverBackground);
     }
-    .warning-banner {
-      background: rgba(210, 153, 34, 0.15);
+    .metadata-bar {
+      display: flex;
+      gap: 16px;
+      font-size: 0.85em;
+      color: var(--vscode-descriptionForeground);
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .badge {
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 0.75em;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge.verified {
+      background: rgba(46, 160, 67, 0.2);
+      color: var(--add-fg);
+      border: 1px solid var(--add-fg);
+    }
+    .badge.failed {
+      background: rgba(248, 81, 73, 0.2);
+      color: var(--del-fg);
+      border: 1px solid var(--del-fg);
+    }
+    .badge.unverified {
+      background: rgba(187, 128, 9, 0.2);
+      color: #d29922;
       border: 1px solid #d29922;
-      color: #e3b341;
-      padding: 6px 12px;
-      border-radius: 4px;
-      font-size: 0.9em;
+    }
+    .badge.added { color: var(--add-fg); }
+    .badge.modified { color: #d29922; }
+    .badge.deleted { color: var(--del-fg); }
+    .badge.renamed { color: #58a6ff; }
+    .badge.binary { color: #a371f7; }
+    .warning-banner {
+      background: rgba(187, 128, 9, 0.15);
+      border-left: 3px solid #d29922;
+      padding: 6px 10px;
+      font-size: 0.85em;
     }
     .main-content {
       display: flex;
@@ -342,7 +504,7 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       overflow: hidden;
     }
     .sidebar {
-      width: 280px;
+      width: 300px;
       border-right: 1px solid var(--border);
       background: var(--sidebar-bg);
       display: flex;
@@ -358,17 +520,17 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       box-sizing: border-box;
       background: var(--vscode-input-background);
       color: var(--vscode-input-foreground);
-      border: 1px solid var(--vscode-input-border, #333);
+      border: 1px solid var(--vscode-input-border);
       padding: 4px 8px;
       font-size: 0.85em;
       border-radius: 2px;
     }
     .file-list {
-      flex: 1;
-      overflow-y: auto;
       list-style: none;
       margin: 0;
       padding: 0;
+      overflow-y: auto;
+      flex: 1;
     }
     .file-item {
       padding: 6px 12px;
@@ -376,7 +538,6 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 0.85em;
       border-bottom: 1px solid rgba(255, 255, 255, 0.03);
     }
     .file-item:hover {
@@ -444,19 +605,32 @@ export class ArtifactReviewPanel implements vscode.Disposable {
     .diff-line.context {
       color: var(--fg);
     }
-    .empty-state {
-      padding: 32px;
-      text-align: center;
-      color: var(--vscode-descriptionForeground);
-    }
     .binary-notice {
       padding: 24px;
       text-align: center;
       color: var(--vscode-descriptionForeground);
-      background: rgba(88, 166, 255, 0.05);
-      border: 1px dashed #58a6ff;
-      margin: 20px;
+      font-style: italic;
+    }
+    .raw-notice {
+      padding: 8px 12px;
+      font-style: italic;
+      color: var(--hunk-fg);
+    }
+    .raw-patch {
+      margin: 8px 12px;
+      padding: 12px;
+      background: var(--sidebar-bg);
+      border: 1px solid var(--border);
       border-radius: 4px;
+      overflow-x: auto;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: var(--vscode-editor-font-size, 12px);
+      line-height: 1.45;
+    }
+    .empty-state {
+      padding: 32px;
+      text-align: center;
+      color: var(--vscode-descriptionForeground);
     }
   </style>
 </head>
@@ -464,22 +638,22 @@ export class ArtifactReviewPanel implements vscode.Disposable {
   <header>
     <div class="header-row">
       <div class="header-title">
-        <span>Artifact & Diff Review</span>
+        <span>Task Artifact & Git Diff: ${escapeHtml(this._options.taskTitle || this._options.taskId)}</span>
         ${integrityBadgeHtml}
       </div>
-      <div class="btn-group">
-        <button id="copyPatchBtn" title="Copy full unified patch to clipboard">Copy Patch</button>
-        <button id="exportPatchBtn" class="secondary" title="Export patch to disk">Export Patch...</button>
-        <button id="refreshBtn" class="secondary" title="Refresh diff from daemon">Refresh</button>
+      <div class="header-actions">
+        <button class="btn secondary" id="refreshBtn">Refresh</button>
+        <button class="btn secondary" id="copyPatchBtn" ${isActionsDisabled ? 'disabled' : ''}>Copy Patch</button>
+        <button class="btn primary" id="exportPatchBtn" ${isActionsDisabled ? 'disabled' : ''}>Export Patch</button>
       </div>
     </div>
-    <div class="meta-details">
-      <span><strong>Studio:</strong> ${escapeHtml(this._options.studioId)}</span>
-      <span><strong>Task:</strong> ${escapeHtml(this._options.taskId)}</span>
+    <div class="metadata-bar">
+      <span><strong>Task ID:</strong> ${escapeHtml(this._options.taskId)}</span>
+      <span><strong>Studio ID:</strong> ${escapeHtml(this._options.studioId)}</span>
+      ${this._options.taskStatus ? `<span><strong>Status:</strong> ${escapeHtml(this._options.taskStatus)}</span>` : ''}
       ${this._options.runId ? `<span><strong>Run:</strong> ${escapeHtml(this._options.runId)}</span>` : ''}
       ${this._options.worktreeId ? `<span><strong>Worktree:</strong> ${escapeHtml(this._options.worktreeId)}</span>` : ''}
-      ${this._diffData?.baseCommit ? `<span><strong>Base Commit:</strong> <code>${escapeHtml(this._diffData.baseCommit.slice(0, 8))}</code></span>` : ''}
-      ${this._diffData ? `<span><strong>Changes:</strong> ${this._diffData.summary.files_changed} files (+${this._parsedDiff?.totalAdditions || 0} -${this._parsedDiff?.totalDeletions || 0})</span>` : ''}
+      ${this._parsedDiff ? `<span><strong>Changes:</strong> ${this._parsedDiff.totalFiles} files (+${this._parsedDiff.totalAdditions} -${this._parsedDiff.totalDeletions})</span>` : ''}
       ${this._diffData?.totalBytes ? `<span><strong>Size:</strong> ${(this._diffData.totalBytes / 1024).toFixed(1)} KB</span>` : ''}
     </div>
     ${captureStatusHtml}
@@ -505,6 +679,8 @@ export class ArtifactReviewPanel implements vscode.Disposable {
                       ? '<span class="badge renamed">[R]</span>'
                       : file.changeKind === 'binary'
                       ? '<span class="badge binary">[BIN]</span>'
+                      : file.changeKind === 'unknown'
+                      ? '<span class="badge unverified">[RAW]</span>'
                       : '<span class="badge modified">[M]</span>';
 
                   return `<li class="file-item ${isActive ? 'active' : ''}" data-index="${idx}">
@@ -536,16 +712,23 @@ export class ArtifactReviewPanel implements vscode.Disposable {
               ${
                 selectedFile.isBinary
                   ? '<div class="binary-notice">📦 Binary Git Patch — Raw byte modifications captured. Text diff not displayed.</div>'
+                  : selectedFile.changeKind === 'unknown' || (selectedFile.hunks.length === 0 && selectedFile.rawPatch)
+                  ? `<div class="raw-notice">📄 Raw Unclassified Patch Content:</div><pre class="raw-patch"><code>${escapeHtml(selectedFile.rawPatch)}</code></pre>`
                   : selectedFile.hunks.length > 0
                   ? selectedFile.hunks
-                      .map((hunk) =>
-                        hunk.lines
-                          .map(
-                            (line) =>
-                              `<div class="diff-line ${line.type}">${escapeHtml(line.text)}</div>`
-                          )
-                          .join('')
-                      )
+                      .map((hunk) => {
+                        const hunkHeader = `<div class="diff-line header">${escapeHtml(hunk.header)}</div>`;
+                        const linesHtml = hunk.lines
+                          .map((l) => {
+                            if (l.type === 'header') {
+                              return '';
+                            }
+                            const lineClass = l.type;
+                            return `<div class="diff-line ${lineClass}">${escapeHtml(l.text)}</div>`;
+                          })
+                          .join('');
+                        return hunkHeader + linesHtml;
+                      })
                       .join('')
                   : '<div class="empty-state">No line modifications recorded for this file.</div>'
               }
@@ -587,6 +770,14 @@ export class ArtifactReviewPanel implements vscode.Disposable {
   }
 
   public dispose(): void {
+    if (this._activeAbortController) {
+      this._activeAbortController.abort();
+      this._activeAbortController = null;
+    }
+    this._activeRequestId++;
+    this._diffData = null;
+    this._parsedDiff = null;
+    this._onRefreshCallback = undefined;
     ArtifactReviewPanel.currentPanel = undefined;
     this._panel.dispose();
     while (this._disposables.length) {

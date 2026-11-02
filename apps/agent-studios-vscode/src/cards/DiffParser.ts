@@ -4,11 +4,12 @@
  *
  * Parses unified Git diff strings into structured files, hunks, and line annotations.
  * Detects file additions, modifications, deletions, renames, and binary files.
+ * Handles Git C-style quoted paths with octal UTF-8 escapes (including Vietnamese diacritics).
  */
 
 /* eslint-disable @typescript-eslint/naming-convention */
 
-export type FileChangeKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'binary';
+export type FileChangeKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'binary' | 'unknown';
 
 export interface DiffHunkLine {
   type: 'addition' | 'deletion' | 'context' | 'header';
@@ -43,6 +44,106 @@ export interface ParsedDiff {
   totalAdditions: number;
   totalDeletions: number;
   totalFiles: number;
+}
+
+/**
+ * Decodes Git C-style quoted path string containing octal UTF-8 escapes (e.g. "\341\273\207").
+ */
+export function unquoteGitPath(str: string): string {
+  if (!str.startsWith('"') || !str.endsWith('"')) {
+    return str;
+  }
+  const inner = str.slice(1, -1);
+  const bytes: number[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    if (inner[i] === '\\') {
+      i++;
+      if (i >= inner.length) {
+        bytes.push('\\'.charCodeAt(0));
+        break;
+      }
+      const c = inner[i];
+      if (c >= '0' && c <= '7') {
+        let octalStr = c;
+        for (let j = 0; j < 2 && i + 1 < inner.length; j++) {
+          const nextC = inner[i + 1];
+          if (nextC >= '0' && nextC <= '7') {
+            octalStr += nextC;
+            i++;
+          } else {
+            break;
+          }
+        }
+        bytes.push(parseInt(octalStr, 8));
+      } else if (c === 'n') {
+        bytes.push(10);
+      } else if (c === 'r') {
+        bytes.push(13);
+      } else if (c === 't') {
+        bytes.push(9);
+      } else if (c === 'b') {
+        bytes.push(8);
+      } else if (c === 'f') {
+        bytes.push(12);
+      } else if (c === 'v') {
+        bytes.push(11);
+      } else if (c === 'a') {
+        bytes.push(7);
+      } else if (c === '\\' || c === '"') {
+        bytes.push(c.charCodeAt(0));
+      } else {
+        bytes.push(c.charCodeAt(0));
+      }
+    } else {
+      bytes.push(inner.charCodeAt(i));
+    }
+    i++;
+  }
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  return decoder.decode(new Uint8Array(bytes));
+}
+
+/**
+ * Strips Git a/ and b/ diff prefixes and unquotes path.
+ */
+export function cleanGitPath(raw: string): string {
+  let unquoted = unquoteGitPath(raw.trim());
+  if (unquoted.startsWith('a/')) {
+    unquoted = unquoted.substring(2);
+  } else if (unquoted.startsWith('b/')) {
+    unquoted = unquoted.substring(2);
+  }
+  return unquoted;
+}
+
+/**
+ * Parses a `diff --git ...` header line supporting quoted and unquoted paths with spaces.
+ */
+export function parseDiffGitHeader(line: string): { oldPath: string; newPath: string } | null {
+  if (!line.startsWith('diff --git ')) {
+    return null;
+  }
+  const rest = line.substring(11).trim();
+  const match = rest.match(/^(?:"((?:\\.|[^"\\])*)"|(\S+))\s+(?:"((?:\\.|[^"\\])*)"|(\S+))$/);
+  if (match) {
+    const rawOld = match[1] !== undefined ? `"${match[1]}"` : match[2];
+    const rawNew = match[3] !== undefined ? `"${match[3]}"` : match[4];
+    return {
+      oldPath: cleanGitPath(rawOld),
+      newPath: cleanGitPath(rawNew),
+    };
+  }
+
+  const unquotedMatch = rest.match(/^a\/(.+?)\s+b\/(.+)$/);
+  if (unquotedMatch) {
+    return {
+      oldPath: unquotedMatch[1],
+      newPath: unquotedMatch[2],
+    };
+  }
+
+  return null;
 }
 
 export class DiffParser {
@@ -84,9 +185,9 @@ export class DiffParser {
       if (line.startsWith('diff --git ')) {
         finalizeFile();
 
-        const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
-        const oldP = match ? match[1] : '';
-        const newP = match ? match[2] : '';
+        const paths = parseDiffGitHeader(line);
+        const oldP = paths ? paths.oldPath : '';
+        const newP = paths ? paths.newPath : '';
 
         currentFile = {
           oldPath: oldP,
@@ -110,11 +211,14 @@ export class DiffParser {
           currentFile.changeKind = 'added';
         } else if (line.startsWith('deleted file mode ')) {
           currentFile.changeKind = 'deleted';
-        } else if (line.startsWith('similarity index ') || line.startsWith('rename from ')) {
+        } else if (line.startsWith('rename from ')) {
           currentFile.changeKind = 'renamed';
+          currentFile.oldPath = cleanGitPath(line.substring(12));
         } else if (line.startsWith('rename to ')) {
-          currentFile.newPath = line.substring(10).trim();
-          currentFile.displayPath = currentFile.newPath;
+          currentFile.changeKind = 'renamed';
+          const toPath = cleanGitPath(line.substring(10));
+          currentFile.newPath = toPath;
+          currentFile.displayPath = toPath;
         } else if (line.startsWith('Binary files ') || line.startsWith('GIT binary patch')) {
           currentFile.isBinary = true;
           currentFile.changeKind = 'binary';
@@ -177,6 +281,28 @@ export class DiffParser {
     }
 
     finalizeFile();
+
+    if (files.length === 0 && rawDiff.trim().length > 0) {
+      // Unclassified / unparsed raw patch fallback
+      return {
+        files: [
+          {
+            oldPath: undefined,
+            newPath: 'RAW-DIFF',
+            displayPath: 'RAW-DIFF (Unclassified)',
+            changeKind: 'unknown',
+            isBinary: rawDiff.includes('GIT binary patch') || rawDiff.includes('\0'),
+            hunks: [],
+            additions: 0,
+            deletions: 0,
+            rawPatch: rawDiff,
+          },
+        ],
+        totalAdditions: 0,
+        totalDeletions: 0,
+        totalFiles: 1,
+      };
+    }
 
     let totalAdditions = 0;
     let totalDeletions = 0;

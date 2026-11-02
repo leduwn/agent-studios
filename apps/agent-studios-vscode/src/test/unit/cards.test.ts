@@ -444,6 +444,10 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
 
     beforeEach(() => {
       resetMockState();
+      const mockFolderUri = vscode.Uri.file('d:/workspace');
+      (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
+        { uri: mockFolderUri, name: 'workspace' },
+      ];
       bridge = new FixtureBridge();
       diffProvider = new DiffDocumentProvider(bridge);
       reviewManager = new DiffReviewManager(bridge, diffProvider);

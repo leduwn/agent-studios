@@ -65,6 +65,8 @@ export class ArtifactRetrievalError extends Error {
       | 'ENCODING_CHANGED'
       | 'TOTAL_BYTES_CHANGED'
       | 'ARTIFACT_IDENTITY_CHANGED'
+      | 'STUDIO_ID_MISMATCH'
+      | 'TASK_ID_MISMATCH'
       | 'HASH_CHANGED'
       | 'EXCEEDED_MAX_BYTES'
       | 'EXCEEDED_MAX_CHUNKS'
@@ -140,13 +142,24 @@ export class ArtifactClient {
         }
       }
 
-      const resp = await transport.sendCommand({
-        type: 'get_task_diff',
-        studio_id: studioId,
-        task_id: taskId,
-        offset: expectedOffset,
-        limit: chunkSize,
-      });
+      let resp: RustIpcResponse;
+      try {
+        resp = await transport.sendCommand({
+          type: 'get_task_diff',
+          studio_id: studioId,
+          task_id: taskId,
+          offset: expectedOffset,
+          limit: chunkSize,
+        });
+      } catch (err: unknown) {
+        if (err instanceof ArtifactRetrievalError) {
+          throw err;
+        }
+        throw new ArtifactRetrievalError(
+          `Daemon rejected get_task_diff: ${err instanceof Error ? err.message : String(err)}`,
+          'IPC_ERROR'
+        );
+      }
 
       if (resp.type === 'error') {
         throw new ArtifactRetrievalError(`Daemon rejected get_task_diff: ${resp.message}`, 'IPC_ERROR');
@@ -157,6 +170,20 @@ export class ArtifactClient {
       }
 
       const diff = resp.diff;
+
+      // 0. Validate studio & task identity
+      if (diff.studio_id && diff.studio_id !== studioId) {
+        throw new ArtifactRetrievalError(
+          `Studio identity mismatch: requested '${studioId}' but received '${diff.studio_id}'.`,
+          'STUDIO_ID_MISMATCH'
+        );
+      }
+      if (diff.task_id && diff.task_id !== taskId) {
+        throw new ArtifactRetrievalError(
+          `Task identity mismatch: requested '${taskId}' but received '${diff.task_id}'.`,
+          'TASK_ID_MISMATCH'
+        );
+      }
 
       // 1. Validate response offset
       if (diff.offset !== expectedOffset) {
@@ -282,9 +309,11 @@ export class ArtifactClient {
       rawBuffer.includes(Buffer.from('GIT binary patch')) ||
       rawBuffer.includes(Buffer.from('\0'));
 
-    // 11. Decode text without multi-byte slicing corruption
+    // 11. Decode text without multi-byte slicing corruption.
+    // Preserve full decoded text so mixed patches containing text and binary files
+    // retain complete visibility for all text diffs.
     const decoder = new TextDecoder('utf-8', { fatal: false });
-    const text = isBinary ? '' : decoder.decode(rawBuffer);
+    const text = decoder.decode(rawBuffer);
 
     return {
       studioId,
@@ -351,13 +380,24 @@ export class ArtifactClient {
         }
       }
 
-      const resp = await transport.sendCommand({
-        type: 'get_artifact',
-        studio_id: studioId,
-        artifact_id: artifactId,
-        offset: expectedOffset,
-        limit: chunkSize,
-      });
+      let resp: RustIpcResponse;
+      try {
+        resp = await transport.sendCommand({
+          type: 'get_artifact',
+          studio_id: studioId,
+          artifact_id: artifactId,
+          offset: expectedOffset,
+          limit: chunkSize,
+        });
+      } catch (err: unknown) {
+        if (err instanceof ArtifactRetrievalError) {
+          throw err;
+        }
+        throw new ArtifactRetrievalError(
+          `Daemon rejected get_artifact: ${err instanceof Error ? err.message : String(err)}`,
+          'IPC_ERROR'
+        );
+      }
 
       if (resp.type === 'error') {
         throw new ArtifactRetrievalError(`Daemon rejected get_artifact: ${resp.message}`, 'IPC_ERROR');
@@ -376,8 +416,22 @@ export class ArtifactClient {
         );
       }
 
-      if (artifactRecord === null && resp.artifact) {
-        artifactRecord = resp.artifact;
+      if (resp.artifact) {
+        if (resp.artifact.studio_id && resp.artifact.studio_id !== studioId) {
+          throw new ArtifactRetrievalError(
+            `Studio identity mismatch: requested '${studioId}' but received '${resp.artifact.studio_id}'.`,
+            'STUDIO_ID_MISMATCH'
+          );
+        }
+        if (resp.artifact.id && resp.artifact.id !== artifactId) {
+          throw new ArtifactRetrievalError(
+            `Artifact identity mismatch: requested '${artifactId}' but received '${resp.artifact.id}'.`,
+            'ARTIFACT_IDENTITY_CHANGED'
+          );
+        }
+        if (artifactRecord === null) {
+          artifactRecord = resp.artifact;
+        }
       }
 
       // Decode buffer

@@ -34,35 +34,49 @@ describe('ArtifactCommands Tests', () => {
     assert.strictEqual(context.subscriptions.length, 1);
   });
 
-  it('inspects artifact by direct Artifact object argument and executes vscode.diff when file found', async () => {
+  it('inspects artifact with associated taskId by delegating to openArtifactReview workbench', async () => {
     const artifacts = await bridge.listArtifacts();
-    const artifact = artifacts[0];
-
-    // Mock a workspace folder containing the target file
-    const mockFolderUri = vscode.Uri.file('d:/workspace');
-    (vscode.workspace as unknown as { workspaceFolders: Array<{ uri: vscode.Uri; name: string }> }).workspaceFolders = [
-      { uri: mockFolderUri, name: 'workspace' },
-    ];
+    const artifact = artifacts[0]; // has taskId: 'task-1'
 
     await vscode.commands.executeCommand('agent-studios.inspectArtifact', artifact);
 
+    const reviewCall = executedCommands.find(c => c.command === 'agent-studios.openArtifactReview');
+    assert.ok(reviewCall !== undefined, 'agent-studios.openArtifactReview should have been executed');
+    const options = reviewCall.args[0] as { studioId: string; taskId: string; taskTitle: string };
+    assert.strictEqual(options.taskId, artifact.taskId);
+
     const diffCall = executedCommands.find(c => c.command === 'vscode.diff');
-    assert.ok(diffCall !== undefined, 'vscode.diff should have been executed');
-    const [originalUri, virtualUri, title] = diffCall.args as [vscode.Uri, vscode.Uri, string];
-    assert.ok(originalUri !== undefined);
-    assert.ok(virtualUri.toString().startsWith('agent-studios-diff://artifact/'));
-    assert.ok(virtualUri.toString().includes(artifact.id));
-    assert.ok(typeof title === 'string' && title.includes(artifact.name));
+    assert.strictEqual(diffCall, undefined, 'Must NEVER call vscode.diff on unified patch');
   });
 
-  it('inspects artifact by string artifactId', async () => {
+  it('inspects standalone artifact without taskId by opening virtual text document directly', async () => {
+    const standaloneArtifact = {
+      id: 'artifact-standalone-001',
+      sessionId: 'session-m14-fixture',
+      name: 'standalone.patch',
+      path: 'diffs/standalone.patch',
+      diffContent: 'diff --git a/standalone.txt b/standalone.txt\n+standalone content\n',
+      fileCount: 1,
+      sha256: 'abc123',
+      version: 1,
+      createdAt: 1716000070000,
+    };
+    bridge.getArtifactDiff = async () => standaloneArtifact.diffContent;
+
+    await vscode.commands.executeCommand('agent-studios.inspectArtifact', standaloneArtifact);
+
+    const diffCall = executedCommands.find(c => c.command === 'vscode.diff');
+    assert.strictEqual(diffCall, undefined, 'Must NEVER execute vscode.diff');
+  });
+
+  it('inspects artifact by string artifactId delegating to openArtifactReview', async () => {
     const artifacts = await bridge.listArtifacts();
     const artifact = artifacts[0];
 
     await vscode.commands.executeCommand('agent-studios.inspectArtifact', artifact.id);
 
-    const diffCall = executedCommands.find(c => c.command === 'vscode.diff');
-    assert.ok(diffCall !== undefined);
+    const reviewCall = executedCommands.find(c => c.command === 'agent-studios.openArtifactReview');
+    assert.ok(reviewCall !== undefined);
   });
 
   it('shows error message when artifact id is not found', async () => {
@@ -81,8 +95,18 @@ describe('ArtifactCommands Tests', () => {
 
     await vscode.commands.executeCommand('agent-studios.inspectArtifact');
 
-    const diffCall = executedCommands.find(c => c.command === 'vscode.diff');
-    assert.ok(diffCall !== undefined);
+    const reviewCall = executedCommands.find(c => c.command === 'agent-studios.openArtifactReview');
+    assert.ok(reviewCall !== undefined);
+  });
+
+  it('fails closed when opening review with no active studio and no available sessions', async () => {
+    bridge.getCurrentSession = async () => null;
+    bridge.listSessions = async () => [];
+
+    await vscode.commands.executeCommand('agent-studios.openArtifactReview');
+
+    const errorMsg = mockWindowMessages.error.find(m => m.includes('No active studio available'));
+    assert.ok(errorMsg !== undefined, 'Must fail closed when no active studio is available');
   });
 
   it('opens ArtifactReviewPanel with explicit studioId and taskId options', async () => {

@@ -195,7 +195,7 @@ describe('ArtifactClient Lossless Streaming & Cryptographic Integrity Tests', ()
     const result = await ArtifactClient.fetchTaskDiff(fakeTransport, studioId, taskId);
 
     assert.strictEqual(result.isBinary, true);
-    assert.strictEqual(result.text, '');
+    assert.strictEqual(result.text, binaryHeader);
     assert.strictEqual(result.integrity, 'VERIFIED');
     assert.deepStrictEqual(result.rawBuffer, rawBuffer);
   });
@@ -649,5 +649,134 @@ describe('ArtifactClient Lossless Streaming & Cryptographic Integrity Tests', ()
     assert.strictEqual(artifacts.length, 1);
     assert.strictEqual(artifacts[0].id, 'art-001');
     assert.strictEqual(artifacts[0].kind, 'patch');
+  });
+
+  it('16. rejects studio identity mismatch with STUDIO_ID_MISMATCH', async () => {
+    const fakeTransport: IpcTransportSender = {
+      sendCommand: async (): Promise<RustIpcResponse> => ({
+        type: 'task_diff',
+        diff: {
+          studio_id: 'rogue-studio',
+          task_id: taskId,
+          summary: {
+            files_changed: 1,
+            added_files: ['file.txt'],
+            modified_files: [],
+            deleted_files: [],
+            renamed_files: [],
+            binary_files: [],
+            patch_size_bytes: 10,
+            base_commit: 'abc',
+          },
+          patch: '',
+          offset: 0,
+          limit: 1048576,
+          total_bytes: 10,
+          has_more: false,
+          patch_base64: Buffer.from('some diff\n').toString('base64'),
+          encoding: 'base64',
+          patch_sha256: null,
+          chunk_bytes: 10,
+        },
+      }),
+    };
+
+    await assert.rejects(
+      async () => ArtifactClient.fetchTaskDiff(fakeTransport, studioId, taskId),
+      (err: ArtifactRetrievalError) => {
+        assert.strictEqual(err.code, 'STUDIO_ID_MISMATCH');
+        return true;
+      }
+    );
+  });
+
+  it('17. rejects task identity mismatch with TASK_ID_MISMATCH', async () => {
+    const fakeTransport: IpcTransportSender = {
+      sendCommand: async (): Promise<RustIpcResponse> => ({
+        type: 'task_diff',
+        diff: {
+          studio_id: studioId,
+          task_id: 'rogue-task',
+          summary: {
+            files_changed: 1,
+            added_files: ['file.txt'],
+            modified_files: [],
+            deleted_files: [],
+            renamed_files: [],
+            binary_files: [],
+            patch_size_bytes: 10,
+            base_commit: 'abc',
+          },
+          patch: '',
+          offset: 0,
+          limit: 1048576,
+          total_bytes: 10,
+          has_more: false,
+          patch_base64: Buffer.from('some diff\n').toString('base64'),
+          encoding: 'base64',
+          patch_sha256: null,
+          chunk_bytes: 10,
+        },
+      }),
+    };
+
+    await assert.rejects(
+      async () => ArtifactClient.fetchTaskDiff(fakeTransport, studioId, taskId),
+      (err: ArtifactRetrievalError) => {
+        assert.strictEqual(err.code, 'TASK_ID_MISMATCH');
+        return true;
+      }
+    );
+  });
+
+  it('18. preserves visible text in mixed patch while flagging isBinary', async () => {
+    const mixedPatch =
+      'diff --git a/src/hello.ts b/src/hello.ts\n' +
+      '--- a/src/hello.ts\n' +
+      '+++ b/src/hello.ts\n' +
+      '@@ -1 +1 @@\n' +
+      '-hello\n' +
+      '+hello world\n' +
+      'diff --git a/assets/icon.png b/assets/icon.png\n' +
+      'GIT binary patch\n' +
+      'literal 16\n' +
+      'zc$@)Z0000100001\n';
+    const rawBuffer = Buffer.from(mixedPatch, 'utf8');
+    const sha256 = crypto.createHash('sha256').update(rawBuffer).digest('hex');
+
+    const fakeTransport: IpcTransportSender = {
+      sendCommand: async (): Promise<RustIpcResponse> => ({
+        type: 'task_diff',
+        diff: {
+          studio_id: studioId,
+          task_id: taskId,
+          summary: {
+            files_changed: 2,
+            added_files: [],
+            modified_files: ['src/hello.ts'],
+            deleted_files: [],
+            renamed_files: [],
+            binary_files: ['assets/icon.png'],
+            patch_size_bytes: rawBuffer.length,
+            base_commit: 'abc',
+          },
+          patch: '',
+          offset: 0,
+          limit: 1048576,
+          total_bytes: rawBuffer.length,
+          has_more: false,
+          patch_base64: rawBuffer.toString('base64'),
+          encoding: 'base64',
+          patch_sha256: sha256,
+          chunk_bytes: rawBuffer.length,
+        },
+      }),
+    };
+
+    const res = await ArtifactClient.fetchTaskDiff(fakeTransport, studioId, taskId);
+    assert.strictEqual(res.isBinary, true);
+    assert.strictEqual(res.text.includes('+hello world'), true);
+    assert.strictEqual(res.integrity, 'VERIFIED');
+    assert.strictEqual(res.sha256, sha256);
   });
 });

@@ -3,13 +3,11 @@
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
-import * as path from 'path';
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import {
   DIFF_SCHEME,
   DiffDocumentProvider,
-  findWorkspaceFileForArtifact,
 } from '../bridge/DiffDocumentProvider';
 import { Artifact } from '../bridge/types';
 import { ArtifactReviewPanel, ArtifactReviewOptions } from '../webviews/ArtifactReviewPanel';
@@ -100,18 +98,24 @@ export function registerArtifactCommands(
         'agent-studios-diff://artifact/' + artifact.id + '/' + artifact.name
       );
 
-      // 4. Check if the artifact affects an existing file in the workspace
-      const originalUri = await findWorkspaceFileForArtifact(artifact, diffContent);
-
-      if (originalUri) {
-        const fileName = path.basename(originalUri.fsPath);
-        const title = `${artifact.name} (${fileName}: Working Tree ↔ Proposed Diff)`;
-        await vscode.commands.executeCommand('vscode.diff', originalUri, virtualUri, title);
-      } else {
-        // Standalone diff: opens text document with virtual URI
-        const doc = await vscode.workspace.openTextDocument(virtualUri);
-        await vscode.window.showTextDocument(doc, { preview: true });
+      // 4. If the artifact has an associated task, open the unified patch review workbench
+      if (artifact.taskId) {
+        const session = await bridge.getCurrentSession();
+        const studioId = session?.id || artifact.sessionId;
+        if (studioId) {
+          await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+            studioId,
+            taskId: artifact.taskId,
+            taskTitle: artifact.taskTitle || artifact.name,
+          });
+          return;
+        }
       }
+
+      // 5. Standalone virtual patch viewer:
+      // Open patch document directly for review (never mislabel unified patch text as a proposed source file in vscode.diff)
+      const doc = await vscode.workspace.openTextDocument(virtualUri);
+      await vscode.window.showTextDocument(doc, { preview: true });
     }
   );
 
@@ -124,7 +128,35 @@ export function registerArtifactCommands(
         options = args as ArtifactReviewOptions;
       } else {
         const session = await bridge.getCurrentSession();
-        const studioId = session?.id || 'default-studio';
+        let studioId = session?.id;
+
+        if (!studioId) {
+          const sessions = await bridge.listSessions();
+          if (sessions.length === 1) {
+            studioId = sessions[0].id;
+          } else if (sessions.length > 1) {
+            const pick = await vscode.window.showQuickPick(
+              sessions.map((s) => ({
+                label: s.title || `Session ${s.id}`,
+                description: `Status: ${s.status} | ID: ${s.id}`,
+                session: s,
+              })),
+              { placeHolder: 'Select a studio/session for artifact & diff review' }
+            );
+            if (!pick) {
+              return;
+            }
+            studioId = pick.session.id;
+          }
+        }
+
+        if (!studioId) {
+          vscode.window.showErrorMessage(
+            'No active studio available. Please connect to a studio before reviewing artifacts.'
+          );
+          return;
+        }
+
         const tasks = await bridge.listTasks();
         if (tasks.length === 0) {
           vscode.window.showInformationMessage('No tasks available to review.');
