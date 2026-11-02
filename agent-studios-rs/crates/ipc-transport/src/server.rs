@@ -457,34 +457,29 @@ impl IpcServerBuilder {
         } else if let Some(ref db_path) = self.db_path {
             let store = agent_studios_control_plane::sqlite_store::SqliteEventStore::open(db_path)
                 .map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!(
-                            "Failed to open durable SQLite database at {}: {e}",
-                            db_path.display()
-                        ),
-                    ))
+                    TransportError::Io(std::io::Error::other(format!(
+                        "Failed to open durable SQLite database at {}: {e}",
+                        db_path.display()
+                    )))
                 })?;
             let mut cp = ControlPlane::restore_from_store(
                 agent_studios_control_plane::SystemClock,
                 agent_studios_control_plane::AnyEventStore::Sqlite(store),
             )
             .map_err(|e| {
-                TransportError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to restore control plane from store: {e}"),
-                ))
+                TransportError::Io(std::io::Error::other(format!(
+                    "Failed to restore control plane from store: {e}"
+                )))
             })?;
 
             let (interrupted_tasks, interrupted_runs) =
                 cp.reconcile_interrupted_executions().map_err(|e| {
-                    TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to reconcile interrupted executions: {e}"),
-                    ))
+                    TransportError::Io(std::io::Error::other(format!(
+                        "Failed to reconcile interrupted executions: {e}"
+                    )))
                 })?;
 
-            let total_events = cp.all_events().map(|v| v.len()).unwrap_or(0);
+            let total_events = cp.event_count().unwrap_or(0);
             let status = self.recovery_status.unwrap_or_else(|| {
                 agent_studios_ipc_protocol::RecoveryStatusReport {
                     last_recovery_at: Some(chrono::Utc::now()),
@@ -501,19 +496,19 @@ impl IpcServerBuilder {
             (Arc::new(tokio::sync::RwLock::new(cp)), status)
         } else {
             let cp = ControlPlane::new_default();
-            let status = self.recovery_status.unwrap_or_else(|| {
-                agent_studios_ipc_protocol::RecoveryStatusReport {
-                    last_recovery_at: None,
-                    interrupted_tasks_count: 0,
-                    interrupted_runs_count: 0,
-                    worktrees_reconciled: 0,
-                    worktrees_missing: 0,
-                    worktrees_foreign: 0,
-                    database_healthy: true,
-                    database_path: None,
-                    total_persisted_events: 0,
-                }
-            });
+            let status =
+                self.recovery_status
+                    .unwrap_or(agent_studios_ipc_protocol::RecoveryStatusReport {
+                        last_recovery_at: None,
+                        interrupted_tasks_count: 0,
+                        interrupted_runs_count: 0,
+                        worktrees_reconciled: 0,
+                        worktrees_missing: 0,
+                        worktrees_foreign: 0,
+                        database_healthy: true,
+                        database_path: None,
+                        total_persisted_events: 0,
+                    });
             (Arc::new(tokio::sync::RwLock::new(cp)), status)
         };
 

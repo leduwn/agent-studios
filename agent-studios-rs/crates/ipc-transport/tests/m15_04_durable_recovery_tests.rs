@@ -130,8 +130,8 @@ async fn test_sqlite_wal_persistence_survives_daemon_restart() {
             .expect("Failed to get recovery status");
         assert!(status.database_healthy);
         assert_eq!(
-            status.database_path.as_deref(),
-            Some(db_path.to_string_lossy().as_ref())
+            status.database_path, None,
+            "Standard role client must receive redacted database_path (None)"
         );
         assert_eq!(status.total_persisted_events, total_events);
 

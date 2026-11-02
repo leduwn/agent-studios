@@ -30,15 +30,42 @@ use crate::store::EventStore;
 /// Current database schema version for Control Plane SQLite store.
 pub const CURRENT_STORE_SCHEMA_VERSION: i64 = 1;
 
+/// Durability configuration mode for SQLite event store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DurabilityMode {
+    #[default]
+    Full,
+    Normal,
+}
+
+impl DurabilityMode {
+    /// Returns the validated PRAGMA synchronous value string.
+    pub const fn as_pragma_str(&self) -> &'static str {
+        match self {
+            Self::Full => "FULL",
+            Self::Normal => "NORMAL",
+        }
+    }
+}
+
 /// Durable SQLite-backed event store.
 pub struct SqliteEventStore {
     conn: Mutex<Connection>,
     db_path: Option<PathBuf>,
+    durability: DurabilityMode,
 }
 
 impl SqliteEventStore {
-    /// Opens or creates a durable SQLite event store at the given filesystem path.
+    /// Opens or creates a durable SQLite event store at the given filesystem path with default durability (Full).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with_durability(path, DurabilityMode::Full)
+    }
+
+    /// Opens or creates a durable SQLite event store at the given filesystem path with specified durability mode.
+    pub fn open_with_durability(
+        path: impl AsRef<Path>,
+        durability: DurabilityMode,
+    ) -> Result<Self, StoreError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -62,6 +89,7 @@ impl SqliteEventStore {
         let store = Self {
             conn: Mutex::new(conn),
             db_path: Some(path.to_path_buf()),
+            durability,
         };
 
         store.initialize()?;
@@ -70,6 +98,11 @@ impl SqliteEventStore {
 
     /// Creates an in-memory SQLite event store (primarily for unit tests and benchmarks).
     pub fn in_memory() -> Result<Self, StoreError> {
+        Self::in_memory_with_durability(DurabilityMode::Normal)
+    }
+
+    /// Creates an in-memory SQLite event store with specified durability mode.
+    pub fn in_memory_with_durability(durability: DurabilityMode) -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory().map_err(|e| {
             StoreError::StorageFailure(format!("Failed to open in-memory SQLite: {e}"))
         })?;
@@ -77,10 +110,16 @@ impl SqliteEventStore {
         let store = Self {
             conn: Mutex::new(conn),
             db_path: None,
+            durability,
         };
 
         store.initialize()?;
         Ok(store)
+    }
+
+    /// Returns the durability mode configured for this store.
+    pub fn durability(&self) -> DurabilityMode {
+        self.durability
     }
 
     /// Returns the database file path if disk-backed.
@@ -107,11 +146,12 @@ impl SqliteEventStore {
             }
         }
 
-        conn.execute_batch(
-            "PRAGMA synchronous = NORMAL;
+        let sync_mode = self.durability.as_pragma_str();
+        conn.execute_batch(&format!(
+            "PRAGMA synchronous = {sync_mode};
              PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;",
-        )
+             PRAGMA busy_timeout = 5000;"
+        ))
         .map_err(|e| StoreError::StorageFailure(format!("Failed to apply SQLite PRAGMAs: {e}")))?;
 
         // 2. Perform quick corruption check
@@ -151,16 +191,16 @@ impl SqliteEventStore {
             })?
             .flatten();
 
-        if let Some(version) = current_version {
-            if version > CURRENT_STORE_SCHEMA_VERSION {
-                return Err(StoreError::StorageFailure(format!(
-                    "Unsupported database schema version {version} (max supported is {CURRENT_STORE_SCHEMA_VERSION}). Migration regression prevented."
-                )));
-            }
+        if let Some(version) = current_version
+            && version > CURRENT_STORE_SCHEMA_VERSION
+        {
+            return Err(StoreError::StorageFailure(format!(
+                "Unsupported database schema version {version} (max supported is {CURRENT_STORE_SCHEMA_VERSION}). Migration regression prevented."
+            )));
         }
 
         // 5. Apply Schema Version 1 if not already applied
-        if current_version.is_none() || current_version.unwrap() < 1 {
+        if current_version.unwrap_or(0) < 1 {
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS event_store (
                     rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,7 +233,8 @@ impl SqliteEventStore {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM event_store", [], |row| row.get(0))
             .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
-        Ok(count as usize)
+        usize::try_from(count)
+            .map_err(|e| StoreError::StorageFailure(format!("Invalid event count {count}: {e}")))
     }
 }
 
@@ -253,7 +294,16 @@ impl EventStore for SqliteEventStore {
                             |row| row.get(0),
                         )
                         .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
-                    (latest as u64) + 1
+                    let latest_u64 = u64::try_from(latest).map_err(|e| {
+                        StoreError::StorageFailure(format!(
+                            "Invalid sequence in database {latest}: {e}"
+                        ))
+                    })?;
+                    latest_u64.checked_add(1).ok_or_else(|| {
+                        StoreError::StorageFailure(format!(
+                            "Sequence overflow beyond u64::MAX for studio {studio_id}"
+                        ))
+                    })?
                 }
             };
 
@@ -321,6 +371,11 @@ impl EventStore for SqliteEventStore {
                 ControlPlaneEvent::ReconciliationFailed { .. } => "reconciliation_failed",
             };
 
+            let schema_version = i64::from(envelope.schema_version);
+            let sequence = i64::try_from(envelope.sequence).map_err(|e| {
+                StoreError::StorageFailure(format!("Sequence overflow {}: {e}", envelope.sequence))
+            })?;
+
             // 5. Insert event record
             tx.execute(
                 "INSERT INTO event_store (
@@ -328,9 +383,9 @@ impl EventStore for SqliteEventStore {
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     envelope.event_id.to_string(),
-                    envelope.schema_version as i64,
+                    schema_version,
                     studio_id.to_string(),
-                    envelope.sequence as i64,
+                    sequence,
                     envelope.timestamp.to_rfc3339(),
                     event_kind,
                     payload_json,
@@ -360,6 +415,10 @@ impl EventStore for SqliteEventStore {
             .lock()
             .map_err(|_| StoreError::StorageFailure("Poisoned connection mutex".to_string()))?;
 
+        let from_seq_i64 = i64::try_from(from_sequence).map_err(|e| {
+            StoreError::StorageFailure(format!("from_sequence overflow {from_sequence}: {e}"))
+        })?;
+
         let mut stmt = conn
             .prepare(
                 "SELECT event_id, schema_version, studio_id, sequence, timestamp, event_payload
@@ -370,19 +429,16 @@ impl EventStore for SqliteEventStore {
             .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
 
         let rows = stmt
-            .query_map(
-                params![studio_id.to_string(), from_sequence as i64],
-                |row| {
-                    Ok(StoredEventRow {
-                        event_id: row.get(0)?,
-                        schema_version: row.get(1)?,
-                        studio_id: row.get(2)?,
-                        sequence: row.get(3)?,
-                        timestamp: row.get(4)?,
-                        payload: row.get(5)?,
-                    })
-                },
-            )
+            .query_map(params![studio_id.to_string(), from_seq_i64], |row| {
+                Ok(StoredEventRow {
+                    event_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    studio_id: row.get(2)?,
+                    sequence: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    payload: row.get(5)?,
+                })
+            })
             .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
 
         let mut envelopes = Vec::new();
@@ -408,7 +464,9 @@ impl EventStore for SqliteEventStore {
             )
             .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
 
-        Ok(seq as u64)
+        u64::try_from(seq).map_err(|e| {
+            StoreError::StorageFailure(format!("Invalid sequence in database {seq}: {e}"))
+        })
     }
 
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
@@ -446,6 +504,10 @@ impl EventStore for SqliteEventStore {
 
         Ok(envelopes)
     }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        self.event_count()
+    }
 }
 
 /// Internal database row structure.
@@ -477,11 +539,21 @@ impl StoredEventRow {
             StoreError::StorageFailure(format!("Corrupt event JSON in database: {e}"))
         })?;
 
+        let schema_version = u16::try_from(self.schema_version).map_err(|e| {
+            StoreError::StorageFailure(format!(
+                "Invalid schema_version {}: {e}",
+                self.schema_version
+            ))
+        })?;
+        let sequence = u64::try_from(self.sequence).map_err(|e| {
+            StoreError::StorageFailure(format!("Invalid sequence {}: {e}", self.sequence))
+        })?;
+
         Ok(EventEnvelope {
             event_id,
-            schema_version: self.schema_version as u16,
+            schema_version,
             studio_id,
-            sequence: self.sequence as u64,
+            sequence,
             timestamp,
             event,
         })
@@ -589,5 +661,38 @@ mod tests {
             assert_eq!(events[0].sequence, 1);
             assert_eq!(store.latest_sequence(studio_id).unwrap(), 1);
         }
+    }
+
+    #[test]
+    fn test_sqlite_store_durability_mode_configuration() {
+        let dir = tempdir().unwrap();
+
+        // Default open uses DurabilityMode::Full
+        let db_full_path = dir.path().join("full.db");
+        let store_full = SqliteEventStore::open(&db_full_path).unwrap();
+        assert_eq!(store_full.durability(), DurabilityMode::Full);
+        let sync_val_full: i64 = store_full
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA synchronous;", [], |r| r.get(0))
+            .unwrap();
+        // SQLite synchronous FULL is 2
+        assert_eq!(sync_val_full, 2);
+
+        // Explicit Normal durability
+        let db_normal_path = dir.path().join("normal.db");
+        let store_normal =
+            SqliteEventStore::open_with_durability(&db_normal_path, DurabilityMode::Normal)
+                .unwrap();
+        assert_eq!(store_normal.durability(), DurabilityMode::Normal);
+        let sync_val_normal: i64 = store_normal
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA synchronous;", [], |r| r.get(0))
+            .unwrap();
+        // SQLite synchronous NORMAL is 1
+        assert_eq!(sync_val_normal, 1);
     }
 }

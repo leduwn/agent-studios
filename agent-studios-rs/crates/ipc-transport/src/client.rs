@@ -214,6 +214,50 @@ impl IpcClient {
         Ok(client)
     }
 
+    /// Connects to a daemon by reading bootstrap connection details and standard credentials.
+    pub async fn connect_from_bootstrap_file(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, TransportError> {
+        let info = crate::daemon::DaemonBootstrapInfo::load_from_file(path.as_ref())?;
+        let config = ClientConfig::new(&info.key_id, info.client_key.as_bytes());
+        #[cfg(windows)]
+        {
+            Self::connect_named_pipe(&info.endpoint, config).await
+        }
+        #[cfg(unix)]
+        {
+            Self::connect_unix(&info.endpoint, config).await
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            Err(TransportError::Io(std::io::Error::other(
+                "Unsupported platform",
+            )))
+        }
+    }
+
+    /// Connects to a daemon by reading admin bootstrap connection details and administrative credentials.
+    pub async fn connect_from_admin_bootstrap_file(
+        path: impl AsRef<Path>,
+    ) -> Result<Self, TransportError> {
+        let info = crate::daemon::DaemonAdminBootstrapInfo::load_from_file(path.as_ref())?;
+        let config = ClientConfig::new(&info.key_id, info.admin_key.as_bytes());
+        #[cfg(windows)]
+        {
+            Self::connect_named_pipe(&info.endpoint, config).await
+        }
+        #[cfg(unix)]
+        {
+            Self::connect_unix(&info.endpoint, config).await
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            Err(TransportError::Io(std::io::Error::other(
+                "Unsupported platform",
+            )))
+        }
+    }
+
     fn from_stream_with_endpoint<S>(
         stream: S,
         config: ClientConfig,

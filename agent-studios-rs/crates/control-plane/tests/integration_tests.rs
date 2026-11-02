@@ -71,6 +71,10 @@ impl EventStore for FailingEventStore {
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         self.inner.all_events()
     }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        self.inner.event_count()
+    }
 }
 
 // ============================================================================

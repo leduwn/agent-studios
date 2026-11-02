@@ -1754,7 +1754,10 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::GetRecoveryStatus => {
-                    let status = server_state.recovery_status.lock().unwrap().clone();
+                    let mut status = server_state.recovery_status.lock().unwrap().clone();
+                    if session.role != ClientRole::Admin {
+                        status.database_path = None;
+                    }
                     tx.send(IpcResponse::RecoveryStatus { status })
                         .await
                         .map_err(|_| TransportError::ConnectionClosed)?;

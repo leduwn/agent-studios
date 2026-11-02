@@ -3834,6 +3834,11 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         self.store.all_events().map_err(ControlPlaneError::Store)
     }
 
+    /// Returns the total event count from the store without loading all events into memory.
+    pub fn event_count(&self) -> Result<usize, ControlPlaneError> {
+        self.store.event_count().map_err(ControlPlaneError::Store)
+    }
+
     /// Reconstructs a ControlPlane instance strictly by replaying an event sequence.
     /// Validates schema version, sequence numbers, event ID uniqueness, entity references,
     /// studio boundaries, and state transitions.
@@ -4035,6 +4040,24 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         for task_id in in_flight_tasks {
             self.transition_task_state(task_id, TaskState::Failed)?;
             interrupted_tasks_count += 1;
+        }
+
+        // 3. Auto-cancel any remaining dangling pending approvals
+        let dangling_approvals: Vec<(ApprovalId, StudioId)> = self
+            .state
+            .approvals
+            .values()
+            .filter(|a| a.state == ApprovalState::Pending)
+            .map(|a| (a.id, a.studio_id))
+            .collect();
+
+        for (approval_id, studio_id) in dangling_approvals {
+            let candidate_events = vec![ControlPlaneEvent::ApprovalResolved {
+                approval_id,
+                previous_state: ApprovalState::Pending,
+                new_state: ApprovalState::Cancelled,
+            }];
+            self.commit_transaction(studio_id, candidate_events)?;
         }
 
         Ok((interrupted_tasks_count, interrupted_runs_count))

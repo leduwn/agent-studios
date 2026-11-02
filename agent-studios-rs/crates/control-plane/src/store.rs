@@ -29,6 +29,9 @@ pub trait EventStore: Send + Sync {
 
     /// Returns all recorded events across all studios in chronological order.
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError>;
+
+    /// Returns the total count of events across all studios without loading all events into memory.
+    fn event_count(&self) -> Result<usize, StoreError>;
 }
 
 /// Thread-safe in-memory event store for development, testing, and replays.
@@ -134,7 +137,14 @@ impl EventStore for InMemoryStore {
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         Ok(self.all_events.clone())
     }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        Ok(self.all_events.len())
+    }
 }
+
+/// Type alias for backward compatibility and explicit naming.
+pub type InMemoryEventStore = InMemoryStore;
 
 impl EventStore for Box<dyn EventStore> {
     fn append_batch(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
@@ -155,6 +165,10 @@ impl EventStore for Box<dyn EventStore> {
 
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         (**self).all_events()
+    }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        (**self).event_count()
     }
 }
 
@@ -205,6 +219,14 @@ impl EventStore for AnyEventStore {
             Self::InMemory(s) => s.all_events(),
             Self::Sqlite(s) => s.all_events(),
             Self::Custom(s) => s.all_events(),
+        }
+    }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        match self {
+            Self::InMemory(s) => s.event_count(),
+            Self::Sqlite(s) => s.event_count(),
+            Self::Custom(s) => s.event_count(),
         }
     }
 }
@@ -326,5 +348,9 @@ mod tests {
         let dup_batch = vec![env2_valid];
         let dup_res = store.append_batch(&dup_batch);
         assert!(matches!(dup_res, Err(StoreError::DuplicateEventId { .. })));
+        assert_eq!(store.event_count().unwrap(), 3);
+
+        let any_store: AnyEventStore = store.into();
+        assert_eq!(any_store.event_count().unwrap(), 3);
     }
 }
