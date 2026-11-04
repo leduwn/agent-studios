@@ -3,10 +3,36 @@
 > **The Canonical Architectural Memory of Agent Studios**
 >
 > All architectural specifications, master vision documents, product principles, and subsystem guides reside here.
+>
+> **Master Index**: See [`DOCUMENTATION_INDEX.md`](DOCUMENTATION_INDEX.md) for the complete 17-document reconstructed master library, reading paths by persona, and provenance taxonomy.
 
 ---
 
-## 0. Documentation Precedence Hierarchy
+## 0. Master Reconstructed Documentation Library (M15 Consolidation)
+
+| # | Master Specification | Primary Role & Description |
+|:---:|---|---|
+| 1 | [`VISION_AND_ORIGINAL_REQUIREMENTS.md`](VISION_AND_ORIGINAL_REQUIREMENTS.md) | Official product statement, formula, 30 canonical invariants, persona definitions. |
+| 2 | [`PRODUCT_REQUIREMENTS.md`](PRODUCT_REQUIREMENTS.md) | Comprehensive PRD, zero-loss switching contract, Activity Bar rule, localization. |
+| 3 | [`AGENT_AND_IDE_EXPERIENCE.md`](AGENT_AND_IDE_EXPERIENCE.md) | Deep UX architecture for Agent Mode, IDE Mode, and shared session kernel. |
+| 4 | [`MULTI_AGENT_ORCHESTRATION.md`](MULTI_AGENT_ORCHESTRATION.md) | Cognitive Coordinator vs. Control Plane, Kahn DAG scheduling, worktrees, 3-way patches. |
+| 5 | [`RUNTIME_PROVIDER_AND_MODEL.md`](RUNTIME_PROVIDER_AND_MODEL.md) | Provider vs. Runtime decoupling, `ModelRef`, secret zeroization, external runtimes. |
+| 6 | [`AGS_CLI_TUI_SPEC.md`](AGS_CLI_TUI_SPEC.md) | Official `ags` CLI/TUI specification, headless CI mode, dynamic model discovery. |
+| 7 | [`MISSION_CONTROL_AND_UI.md`](MISSION_CONTROL_AND_UI.md) | 9-tab observability workbench specification, 7 core inquiries, truthful telemetry. |
+| 8 | [`SECURITY_AND_EXECUTION_POLICY.md`](SECURITY_AND_EXECUTION_POLICY.md) | Win32 Job Object sandboxing, 2PC stdin approval delivery, HMAC IPC, $0 token gate. |
+| 9 | [`CURRENT_IMPLEMENTATION_STATUS.md`](CURRENT_IMPLEMENTATION_STATUS.md) | Ground truth at unified HEAD: 15 Rust crates, 339+ tests, 735 TS tests, CI matrix. |
+| 10 | [`MILESTONE_HISTORY.md`](MILESTONE_HISTORY.md) | Comprehensive chronicle of Milestones M01 to M15, PRs, commits, review closures. |
+| 11 | [`REMAINING_GAPS_AND_BACKLOG.md`](REMAINING_GAPS_AND_BACKLOG.md) | Critical gap audit: operator decision gates vs. technical implementation backlog. |
+| 12 | [`ROADMAP_TO_STABLE_RELEASE.md`](ROADMAP_TO_STABLE_RELEASE.md) | Authoritative roadmap from M15 to M19 GA, Windows MSI installer, auto-updater. |
+| 13 | [`DEVELOPMENT_WORKFLOW.md`](DEVELOPMENT_WORKFLOW.md) | Contributor setup, build commands, offline test invariants, coding standards. |
+| 14 | [`UNIFIED_REPOSITORY_WORKSPACE.md`](UNIFIED_REPOSITORY_WORKSPACE.md) | Local 12-directory audit, canonical migration plan, post-approval cleanup matrix. |
+| 15 | [`UPSTREAM_RESEARCH_AND_IDEAS.md`](UPSTREAM_RESEARCH_AND_IDEAS.md) | Analysis of Codex, OpenCode, Claude Code, Code-OSS, and Agent Studios synthesis. |
+| 16 | [`PROJECT_HANDOFF.md`](PROJECT_HANDOFF.md) | Master executive handoff, 20-question onboarding FAQ, automated Resume Prompt. |
+| 17 | [`DOCUMENTATION_INDEX.md`](DOCUMENTATION_INDEX.md) | Master index: reading paths, provenance tag taxonomy, cross-references. |
+
+---
+
+## 1. Documentation Precedence Hierarchy
 
 When questions or discrepancies arise, resolve them according to this strict distinction between normative intent and implementation reality:
 
