@@ -51,8 +51,10 @@ function resolveAgsdBinaryPath(): string {
 
   const candidatePaths = [
     process.env.AGSD_BIN_PATH,
-    isWindows ? 'D:\\Projects\\agent-studios-m13\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    path.resolve(__dirname, '../../../../../../agent-studios-m13/agent-studios-rs/target/debug/agsd' + exeSuffix),
+    isWindows ? 'D:\\Projects\\agent-studios-m15-04\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
+    isWindows ? 'D:\\Projects\\agent-studios-m15-03\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
+    isWindows ? 'D:\\Projects\\agent-studios-m15-02\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
+    isWindows ? 'D:\\Projects\\agent-studios-m15\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
     path.resolve(__dirname, '../../../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
     path.resolve(__dirname, '../../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
     path.resolve(__dirname, '../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
@@ -310,6 +312,9 @@ describe('Tier 3: Real Compiled Rust agsd E2E Test Suite (AUTHENTICATED_RUST_IPC
       name: 'E2E Genuine Verification Studio',
     });
     assert.strictEqual(createResp.type, 'studio_created');
+    if (createResp.type === 'studio_created') {
+      await bridge.switchSession(createResp.studio.id);
+    }
 
     const session = await bridge.getCurrentSession();
     assert.ok(session !== null, 'Current session must not be null after studio creation');

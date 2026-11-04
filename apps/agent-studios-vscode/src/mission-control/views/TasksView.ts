@@ -57,6 +57,9 @@ export function renderTasksView(state: MissionControlState): string {
                 <button class="btn btn-secondary btn-sm" onclick="selectTask('${task.id}'); event.stopPropagation();">
                   Details
                 </button>
+                <button class="btn btn-secondary btn-sm" onclick="openArtifactReview('${task.id}'); event.stopPropagation();" title="Review Artifacts &amp; Diff">
+                  Diff
+                </button>
               </td>
             </tr>
           `;
@@ -196,6 +199,12 @@ function renderSelectedTaskDrawer(task: TaskLifecycleModel): string {
       <div class="inspector-section">
         <h4>Description</h4>
         <div class="task-desc-box">${escapeHtml(task.description || 'No description provided.')}</div>
+      </div>
+
+      <div class="inspector-section" style="margin-top: 12px;">
+        <button class="btn btn-primary" onclick="openArtifactReview('${escapeHtml(task.id)}')">
+          <span class="codicon codicon-diff"></span> Review Artifacts &amp; Diff
+        </button>
       </div>
 
       ${

@@ -1,0 +1,742 @@
+/**
+ * Agent Studios — Lossless Binary-Safe Artifact & Diff Client
+ * Milestone M15 UI-03: Lossless Pagination & Cryptographic Integrity
+ *
+ * Implements byte-accurate streaming reassembly for unified patches and binary artifacts:
+ * - Base64 chunk decoding into Buffer/Uint8Array (prevents UTF-8 slicing corruption)
+ * - Strict chunk offset & chunk_bytes validation
+ * - Anti-infinite loop zero-progress detection
+ * - Aggregate memory and chunk count bounds (Anti-DoS)
+ * - True cryptographic Node.js crypto SHA-256 calculation in trusted Extension Host
+ * - Detection of binary Git patches and multi-byte Unicode text
+ * - AbortSignal cancellation support
+ */
+
+/* eslint-disable @typescript-eslint/naming-convention */
+
+import * as crypto from 'crypto';
+import { isPathTraversal } from '../../cards/DiffParser';
+import {
+  RustArtifactRecord,
+  RustDiffSummary,
+  RustIpcCommand,
+  RustIpcResponse,
+} from './RustIpcProtocolTypes';
+
+export type IntegrityStatus = 'VERIFIED' | 'INTEGRITY_FAILED' | 'UNVERIFIED';
+
+export interface ReassembledTaskDiff {
+  studioId: string;
+  taskId: string;
+  artifactId?: string | null;
+  baseCommit?: string | null;
+  headCommit?: string | null;
+  summary: RustDiffSummary;
+  rawBuffer: Buffer;
+  text: string;
+  isBinary: boolean;
+  sha256: string;
+  expectedSha256?: string | null;
+  integrity: IntegrityStatus;
+  totalBytes: number;
+  chunkCount: number;
+}
+
+export interface ReassembledArtifactContent {
+  studioId: string;
+  artifactId: string;
+  artifact?: RustArtifactRecord | null;
+  rawBuffer: Buffer;
+  text?: string;
+  isBinary: boolean;
+  sha256: string;
+  expectedSha256?: string | null;
+  integrity: IntegrityStatus;
+  totalBytes: number;
+  chunkCount: number;
+}
+
+export class ArtifactRetrievalError extends Error {
+  constructor(
+    message: string,
+    public readonly code:
+      | 'OFFSET_MISMATCH'
+      | 'CHUNK_BYTES_MISMATCH'
+      | 'ZERO_PROGRESS'
+      | 'ENCODING_CHANGED'
+      | 'TOTAL_BYTES_CHANGED'
+      | 'ARTIFACT_IDENTITY_CHANGED'
+      | 'STUDIO_ID_MISMATCH'
+      | 'TASK_ID_MISMATCH'
+      | 'HASH_CHANGED'
+      | 'EXCEEDED_MAX_BYTES'
+      | 'EXCEEDED_MAX_CHUNKS'
+      | 'ABORTED'
+      | 'SESSION_CHANGED'
+      | 'TRUNCATED_DOWNLOAD'
+      | 'INTEGRITY_FAILED'
+      | 'IPC_ERROR'
+      | 'INVALID_ARTIFACT_ID'
+      | 'PATH_TRAVERSAL_DETECTED'
+  ) {
+    super(message);
+    this.name = 'ArtifactRetrievalError';
+  }
+}
+
+export interface FetchOptions {
+  chunkSize?: number; // default 1 MiB (1048576)
+  maxBytes?: number;  // default 100 MiB (104857600)
+  maxChunks?: number; // default 1024
+  timeoutMs?: number; // default 30000 ms
+  signal?: AbortSignal;
+  sessionId?: string | null;
+}
+
+export interface IpcTransportSender {
+  sendCommand: (cmd: RustIpcCommand, timeoutMs?: number) => Promise<RustIpcResponse>;
+  getSessionId?: () => string | null;
+}
+
+export class ArtifactClient {
+  public static readonly DEFAULT_CHUNK_SIZE = 1024 * 1024; // 1 MiB
+  public static readonly DEFAULT_MAX_BYTES = 100 * 1024 * 1024; // 100 MiB limit
+  public static readonly ABSOLUTE_MAX_BYTES = 100 * 1024 * 1024; // 100 MiB hard limit
+  public static readonly DEFAULT_MAX_CHUNKS = 1024;
+  public static readonly DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
+
+  private static readonly _diffCache = new Map<string, ReassembledTaskDiff>();
+  private static readonly _artifactCache = new Map<string, ReassembledArtifactContent>();
+
+  /**
+   * Caches a reassembled task diff. Refuses to cache INTEGRITY_FAILED diffs.
+   */
+  public static cacheTaskDiff(diff: ReassembledTaskDiff): void {
+    if (diff.integrity === 'INTEGRITY_FAILED') {
+      return;
+    }
+    const key = `${diff.studioId}:${diff.taskId}`;
+    this._diffCache.set(key, diff);
+  }
+
+  /**
+   * Retrieves a cached task diff for given studio and task.
+   */
+  public static getCachedTaskDiff(studioId: string, taskId: string): ReassembledTaskDiff | undefined {
+    return this._diffCache.get(`${studioId}:${taskId}`);
+  }
+
+  /**
+   * Caches reassembled artifact content. Refuses to cache INTEGRITY_FAILED artifacts.
+   */
+  public static cacheArtifactContent(artifact: ReassembledArtifactContent): void {
+    if (artifact.integrity === 'INTEGRITY_FAILED') {
+      return;
+    }
+    const key = `${artifact.studioId}:${artifact.artifactId}`;
+    this._artifactCache.set(key, artifact);
+  }
+
+  /**
+   * Retrieves cached artifact content for given studio and artifact.
+   */
+  public static getCachedArtifactContent(studioId: string, artifactId: string): ReassembledArtifactContent | undefined {
+    return this._artifactCache.get(`${studioId}:${artifactId}`);
+  }
+
+  /**
+   * Invalidates cached artifacts and diffs for a studio, task, or globally.
+   * Prevents cross-studio or stale task data retention.
+   */
+  public static invalidateCache(studioId?: string, taskId?: string): void {
+    if (!studioId && !taskId) {
+      this._diffCache.clear();
+      this._artifactCache.clear();
+      return;
+    }
+
+    if (studioId && !taskId) {
+      for (const [key] of this._diffCache) {
+        if (key.startsWith(`${studioId}:`)) {
+          this._diffCache.delete(key);
+        }
+      }
+      for (const [key] of this._artifactCache) {
+        if (key.startsWith(`${studioId}:`)) {
+          this._artifactCache.delete(key);
+        }
+      }
+      return;
+    }
+
+    if (studioId && taskId) {
+      this._diffCache.delete(`${studioId}:${taskId}`);
+    }
+  }
+
+  /**
+   * Clears entire artifact and diff cache.
+   */
+  public static clearCache(): void {
+    this._diffCache.clear();
+    this._artifactCache.clear();
+  }
+
+  /**
+   * Fetches and lossless-reassembles the complete task diff across paginated chunks.
+   * Performs byte-accurate SHA-256 integrity verification.
+   */
+  public static async fetchTaskDiff(
+    transport: IpcTransportSender,
+    studioId: string,
+    taskId: string,
+    options?: FetchOptions
+  ): Promise<ReassembledTaskDiff> {
+    if (isPathTraversal(studioId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in studioId: '${studioId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+    if (isPathTraversal(taskId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in taskId: '${taskId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+
+    const chunkSize = options?.chunkSize ?? this.DEFAULT_CHUNK_SIZE;
+    const maxBytes = options?.maxBytes ?? this.DEFAULT_MAX_BYTES;
+    const maxChunks = options?.maxChunks ?? this.DEFAULT_MAX_CHUNKS;
+    const timeoutMs = options?.timeoutMs ?? this.DEFAULT_TIMEOUT_MS;
+    const signal = options?.signal;
+    const initialSessionId = options?.sessionId ?? transport.getSessionId?.() ?? null;
+
+    let expectedOffset = 0;
+    let accumulatedBytes = 0;
+    const chunks: Buffer[] = [];
+    let expectedSha256: string | null = null;
+    let totalBytes: number | null = null;
+    let summary: RustDiffSummary | null = null;
+    let artifactId: string | null = null;
+    let baseCommit: string | null = null;
+    let headCommit: string | null = null;
+    let encoding: string | null = null;
+    let loopCount = 0;
+
+    while (true) {
+      if (signal?.aborted) {
+        throw new ArtifactRetrievalError('Task diff download was aborted by client.', 'ABORTED');
+      }
+
+      if (initialSessionId && transport.getSessionId) {
+        const currentSession = transport.getSessionId();
+        if (currentSession && currentSession !== initialSessionId) {
+          throw new ArtifactRetrievalError(
+            'Daemon transport session reconnected during artifact retrieval.',
+            'SESSION_CHANGED'
+          );
+        }
+      }
+
+      let cleanupAbort: (() => void) | undefined;
+      const abortPromise = signal
+        ? new Promise<never>((_, reject) => {
+            const onAbort = () =>
+              reject(new ArtifactRetrievalError('Task diff download was aborted by client.', 'ABORTED'));
+            if (signal.aborted) {
+              onAbort();
+            } else {
+              signal.addEventListener('abort', onAbort, { once: true });
+              cleanupAbort = () => signal.removeEventListener('abort', onAbort);
+            }
+          })
+        : null;
+
+      let resp: RustIpcResponse;
+      try {
+        const sendPromise = transport.sendCommand(
+          {
+            type: 'get_task_diff',
+            studio_id: studioId,
+            task_id: taskId,
+            offset: expectedOffset,
+            limit: chunkSize,
+          },
+          timeoutMs
+        );
+
+        resp = abortPromise ? await Promise.race([sendPromise, abortPromise]) : await sendPromise;
+      } catch (err: unknown) {
+        if (err instanceof ArtifactRetrievalError) {
+          throw err;
+        }
+        throw new ArtifactRetrievalError(
+          `Daemon rejected get_task_diff: ${err instanceof Error ? err.message : String(err)}`,
+          'IPC_ERROR'
+        );
+      } finally {
+        cleanupAbort?.();
+      }
+
+      if (resp.type === 'error') {
+        throw new ArtifactRetrievalError(`Daemon rejected get_task_diff: ${resp.message}`, 'IPC_ERROR');
+      }
+
+      if (resp.type !== 'task_diff') {
+        throw new ArtifactRetrievalError(`Unexpected response from get_task_diff: ${JSON.stringify(resp)}`, 'IPC_ERROR');
+      }
+
+      const diff = resp.diff;
+
+      // Early check on declared total_bytes bound
+      if (diff.total_bytes !== undefined && diff.total_bytes !== null && diff.total_bytes > maxBytes) {
+        throw new ArtifactRetrievalError(
+          `Diff total bytes exceeded maximum aggregate memory limit (${diff.total_bytes} > ${maxBytes} bytes).`,
+          'EXCEEDED_MAX_BYTES'
+        );
+      }
+
+      // 0. Validate studio & task identity
+      if (diff.studio_id && diff.studio_id !== studioId) {
+        throw new ArtifactRetrievalError(
+          `Studio identity mismatch: requested '${studioId}' but received '${diff.studio_id}'.`,
+          'STUDIO_ID_MISMATCH'
+        );
+      }
+      if (diff.task_id && diff.task_id !== taskId) {
+        throw new ArtifactRetrievalError(
+          `Task identity mismatch: requested '${taskId}' but received '${diff.task_id}'.`,
+          'TASK_ID_MISMATCH'
+        );
+      }
+
+      // 1. Validate response offset
+      if (diff.offset !== expectedOffset) {
+        throw new ArtifactRetrievalError(
+          `Chunk offset mismatch: expected offset ${expectedOffset}, but daemon returned ${diff.offset}.`,
+          'OFFSET_MISMATCH'
+        );
+      }
+
+      // 2. Decode raw byte buffer
+      let chunkBuffer: Buffer;
+      if (diff.patch_base64 !== undefined && diff.patch_base64 !== null) {
+        const chunkEncoding = diff.encoding ?? 'base64';
+        if (encoding === null) {
+          encoding = chunkEncoding;
+        } else if (encoding !== chunkEncoding) {
+          throw new ArtifactRetrievalError(
+            `Inconsistent chunk encoding: was '${encoding}' but received '${chunkEncoding}'.`,
+            'ENCODING_CHANGED'
+          );
+        }
+        chunkBuffer = Buffer.from(diff.patch_base64, 'base64');
+      } else {
+        // Fallback for older daemons
+        chunkBuffer = Buffer.from(diff.patch || '', 'utf8');
+      }
+
+      // 3. Validate chunk_bytes if provided
+      if (diff.chunk_bytes !== undefined && diff.chunk_bytes !== null) {
+        if (diff.chunk_bytes !== chunkBuffer.length) {
+          throw new ArtifactRetrievalError(
+            `chunk_bytes metadata mismatch: report stated ${diff.chunk_bytes} bytes, but decoded ${chunkBuffer.length} bytes.`,
+            'CHUNK_BYTES_MISMATCH'
+          );
+        }
+      }
+
+      // 4. Anti-infinite loop zero progress detection
+      if (chunkBuffer.length === 0 && diff.has_more) {
+        throw new ArtifactRetrievalError(
+          `Zero-progress chunk received at offset ${expectedOffset} while has_more=true. Aborting infinite pagination loop.`,
+          'ZERO_PROGRESS'
+        );
+      }
+
+      // 5. Invariant consistency across chunks
+      if (totalBytes === null) {
+        totalBytes = diff.total_bytes;
+        summary = diff.summary;
+        artifactId = diff.artifact_id ?? null;
+        baseCommit = diff.base_commit ?? null;
+        headCommit = diff.head_commit ?? null;
+      } else if (totalBytes !== diff.total_bytes) {
+        throw new ArtifactRetrievalError(
+          `total_bytes changed during retrieval: was ${totalBytes}, now ${diff.total_bytes}.`,
+          'TOTAL_BYTES_CHANGED'
+        );
+      }
+
+      if (expectedSha256 === null) {
+        expectedSha256 = diff.patch_sha256 ?? null;
+      } else if (diff.patch_sha256 && expectedSha256 !== diff.patch_sha256) {
+        throw new ArtifactRetrievalError(
+          `patch_sha256 changed during retrieval: was '${expectedSha256}', now '${diff.patch_sha256}'.`,
+          'HASH_CHANGED'
+        );
+      }
+
+      // 6. Memory and chunk bounds
+      accumulatedBytes += chunkBuffer.length;
+      if (accumulatedBytes > maxBytes) {
+        throw new ArtifactRetrievalError(
+          `Diff retrieval exceeded maximum aggregate memory limit (${accumulatedBytes} > ${maxBytes} bytes).`,
+          'EXCEEDED_MAX_BYTES'
+        );
+      }
+
+      loopCount++;
+      if (loopCount > maxChunks) {
+        throw new ArtifactRetrievalError(
+          `Diff retrieval exceeded maximum allowed chunk count (${loopCount} > ${maxChunks}).`,
+          'EXCEEDED_MAX_CHUNKS'
+        );
+      }
+
+      chunks.push(chunkBuffer);
+      expectedOffset += chunkBuffer.length;
+
+      if (!diff.has_more || (totalBytes !== null && expectedOffset >= totalBytes)) {
+        break;
+      }
+    }
+
+    // 7. Verify total assembled bytes
+    if (totalBytes !== null && expectedOffset < totalBytes) {
+      throw new ArtifactRetrievalError(
+        `Truncated diff download: expected ${totalBytes} bytes, but only received ${expectedOffset} bytes.`,
+        'TRUNCATED_DOWNLOAD'
+      );
+    }
+
+    const rawBuffer = Buffer.concat(chunks);
+
+    // 8. Compute genuine SHA-256 digest
+    const sha256 = crypto.createHash('sha256').update(rawBuffer).digest('hex').toLowerCase();
+
+    // 9. Evaluate cryptographic integrity (tri-state gating)
+    let integrity: IntegrityStatus = 'UNVERIFIED';
+    if (expectedSha256 && expectedSha256.trim().length > 0) {
+      const normalizedExpected = expectedSha256.startsWith('sha256:')
+        ? expectedSha256.slice(7).toLowerCase()
+        : expectedSha256.toLowerCase();
+
+      const isHex64 = /^[0-9a-f]{64}$/.test(normalizedExpected);
+      if (!isHex64 || sha256 !== normalizedExpected) {
+        integrity = 'INTEGRITY_FAILED';
+      } else {
+        integrity = 'VERIFIED';
+      }
+    }
+
+    // 10. Detect binary patch
+    const isBinary =
+      rawBuffer.includes(Buffer.from('GIT binary patch')) ||
+      rawBuffer.includes(Buffer.from('\0'));
+
+    // 11. Decode text without multi-byte slicing corruption.
+    // Preserve full decoded text so mixed patches containing text and binary files
+    // retain complete visibility for all text diffs.
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const text = decoder.decode(rawBuffer);
+
+    const result: ReassembledTaskDiff = {
+      studioId,
+      taskId,
+      artifactId,
+      baseCommit,
+      headCommit,
+      summary: summary || {
+        files_changed: 0,
+        added_files: [],
+        modified_files: [],
+        deleted_files: [],
+        renamed_files: [],
+        binary_files: [],
+        patch_size_bytes: 0,
+        base_commit: '',
+      },
+      rawBuffer,
+      text,
+      isBinary,
+      sha256,
+      expectedSha256,
+      integrity,
+      totalBytes: rawBuffer.length,
+      chunkCount: chunks.length,
+    };
+
+    this.cacheTaskDiff(result);
+    return result;
+  }
+
+  /**
+   * Fetches and lossless-reassembles a specific artifact's binary/text content.
+   */
+  public static async fetchArtifactContent(
+    transport: IpcTransportSender,
+    studioId: string,
+    artifactId: string,
+    options?: FetchOptions
+  ): Promise<ReassembledArtifactContent> {
+    if (isPathTraversal(studioId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in studioId: '${studioId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+    if (isPathTraversal(artifactId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in artifactId: '${artifactId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+
+    const chunkSize = options?.chunkSize ?? this.DEFAULT_CHUNK_SIZE;
+    const maxBytes = options?.maxBytes ?? this.DEFAULT_MAX_BYTES;
+    const maxChunks = options?.maxChunks ?? this.DEFAULT_MAX_CHUNKS;
+    const timeoutMs = options?.timeoutMs ?? this.DEFAULT_TIMEOUT_MS;
+    const signal = options?.signal;
+    const initialSessionId = options?.sessionId ?? transport.getSessionId?.() ?? null;
+
+    let expectedOffset = 0;
+    let accumulatedBytes = 0;
+    const chunks: Buffer[] = [];
+    let expectedSha256: string | null = null;
+    let totalBytes: number | null = null;
+    let artifactRecord: RustArtifactRecord | null = null;
+    let loopCount = 0;
+
+    while (true) {
+      if (signal?.aborted) {
+        throw new ArtifactRetrievalError('Artifact download was aborted by client.', 'ABORTED');
+      }
+
+      if (initialSessionId && transport.getSessionId) {
+        const currentSession = transport.getSessionId();
+        if (currentSession && currentSession !== initialSessionId) {
+          throw new ArtifactRetrievalError(
+            'Daemon transport session reconnected during artifact retrieval.',
+            'SESSION_CHANGED'
+          );
+        }
+      }
+
+      let cleanupAbort: (() => void) | undefined;
+      const abortPromise = signal
+        ? new Promise<never>((_, reject) => {
+            const onAbort = () =>
+              reject(new ArtifactRetrievalError('Artifact download was aborted by client.', 'ABORTED'));
+            if (signal.aborted) {
+              onAbort();
+            } else {
+              signal.addEventListener('abort', onAbort, { once: true });
+              cleanupAbort = () => signal.removeEventListener('abort', onAbort);
+            }
+          })
+        : null;
+
+      let resp: RustIpcResponse;
+      try {
+        const sendPromise = transport.sendCommand(
+          {
+            type: 'get_artifact',
+            studio_id: studioId,
+            artifact_id: artifactId,
+            offset: expectedOffset,
+            limit: chunkSize,
+          },
+          timeoutMs
+        );
+
+        resp = abortPromise ? await Promise.race([sendPromise, abortPromise]) : await sendPromise;
+      } catch (err: unknown) {
+        if (err instanceof ArtifactRetrievalError) {
+          throw err;
+        }
+        throw new ArtifactRetrievalError(
+          `Daemon rejected get_artifact: ${err instanceof Error ? err.message : String(err)}`,
+          'IPC_ERROR'
+        );
+      } finally {
+        cleanupAbort?.();
+      }
+
+      if (resp.type === 'error') {
+        throw new ArtifactRetrievalError(`Daemon rejected get_artifact: ${resp.message}`, 'IPC_ERROR');
+      }
+
+      if (resp.type !== 'artifact') {
+        throw new ArtifactRetrievalError(`Unexpected response from get_artifact: ${JSON.stringify(resp)}`, 'IPC_ERROR');
+      }
+
+      // Early check on declared total_bytes bound
+      if (resp.total_bytes !== undefined && resp.total_bytes !== null && resp.total_bytes > maxBytes) {
+        throw new ArtifactRetrievalError(
+          `Artifact total bytes exceeded maximum allowed limit (${resp.total_bytes} > ${maxBytes}).`,
+          'EXCEEDED_MAX_BYTES'
+        );
+      }
+
+      // Check offset
+      const respOffset = resp.offset ?? 0;
+      if (respOffset !== expectedOffset) {
+        throw new ArtifactRetrievalError(
+          `Chunk offset mismatch: expected ${expectedOffset}, but daemon returned ${respOffset}.`,
+          'OFFSET_MISMATCH'
+        );
+      }
+
+      if (resp.artifact) {
+        if (resp.artifact.studio_id && resp.artifact.studio_id !== studioId) {
+          throw new ArtifactRetrievalError(
+            `Studio identity mismatch: requested '${studioId}' but received '${resp.artifact.studio_id}'.`,
+            'STUDIO_ID_MISMATCH'
+          );
+        }
+        if (resp.artifact.id && resp.artifact.id !== artifactId) {
+          throw new ArtifactRetrievalError(
+            `Artifact identity mismatch: requested '${artifactId}' but received '${resp.artifact.id}'.`,
+            'ARTIFACT_IDENTITY_CHANGED'
+          );
+        }
+        if (artifactRecord === null) {
+          artifactRecord = resp.artifact;
+        }
+      }
+
+      // Decode buffer
+      let chunkBuffer: Buffer;
+      if (resp.content_base64 !== undefined && resp.content_base64 !== null) {
+        chunkBuffer = Buffer.from(resp.content_base64, 'base64');
+      } else {
+        chunkBuffer = Buffer.from(resp.content || '', 'utf8');
+      }
+
+      if (chunkBuffer.length === 0 && resp.has_more) {
+        throw new ArtifactRetrievalError('Zero progress pagination loop detected.', 'ZERO_PROGRESS');
+      }
+
+      if (totalBytes === null && resp.total_bytes !== undefined && resp.total_bytes !== null) {
+        totalBytes = resp.total_bytes;
+      } else if (
+        totalBytes !== null &&
+        resp.total_bytes !== undefined &&
+        resp.total_bytes !== null &&
+        totalBytes !== resp.total_bytes
+      ) {
+        throw new ArtifactRetrievalError(
+          `total_bytes changed during retrieval: was ${totalBytes}, now ${resp.total_bytes}.`,
+          'TOTAL_BYTES_CHANGED'
+        );
+      }
+
+      if (expectedSha256 === null) {
+        expectedSha256 = resp.sha256 ?? artifactRecord?.content_hash ?? null;
+      } else if (resp.sha256 && expectedSha256 !== resp.sha256) {
+        throw new ArtifactRetrievalError('sha256 changed during retrieval.', 'HASH_CHANGED');
+      }
+
+      accumulatedBytes += chunkBuffer.length;
+      if (accumulatedBytes > maxBytes) {
+        throw new ArtifactRetrievalError(`Exceeded maximum allowed bytes (${accumulatedBytes} > ${maxBytes}).`, 'EXCEEDED_MAX_BYTES');
+      }
+
+      loopCount++;
+      if (loopCount > maxChunks) {
+        throw new ArtifactRetrievalError(`Exceeded maximum chunk count (${loopCount} > ${maxChunks}).`, 'EXCEEDED_MAX_CHUNKS');
+      }
+
+      chunks.push(chunkBuffer);
+      expectedOffset += chunkBuffer.length;
+
+      if (!resp.has_more || (totalBytes !== null && expectedOffset >= totalBytes)) {
+        break;
+      }
+    }
+
+    if (totalBytes !== null && expectedOffset < totalBytes) {
+      throw new ArtifactRetrievalError(
+        `Truncated artifact download: expected ${totalBytes} bytes, but only received ${expectedOffset} bytes.`,
+        'TRUNCATED_DOWNLOAD'
+      );
+    }
+
+    const rawBuffer = Buffer.concat(chunks);
+    const sha256 = crypto.createHash('sha256').update(rawBuffer).digest('hex').toLowerCase();
+
+    let integrity: IntegrityStatus = 'UNVERIFIED';
+    if (expectedSha256 && expectedSha256.trim().length > 0) {
+      const normalizedExpected = expectedSha256.startsWith('sha256:')
+        ? expectedSha256.slice(7).toLowerCase()
+        : expectedSha256.toLowerCase();
+
+      const isHex64 = /^[0-9a-f]{64}$/.test(normalizedExpected);
+      if (!isHex64 || sha256 !== normalizedExpected) {
+        integrity = 'INTEGRITY_FAILED';
+      } else {
+        integrity = 'VERIFIED';
+      }
+    }
+
+    const isBinary = rawBuffer.includes(Buffer.from('\0'));
+    const text = isBinary ? undefined : new TextDecoder('utf-8', { fatal: false }).decode(rawBuffer);
+
+    const result: ReassembledArtifactContent = {
+      studioId,
+      artifactId,
+      artifact: artifactRecord,
+      rawBuffer,
+      text,
+      isBinary,
+      sha256,
+      expectedSha256,
+      integrity,
+      totalBytes: rawBuffer.length,
+      chunkCount: chunks.length,
+    };
+
+    this.cacheArtifactContent(result);
+    return result;
+  }
+
+  /**
+   * Queries list of artifact records for a given task.
+   */
+  public static async listTaskArtifacts(
+    transport: IpcTransportSender,
+    studioId: string,
+    taskId: string
+  ): Promise<RustArtifactRecord[]> {
+    if (isPathTraversal(studioId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in studioId: '${studioId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+    if (isPathTraversal(taskId)) {
+      throw new ArtifactRetrievalError(
+        `Path traversal detected in taskId: '${taskId}'`,
+        'PATH_TRAVERSAL_DETECTED'
+      );
+    }
+
+    const resp = await transport.sendCommand({
+      type: 'list_task_artifacts',
+      studio_id: studioId,
+      task_id: taskId,
+    });
+
+    if (resp.type === 'error') {
+      throw new ArtifactRetrievalError(`Daemon rejected list_task_artifacts: ${resp.message}`, 'IPC_ERROR');
+    }
+
+    if (resp.type !== 'task_artifacts') {
+      throw new ArtifactRetrievalError(`Unexpected response from list_task_artifacts: ${JSON.stringify(resp)}`, 'IPC_ERROR');
+    }
+
+    return resp.artifacts;
+  }
+}

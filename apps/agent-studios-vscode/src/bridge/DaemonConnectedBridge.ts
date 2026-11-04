@@ -44,8 +44,14 @@ import {
   SubmitTaskAdapter,
   SubmitTaskRequest,
   SubmitTaskResult,
+  TaskSubmissionError,
 } from './ipc/SubmitTaskAdapter';
-import { OperatorConfirmationManager } from './ipc/CapabilityMatrix';
+import {
+  ExecutionClient,
+  CancelTaskResult,
+  TaskCancellationError,
+} from './ipc/ExecutionClient';
+import { CapabilityMatrix, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import {
   NativeIpcTransport,
   TransportState,
@@ -57,7 +63,15 @@ import {
   RustTaskRecord,
   RustTaskState,
   RustHealthResponse,
+  RustExecutionReadinessReport,
+  RustArtifactRecord,
+  RustRecoveryStatusReport,
 } from './ipc/RustIpcProtocolTypes';
+import {
+  ArtifactClient,
+  ReassembledArtifactContent,
+  ReassembledTaskDiff,
+} from './ipc/ArtifactClient';
 
 export interface DaemonConnectedBridgeOptions {
   bootstrapPath?: string;
@@ -83,6 +97,12 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   private readonly _pendingApprovals: Map<string, ApprovalRequest> = new Map();
   private readonly _artifacts: Map<string, Artifact> = new Map();
   private readonly _seenEventSequences = new Set<number>();
+
+  private _epoch: number = 0;
+  private _isDisposed: boolean = false;
+  private _isRecoveringSubscription: boolean = false;
+  private _resubscribeAttempts: number = 0;
+  private static readonly maxResubscribeAttempts = 3;
 
   private readonly _disposables: vscode.Disposable[] = [];
 
@@ -116,13 +136,35 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     return this._transport?.endpoint ?? null;
   }
 
+  public get sessionId(): string | null {
+    return this._transport?.getSessionId() ?? null;
+  }
+
+  public get epoch(): number {
+    return this._epoch;
+  }
+
+  public get generation(): number {
+    return this._epoch;
+  }
+
+  public get isDisposed(): boolean {
+    return this._isDisposed;
+  }
+
   /**
    * Connects to the running agsd daemon via discovery and performs authenticated handshake.
    */
   public async connect(): Promise<void> {
+    if (this._isDisposed) {
+      throw new Error('Bridge is disposed.');
+    }
     if (this._connectionState === 'connected' || this._connectionState === 'connecting') {
       return;
     }
+
+    const currentEpoch = ++this._epoch;
+    this._resubscribeAttempts = 0;
 
     // Invalidate pending confirmations on reconnect
     OperatorConfirmationManager.clearPendingChallenges();
@@ -132,6 +174,9 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     try {
       if (!this._transport) {
         const bootstrapInfo = await DaemonDiscovery.loadBootstrapInfo(this._bootstrapPath);
+        if (this._isDisposed || this._epoch !== currentEpoch) {
+          return;
+        }
         const transport = new NativeIpcTransport({
           endpoint: bootstrapInfo.endpoint,
           keyId: bootstrapInfo.key_id,
@@ -149,18 +194,32 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
         await activeTransport.connect();
       }
 
+      if (this._isDisposed || this._epoch !== currentEpoch) {
+        return;
+      }
+
       this.setConnectionState('connected');
 
       if (this._autoSubscribe) {
         await this.subscribeAndReplay();
       }
 
+      if (this._isDisposed || this._epoch !== currentEpoch) {
+        return;
+      }
+
       // Populate initial active studio if available
       const studios = await this.listStudiosInternal();
+      if (this._isDisposed || this._epoch !== currentEpoch) {
+        return;
+      }
       if (studios.length > 0 && !this._activeStudioId) {
         this._activeStudioId = studios[0].id;
       }
     } catch (err: unknown) {
+      if (this._isDisposed || this._epoch !== currentEpoch) {
+        return;
+      }
       const errMsg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
       if (errMsg.includes('auth') || errMsg.includes('signature') || errMsg.includes('hmac') || errMsg.includes('key')) {
         this.setConnectionState('authentication_failed');
@@ -177,6 +236,9 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
    * Disconnects cleanly from the daemon.
    */
   public async disconnect(): Promise<void> {
+    this._epoch++;
+    this._resubscribeAttempts = 0;
+    this._isRecoveringSubscription = false;
     if (this._transport) {
       this._transport.disconnect();
     }
@@ -211,9 +273,23 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     const startedAt = new Date(studio.created_at).getTime() || Date.now();
     const elapsedMs = Math.max(0, Date.now() - startedAt);
 
+    // Authoritative daemon repository path from execution readiness defaults, NOT client workspace
+    let daemonWorkspacePath = '';
+    try {
+      const readiness = await this.getExecutionReadiness(1500);
+      if (readiness?.defaults?.default_repo_path) {
+        daemonWorkspacePath = readiness.defaults.default_repo_path;
+      } else if (readiness?.authorized_workspaces && readiness.authorized_workspaces.length > 0) {
+        daemonWorkspacePath = readiness.authorized_workspaces[0];
+      }
+    } catch {
+      // Readiness query failed or uninitialized; leave workspacePath empty to prevent false verified status
+      daemonWorkspacePath = '';
+    }
+
     return {
       id: studio.id,
-      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '',
+      workspacePath: daemonWorkspacePath,
       goalSummary: studio.name,
       status: sessionStatus,
       activeAgentCount: 1,
@@ -322,6 +398,41 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
+   * Fetches unified diff for a task with lossless Base64 pagination and SHA-256 integrity verification.
+   */
+  public async getTaskDiff(
+    studioId: string,
+    taskId: string,
+    signal?: AbortSignal
+  ): Promise<ReassembledTaskDiff> {
+    this.assertConnected();
+    return ArtifactClient.fetchTaskDiff(this._transport!, studioId, taskId, { signal });
+  }
+
+  /**
+   * Lists artifact records for a task from daemon.
+   */
+  public async listTaskArtifacts(
+    studioId: string,
+    taskId: string
+  ): Promise<RustArtifactRecord[]> {
+    this.assertConnected();
+    return ArtifactClient.listTaskArtifacts(this._transport!, studioId, taskId);
+  }
+
+  /**
+   * Fetches raw artifact content with Base64 decoding, chunk verification and SHA-256 verification.
+   */
+  public async fetchArtifactContent(
+    studioId: string,
+    artifactId: string,
+    signal?: AbortSignal
+  ): Promise<ReassembledArtifactContent> {
+    this.assertConnected();
+    return ArtifactClient.fetchArtifactContent(this._transport!, studioId, artifactId, { signal });
+  }
+
+  /**
    * Returns tracked timeline events from daemon event stream.
    */
   public listTimelineEvents(): TimelineEvent[] {
@@ -400,10 +511,38 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
     this.assertConnected();
     const workspacePath = req.workspacePath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    const freshReadiness = await this.getExecutionReadiness(2000);
+    if (!freshReadiness || !freshReadiness.is_ready) {
+      throw new TaskSubmissionError(
+        `Daemon is not execution-ready: ${freshReadiness?.blocking_reasons?.join(', ') || 'Readiness report unavailable'}`,
+        req.studioId
+      );
+    }
+
+    if (req.readiness) {
+      const runtimeVal = CapabilityMatrix.validateRuntimeInstanceSelection(
+        freshReadiness,
+        {
+          runtimeInstanceId: req.runtimeInstanceId,
+          runtimePreference: req.runtimePreference,
+        },
+        { action: 'task_execution' }
+      );
+      if (!runtimeVal.valid) {
+        throw new TaskSubmissionError(
+          `Execution readiness degraded during operator confirmation: ${runtimeVal.reason}. Fresh confirmation required.`,
+          req.studioId
+        );
+      }
+    }
+
     return SubmitTaskAdapter.submitTask(this._transport!, {
       ...req,
       workspacePath,
-    });
+      readiness: freshReadiness,
+      sessionId: this.sessionId ?? undefined,
+    } as any);
   }
 
   /**
@@ -418,12 +557,41 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Cancels current run.
-   * STRICTLY DISABLED in M14-IPC-03 read-only connected vertical slice.
-   * Fails closed to avoid fabricating cancellation state in the UI.
+   * Cancels a specific task on the daemon using M15 ExecutionClient.
+   * Gated on task.cancel capability and explicit studio/task identity.
    */
-  public async cancelCurrentRun(): Promise<void> {
-    throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+  public async cancelTask(taskId: string, reason?: string): Promise<CancelTaskResult> {
+    this.assertConnected();
+    if (!this._activeStudioId) {
+      throw new TaskCancellationError('No active studio selected for task cancellation.');
+    }
+    return ExecutionClient.cancelTask(this._transport!, {
+      studioId: this._activeStudioId,
+      taskId,
+      reason,
+    });
+  }
+
+  /**
+   * Cancels current run or active task on the daemon.
+   * Fails closed if capability is disabled or if no active studio or running task is found.
+   */
+  public async cancelCurrentRun(taskId?: string, reason?: string): Promise<void> {
+    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
+      throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+    }
+    this.assertConnected();
+    if (taskId) {
+      await this.cancelTask(taskId, reason);
+      return;
+    }
+    const tasks = await this.listTasks();
+    const running = tasks.find((t) => t.status === 'running');
+    if (running) {
+      await this.cancelTask(running.id, reason);
+      return;
+    }
+    throw new TaskCancellationError('No active or running task found to cancel in current studio.');
   }
 
   /**
@@ -462,12 +630,21 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     }
 
     this._activeStudioId = studio.id;
+    this._epoch++;
     const current = await this.getCurrentSession();
     if (!current) {
       throw new Error(`Failed to initialize session for studio '${sessionId}'.`);
     }
 
     return current;
+  }
+
+  /**
+   * Retrieves execution readiness report from the daemon using ExecutionClient.
+   */
+  public async getExecutionReadiness(timeoutMs?: number): Promise<RustExecutionReadinessReport> {
+    this.assertConnected();
+    return ExecutionClient.getExecutionReadiness(this._transport!, timeoutMs);
   }
 
   /**
@@ -485,6 +662,23 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     }
 
     return resp;
+  }
+
+  /**
+   * Retrieves durable recovery and persistence health status (M15-04 / M15-UI-04).
+   */
+  public async getRecoveryStatus(): Promise<RustRecoveryStatusReport> {
+    this.assertConnected();
+
+    const resp = await this._transport!.sendCommand({ type: 'get_recovery_status' });
+    if (resp.type === 'error') {
+      throw new Error(`Get recovery status failed: ${resp.message}`);
+    }
+    if (resp.type !== 'recovery_status') {
+      throw new Error(`Unexpected response type for get_recovery_status: ${resp.type}`);
+    }
+
+    return resp.status;
   }
 
   /**
@@ -508,6 +702,14 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   public dispose(): void {
+    if (this._isDisposed) {
+      return;
+    }
+    this._isDisposed = true;
+    this._epoch++;
+    this._resubscribeAttempts = 0;
+    this._isRecoveringSubscription = false;
+
     OperatorConfirmationManager.clearPendingChallenges();
 
     if (this._transport) {
@@ -520,6 +722,8 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       const d = this._disposables.pop();
       d?.dispose();
     }
+
+    this._connectionState = 'disconnected';
   }
 
   // --- Internal Helpers ---
@@ -535,19 +739,104 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       this.handleIncomingDaemonEvent(rustEvent);
     });
 
+    transport.on('subscription_error', async (err: Error) => {
+      console.warn('[DaemonConnectedBridge] Subscription error received:', err.message);
+      if (this._isDisposed) {
+        return;
+      }
+
+      if (
+        err.message.includes('Sequence gap') ||
+        err.message.includes('SequenceGapRecoverable') ||
+        err.message.includes('Failed to replay events')
+      ) {
+        if (this._resubscribeAttempts >= DaemonConnectedBridge.maxResubscribeAttempts) {
+          console.error(
+            `[DaemonConnectedBridge] Exceeded maximum resubscription attempts (${DaemonConnectedBridge.maxResubscribeAttempts}). Marking degraded.`
+          );
+          this.setConnectionState('degraded');
+          return;
+        }
+
+        if (this._isRecoveringSubscription) {
+          return;
+        }
+
+        this._isRecoveringSubscription = true;
+        this._resubscribeAttempts++;
+        const recoveryEpoch = ++this._epoch;
+
+        // Sequence gap encountered (e.g. unhydrated in-memory ReplayBuffer on restarted daemon).
+        // Fall back to clean subscription without sequence filter and re-hydrate domain state.
+        try {
+          this._lastWatermark = 0;
+          this._seenEventSequences.clear();
+          await this._transport?.subscribeEvents(0);
+
+          if (this._isDisposed || this._epoch !== recoveryEpoch) {
+            return;
+          }
+
+          await this.syncDomainState();
+        } catch (retryErr) {
+          console.error('[DaemonConnectedBridge] Re-subscription recovery failed:', retryErr);
+          if (!this._isDisposed && this._epoch === recoveryEpoch) {
+            this.setConnectionState('degraded');
+          }
+        } finally {
+          this._isRecoveringSubscription = false;
+        }
+      } else {
+        this.setConnectionState('degraded');
+      }
+    });
+
     transport.on('error', (err: Error) => {
+      if (this._isDisposed) {
+        return;
+      }
       console.error('[DaemonConnectedBridge] Transport error:', err);
       this.setConnectionState('degraded');
     });
 
     transport.on('close', () => {
+      if (this._isDisposed) {
+        return;
+      }
       if (this._connectionState !== 'disconnected') {
         this.setConnectionState('disconnected');
       }
     });
   }
 
+  /**
+   * Synchronizes domain state from daemon after reconnection or sequence gap recovery.
+   * Epoch-guarded to prevent stale hydration responses from overwriting newer state.
+   */
+  public async syncDomainState(): Promise<void> {
+    if (this._isDisposed) {
+      return;
+    }
+    const currentEpoch = this._epoch;
+    try {
+      const studios = await this.listStudiosInternal();
+      if (this._isDisposed || this._epoch !== currentEpoch) {
+        return;
+      }
+      if (studios.length > 0) {
+        if (!this._activeStudioId || !studios.some((s) => s.id === this._activeStudioId)) {
+          this._activeStudioId = studios[0].id;
+        }
+      }
+    } catch {
+      // Non-fatal hydration attempt
+    }
+  }
+
   private handleTransportStateChange(tState: TransportState): void {
+    if (this._isDisposed) {
+      return;
+    }
     switch (tState) {
       case 'ready':
         this.setConnectionState('connected');
@@ -578,6 +867,13 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   private handleIncomingDaemonEvent(rustEvent: RustIpcEvent): void {
+    if (this._isDisposed) {
+      return;
+    }
+
+    // Reset bounded resubscribe attempts on successful event stream delivery
+    this._resubscribeAttempts = 0;
+
     const seq = rustEvent.sequence;
     if (typeof seq === 'number') {
       if (this._seenEventSequences.has(seq)) {
@@ -791,6 +1087,9 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   private setConnectionState(newState: ConnectionState): void {
+    if (this._isDisposed) {
+      return;
+    }
     if (this._connectionState !== newState) {
       this._connectionState = newState;
       this._onConnectionStateChanged.fire(newState);
@@ -798,7 +1097,7 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   private assertConnected(): void {
-    if (this._connectionState !== 'connected' || !this._transport) {
+    if (this._isDisposed || this._connectionState !== 'connected' || !this._transport) {
       throw new BridgeDisconnectedError('Agent Studios daemon bridge is not connected.');
     }
   }

@@ -3,8 +3,10 @@
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { isPathTraversal } from '../cards/DiffParser';
 import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { Artifact, TimelineEvent } from './types';
 
@@ -149,18 +151,76 @@ export function extractAffectedPaths(diffContent: string, fallbackPath?: string)
 
 /**
  * Resolves an existing workspace file matching the artifact's target path.
+ * Enforces strict containment within active verified studio and rejects symlinks
+ * pointing outside the studio root.
  */
 export async function findWorkspaceFileForArtifact(
   artifact: Artifact,
-  diffContent: string
+  diffContent: string,
+  verifiedStudioRoot?: string
 ): Promise<vscode.Uri | undefined> {
   const candidateRelativePaths = extractAffectedPaths(diffContent, artifact.path);
   const folders = vscode.workspace.workspaceFolders;
 
+  const authorizedRoots: string[] = [];
+  if (verifiedStudioRoot && verifiedStudioRoot.trim().length > 0) {
+    authorizedRoots.push(path.resolve(verifiedStudioRoot.trim()));
+  } else if (folders) {
+    for (const folder of folders) {
+      authorizedRoots.push(path.resolve(folder.uri.fsPath));
+    }
+  }
+
+  if (authorizedRoots.length === 0) {
+    return undefined;
+  }
+
+  const isContainedInVerifiedStudio = (targetFsPath: string): boolean => {
+    try {
+      const canonicalTarget = path.resolve(targetFsPath);
+      let realTarget: string;
+      try {
+        realTarget = fs.realpathSync(canonicalTarget);
+      } catch {
+        realTarget = canonicalTarget;
+      }
+
+      for (const root of authorizedRoots) {
+        let canonicalRoot: string;
+        try {
+          canonicalRoot = fs.realpathSync(root);
+        } catch {
+          canonicalRoot = root;
+        }
+
+        const relCanonical = path.relative(canonicalRoot, canonicalTarget);
+        const relReal = path.relative(canonicalRoot, realTarget);
+
+        const canonicalInside = !relCanonical.startsWith('..') && !path.isAbsolute(relCanonical);
+        const realInside = !relReal.startsWith('..') && !path.isAbsolute(relReal);
+
+        if (canonicalInside && realInside) {
+          return true;
+        }
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
   if (folders) {
     for (const candidatePath of candidateRelativePaths) {
+      if (isPathTraversal(candidatePath)) {
+        continue;
+      }
+
       for (const folder of folders) {
         const candidateUri = vscode.Uri.joinPath(folder.uri, candidatePath);
+        if (!isContainedInVerifiedStudio(candidateUri.fsPath)) {
+          continue;
+        }
+
         try {
           const stat = await vscode.workspace.fs.stat(candidateUri);
           if (stat.type !== vscode.FileType.Directory) {
@@ -174,14 +234,16 @@ export async function findWorkspaceFileForArtifact(
   }
 
   if (artifact.path && path.isAbsolute(artifact.path)) {
-    try {
-      const absUri = vscode.Uri.file(artifact.path);
-      const stat = await vscode.workspace.fs.stat(absUri);
-      if (stat.type !== vscode.FileType.Directory) {
-        return absUri;
+    if (!isPathTraversal(artifact.path) && isContainedInVerifiedStudio(artifact.path)) {
+      try {
+        const absUri = vscode.Uri.file(artifact.path);
+        const stat = await vscode.workspace.fs.stat(absUri);
+        if (stat.type !== vscode.FileType.Directory) {
+          return absUri;
+        }
+      } catch {
+        // Ignore
       }
-    } catch {
-      // Ignore
     }
   }
 
@@ -227,6 +289,24 @@ export class DiffDocumentProvider implements vscode.TextDocumentContentProvider,
    */
   public fireDidChange(uri: vscode.Uri): void {
     this._onDidChange.fire(uri);
+  }
+
+  /**
+   * Clears virtual document cache.
+   */
+  public clearCache(): void {
+    this._virtualDocuments.clear();
+  }
+
+  /**
+   * Invalidates cached virtual documents for a given studio ID.
+   */
+  public invalidateStudio(studioId: string): void {
+    for (const [key] of this._virtualDocuments) {
+      if (key.includes(studioId)) {
+        this._virtualDocuments.delete(key);
+      }
+    }
   }
 
   /**

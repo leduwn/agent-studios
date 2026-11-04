@@ -1271,4 +1271,338 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
       );
     });
   });
+
+  // =========================================================================
+  // 6. M15 Operator Confirmation Binding & Wire Gate Regression Tests
+  // =========================================================================
+  describe('6. M15 Operator Confirmation Binding & Wire Gate Regression Tests', () => {
+    const prompt = 'Implement resilient agent execution pipeline';
+    const testWs = process.platform === 'win32' ? 'C:\\Projects\\repo' : '/projects/repo';
+
+    beforeEach(() => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', true);
+    });
+
+    it('1. rejects task submission when runtimePreference diverges from confirmation challenge', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        runtimePreference: 'opencode',
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        runtimePreference: 'claude_code', // Divergent runtime
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Runtime preference mismatch in confirmation challenge'));
+          return true;
+        }
+      );
+    });
+
+    it('2. rejects task submission when runtimePreference presence mismatches confirmation challenge', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        runtimePreference: 'opencode',
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        runtimePreference: undefined, // Missing runtime
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Runtime preference presence mismatch'));
+          return true;
+        }
+      );
+    });
+
+    it('3. rejects task submission when runtimeInstanceId diverges from confirmation challenge', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        runtimeInstanceId: 'rt-instance-alpha',
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        runtimeInstanceId: 'rt-instance-beta', // Divergent instance
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Runtime instance ID mismatch in confirmation challenge'));
+          return true;
+        }
+      );
+    });
+
+    it('4. rejects task submission when runtimeInstanceId presence mismatches confirmation challenge', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        runtimeInstanceId: 'rt-instance-alpha',
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        runtimeInstanceId: undefined, // Missing instance ID
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Runtime instance ID presence mismatch'));
+          return true;
+        }
+      );
+    });
+
+    it('5. rejects task submission when intent diverges from confirmation challenge', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'inspect_only',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Execution intent mismatch in confirmation challenge'));
+          return true;
+        }
+      );
+    });
+
+    it('6. enforces atomic single-use consumption of challenge token (cannot be replayed)', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        workspacePath: testWs,
+      };
+
+      // First submission succeeds and atomically consumes challenge
+      const result = await SubmitTaskAdapter.submitTask(transport, req);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(transport.sentCommands.length, 1);
+
+      // Replay attempt with same challenge token must fail closed
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Challenge token has already been consumed (replay prevented)'));
+          return true;
+        }
+      );
+    });
+
+    it('7. OperatorConfirmationManager.clearPendingChallenges() invalidates all issued tokens on reconnect', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      // Simulate daemon reconnect or bridge mode switch
+      OperatorConfirmationManager.clearPendingChallenges();
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Challenge token not found in Extension Host registry (unrecognized, expired, or cleared)'));
+          return true;
+        }
+      );
+    });
+
+    it('8. rejects challenge token when prompt is altered even by single whitespace', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt: prompt + ' ', // Subtle single whitespace modification
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Prompt hash mismatch: prompt was altered after confirmation challenge issued'));
+          return true;
+        }
+      );
+    });
+
+    it('9. rejects challenge token signed with corrupted or forged HMAC signature', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const forgedChallenge = {
+        ...challenge,
+        signature: challenge.signature.slice(0, -4) + 'abcd',
+      };
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: forgedChallenge,
+        workspacePath: testWs,
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Forged confirmation challenge: invalid cryptographic signature'));
+          return true;
+        }
+      );
+    });
+
+    it('10. rejects confirmation challenge issued for different workspace path', async () => {
+      const otherWs = process.platform === 'win32' ? 'C:\\Projects\\other-repo' : '/projects/other-repo';
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        workspacePath: otherWs, // Divergent workspace
+      };
+
+      await assert.rejects(
+        async () => {
+          await SubmitTaskAdapter.submitTask(transport, req);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof TaskSubmissionError);
+          assert.ok(err.message.includes('Workspace directory mismatch in confirmation challenge'));
+          return true;
+        }
+      );
+    });
+
+    it('11. honors valid challenge token with exact matching runtimePreference, runtimeInstanceId, workspace, and model', async () => {
+      const challenge = OperatorConfirmationManager.createChallenge(validStudioId, prompt, {
+        runtimePreference: 'opencode',
+        runtimeInstanceId: 'inst-opencode-01',
+        modelId: 'claude-3-7-sonnet',
+        providerId: 'anthropic',
+        workspacePath: testWs,
+        intent: 'task_execution',
+      });
+
+      const req: SubmitTaskRequest = {
+        studioId: validStudioId,
+        prompt,
+        confirmedByUser: true,
+        confirmationChallenge: challenge,
+        runtimePreference: 'opencode',
+        runtimeInstanceId: 'inst-opencode-01',
+        requestedModelId: 'claude-3-7-sonnet',
+        requestedProviderId: 'anthropic',
+        daemonEffectiveModel: 'claude-3-7-sonnet',
+        daemonEffectiveProvider: 'anthropic',
+        workspacePath: testWs,
+      };
+
+      const result = await SubmitTaskAdapter.submitTask(transport, req);
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(transport.sentCommands.length, 1);
+
+      const dispatched = transport.sentCommands[0];
+      assert.strictEqual(dispatched.type, 'submit_task');
+      assert.ok(dispatched.task_spec.execution);
+      assert.strictEqual(dispatched.task_spec.execution?.runtime_preference, 'opencode');
+      assert.strictEqual(dispatched.task_spec.execution?.runtime_instance_id, 'inst-opencode-01');
+      assert.strictEqual(dispatched.task_spec.execution?.model_id, 'claude-3-7-sonnet');
+      assert.strictEqual(dispatched.task_spec.execution?.provider_instance_id, 'anthropic');
+      assert.strictEqual(dispatched.task_spec.execution?.repository_path, testWs);
+      assert.strictEqual(dispatched.task_spec.execution?.initial_prompt, prompt);
+    });
+  });
 });

@@ -23,6 +23,9 @@ describe('ChatSecurityGuards Unit Tests', () => {
         if (cmd === 'approveAction' || cmd === 'denyAction') {
           payload.approvalId = 'app-valid-1';
         }
+        if (cmd === 'submitTask') {
+          payload.prompt = 'Execute unit test task';
+        }
         const result = ChatSecurityGuards.validateWebviewMessage(payload);
         assert.strictEqual(result.valid, true, `Command '${cmd}' should be allowed`);
       }

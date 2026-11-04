@@ -11,6 +11,7 @@
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import { BridgeManager } from '../bridge/BridgeManager';
+import { CapabilityMatrix } from '../bridge/ipc/CapabilityMatrix';
 import {
   AgentMode,
   ApprovalDecisionResult,
@@ -21,12 +22,135 @@ import {
   ContextAttachment,
   TimelineEvent,
 } from '../bridge/types';
+import { OperatorConfirmationModal } from '../security/OperatorConfirmationModal';
+import { WorkspaceVerification } from '../security/WorkspaceVerification';
 import { SessionStateProjection } from '../state/SessionStateProjection';
-import { ChatHtmlBuilder } from './ChatHtmlBuilder';
+import { TaskExecutionStore } from '../state/TaskExecutionStore';
+import { ChatHtmlBuilder, RuntimeOption } from './ChatHtmlBuilder';
 import { ChatSecurityGuards } from './ChatSecurityGuards';
+import { RustExecutionReadinessReport } from '../bridge/ipc/RustIpcProtocolTypes';
 
 export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'agent-studios.chat';
+
+  /**
+   * Constructs typed runtime options and authoritative selection from daemon readiness.
+   * Enforces:
+   * - Distinct selectable identity for every instance (${instance_id}|${implementation}).
+   * - Unhealthy, unknown or duplicate runtime identities disabled.
+   * - If multiple instances exist, never silently chooses first (selectedRuntime = '').
+   * - If configured default valid, selects exact default instance.
+   * - Truthful unavailable state if no healthy instances discovered.
+   * - No hardcoded OpenCode, Claude Code or Codex fallback.
+   * - Never enables native Claude Code or Codex unless backend explicitly reports verified adapter.
+   */
+  public static buildRuntimeOptions(
+    readiness: RustExecutionReadinessReport | null | undefined
+  ): { runtimeOptions: RuntimeOption[]; selectedRuntime: string } {
+    if (!readiness) {
+      return {
+        runtimeOptions: [
+          { id: '', name: 'No runtimes available (daemon unready)', enabled: false },
+        ],
+        selectedRuntime: '',
+      };
+    }
+
+    const instances = readiness.runtime_instances || [];
+    const seenIds = new Set<string>();
+    const duplicateIds = new Set<string>();
+    for (const inst of instances) {
+      if (seenIds.has(inst.instance_id)) {
+        duplicateIds.add(inst.instance_id);
+      }
+      seenIds.add(inst.instance_id);
+    }
+
+    const runtimeOptions: RuntimeOption[] = [];
+
+    for (const inst of instances) {
+      const isDuplicate = duplicateIds.has(inst.instance_id);
+      const isNativeUnverified =
+        (inst.implementation === 'claude_code' ||
+          inst.implementation === 'claude-code' ||
+          inst.implementation === 'codex') &&
+        (!readiness.available_runtimes || !readiness.available_runtimes.includes(inst.implementation));
+
+      const isEnabled = inst.healthy && !isDuplicate && !isNativeUnverified;
+      let tooltip = 'Healthy runtime instance';
+      if (isDuplicate) {
+        tooltip = 'Duplicate runtime instance ID detected in daemon readiness (disabled)';
+      } else if (!inst.healthy) {
+        tooltip = 'Degraded/Unhealthy runtime instance';
+      } else if (isNativeUnverified) {
+        tooltip = `Native ${inst.implementation} adapter is unverified / not implemented in backend`;
+      }
+
+      const compositeId = `${inst.instance_id}|${inst.implementation}`;
+      const suffix = isDuplicate
+        ? ' [Duplicate ID - Disabled]'
+        : !inst.healthy
+          ? ' [Unhealthy]'
+          : isNativeUnverified
+            ? ' [Unverified Adapter]'
+            : '';
+      const name = `${inst.implementation} (${inst.instance_id})${suffix}`;
+
+      runtimeOptions.push({
+        id: compositeId,
+        name,
+        enabled: isEnabled,
+        tooltip,
+        instanceId: inst.instance_id,
+        implementation: inst.implementation,
+      });
+    }
+
+    // Include registered but undiscovered runtimes as visibly disabled options
+    if (readiness.registered_runtimes) {
+      for (const reg of readiness.registered_runtimes) {
+        const hasInstance = instances.some((i) => i.implementation === reg);
+        if (!hasInstance) {
+          runtimeOptions.push({
+            id: `unregistered|${reg}`,
+            name: `${reg} (Registered, no discovered instance)`,
+            enabled: false,
+            tooltip: 'Adapter registered in backend but no active instance discovered',
+            implementation: reg,
+          });
+        }
+      }
+    }
+
+    // Determine default selection
+    let selectedRuntime = '';
+    const configuredId = readiness.defaults?.configured_instance_id;
+    if (configuredId && configuredId.trim().length > 0) {
+      const matched = runtimeOptions.find((r) => r.instanceId === configuredId && r.enabled);
+      if (matched) {
+        selectedRuntime = matched.id;
+      }
+    }
+
+    // If no configured default, and exactly one healthy instance exists, select it
+    if (!selectedRuntime) {
+      const healthy = runtimeOptions.filter((r) => r.enabled);
+      if (healthy.length === 1) {
+        selectedRuntime = healthy[0].id;
+      }
+      // If multiple healthy instances exist, leave selectedRuntime = '' (never silently pick first)
+    }
+
+    if (runtimeOptions.length === 0) {
+      runtimeOptions.push({
+        id: '',
+        name: 'No runtimes available (daemon unready)',
+        enabled: false,
+      });
+    }
+
+    return { runtimeOptions, selectedRuntime };
+  }
 
   private readonly _extensionUri: vscode.Uri;
   private _bridgeManager?: BridgeManager;
@@ -73,6 +197,24 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         })
       );
     }
+
+    this._disposables.push(
+      TaskExecutionStore.instance.onDidChangeExecutionState((state) => {
+        void this.postMessage({
+          type: 'executionStateChanged',
+          executionState: state,
+        });
+      })
+    );
+
+    this._disposables.push(
+      TaskExecutionStore.instance.onDidStreamChunk((chunk) => {
+        void this.postMessage({
+          type: 'streamChunk',
+          chunk,
+        });
+      })
+    );
   }
 
   public get bridge(): AgentStudiosBridge {
@@ -120,6 +262,35 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const session = await this.bridge.getCurrentSession().catch(() => null);
     const sessions = await this.bridge.listSessions().catch(() => []);
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
+
+    let studioOptions: { id: string; name: string }[] | undefined;
+    if (sessions && sessions.length > 0) {
+      studioOptions = sessions.map((s) => ({
+        id: s.id,
+        name: s.title ? `${s.title} (${s.id})` : s.id,
+      }));
+    } else if (session) {
+      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
+    }
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
+
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    const workspaceStatus = wsVerification.status;
+    const isWorkspaceMatched = wsVerification.isAuthorized;
+    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
+
+    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
+    const isTaskSubmitEnabled =
+      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
+      isWorkspaceMatched &&
+      hasHealthyRuntime;
 
     webviewView.webview.html = ChatHtmlBuilder.buildHtml(
       webviewView.webview,
@@ -137,6 +308,16 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         messages: this._messages,
         attachments: this._attachments,
         hasSeenOnboarding: this._hasSeenOnboarding,
+        selectedRuntime,
+        selectedStudioId,
+        runtimes: runtimeOptions,
+        studios: studioOptions,
+        workspacePath: localWorkspace,
+        workspaceStatus,
+        isWorkspaceMatched,
+        workspaceMismatchReason,
+        isTaskSubmitEnabled,
+        executionState: TaskExecutionStore.instance.getState(),
       }
     );
 
@@ -168,6 +349,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   public async handleWebviewMessage(message: {
     command: string;
     text?: string;
+    prompt?: string;
+    runtime?: string;
+    studioId?: string;
+    taskId?: string;
     mode?: AgentMode;
     attachments?: ContextAttachment[];
     modelId?: string;
@@ -208,6 +393,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         await this._handleSendMessage(message);
         break;
 
+      case 'submitTask':
+        await this._handleSubmitTask(message);
+        break;
+
+      case 'cancelTask':
+        await this._handleCancelTask(message);
+        break;
+
       case 'cancelRun':
         await this._handleCancelRun();
         break;
@@ -222,6 +415,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
 
       case 'openDiff':
         await this._handleOpenDiff(message.artifactId, message.filePath);
+        break;
+
+      case 'viewTaskDiff':
+      case 'openArtifactReview':
+        await vscode.commands.executeCommand('agent-studios.openArtifactReview', {
+          studioId: message.studioId,
+          taskId: message.taskId,
+        });
         break;
 
       case 'attachContext':
@@ -240,6 +441,12 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         if (message.mode) {
           this._activeMode = message.mode;
           await this.postMessage({ type: 'modeChanged', mode: this._activeMode });
+        }
+        break;
+
+      case 'switchTask':
+        if (message.taskId) {
+          TaskExecutionStore.instance.switchTask(message.taskId, message.studioId);
         }
         break;
 
@@ -502,6 +709,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private async _handleSwitchSession(sessionId: string): Promise<void> {
     try {
       const session = await this.bridge.switchSession(sessionId);
+      this._stateProjection?.switchSession(session);
       this._messages = [];
       await this.postMessage({
         type: 'syncState',
@@ -520,6 +728,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private async _handleNewSession(): Promise<void> {
     try {
       const session = await this.bridge.createSession();
+      this._stateProjection?.switchSession(session);
       this._messages = [];
       this._attachments = [];
       this._composerDraft = '';
@@ -539,7 +748,195 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
   }
 
+  private async _handleSubmitTask(message: {
+    prompt?: string;
+    runtime?: string;
+    studioId?: string;
+    modelId?: string;
+    providerId?: string;
+  }): Promise<void> {
+    const prompt = message.prompt || '';
+    if (!prompt || /^\s*$/.test(prompt)) {
+      await this.postMessage({ type: 'error', error: 'Prompt cannot be empty.' });
+      return;
+    }
+    const promptByteLength = Buffer.byteLength(prompt, 'utf8');
+    if (promptByteLength > 4 * 1024 * 1024) {
+      await this.postMessage({ type: 'error', error: 'Prompt exceeds 4 MiB wire frame limit.' });
+      return;
+    }
+    if (promptByteLength > 100 * 1024) {
+      void vscode.window.showWarningMessage('Prompt size is larger than 100 KB; wire framing limits may apply.');
+    }
+
+    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Task submission is disabled by the capability matrix (task.submit capability is not enabled).',
+      });
+      return;
+    }
+
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    if (!wsVerification.isAuthorized) {
+      await this.postMessage({
+        type: 'error',
+        error: `Workspace mismatch (${wsVerification.status}): ${wsVerification.reason}`,
+      });
+      return;
+    }
+
+    const studioId = message.studioId;
+    if (!studioId || studioId.trim().length === 0) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Active studio identity is required before submitting tasks. Please select or create a studio.',
+      });
+      return;
+    }
+
+    // Revalidate runtime selection against authoritative daemon readiness at dispatch
+    const runtimeValidation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
+      runtime: message.runtime,
+    });
+
+    if (!runtimeValidation.valid || !runtimeValidation.runtimePreference || !runtimeValidation.runtimeInstanceId) {
+      await this.postMessage({
+        type: 'error',
+        error: `Runtime selection rejected: ${runtimeValidation.reason || 'Invalid or unhealthy runtime selection.'}`,
+      });
+      return;
+    }
+
+    const runtime = runtimeValidation.runtimePreference;
+    const runtimeInstanceId = runtimeValidation.runtimeInstanceId;
+
+    // Operator confirmation gate using trusted VS Code native modal dialog
+    const confirmResult = await OperatorConfirmationModal.requestConfirmation({
+      studioId,
+      runtime,
+      runtimeInstanceId,
+      prompt,
+      workspacePath: localWorkspace || undefined,
+      modelId: message.modelId || this._selectedModelId,
+      providerId: message.providerId || this._selectedProviderId,
+      actionDescription: 'Mutating Coding Agent Task Execution',
+    });
+
+    if (!confirmResult.confirmed) {
+      if (confirmResult.cancelledByUser) {
+        await this.postMessage({
+          type: 'streamChunk',
+          chunk: '\n[Operator cancelled task execution confirmation]\n',
+        });
+      } else {
+        await this.postMessage({
+          type: 'error',
+          error: confirmResult.reason || 'Operator confirmation failed or was rejected.',
+        });
+      }
+      return;
+    }
+
+    const store = TaskExecutionStore.instance;
+    store.beginSubmission(studioId, prompt, undefined, runtime, runtimeInstanceId);
+
+    try {
+      if (typeof this.bridge.submitTask === 'function') {
+        const submitResult = await this.bridge.submitTask({
+          studioId,
+          prompt,
+          runtimePreference: runtime,
+          runtimeInstanceId,
+          workspacePath: localWorkspace || undefined,
+          requestedModelId: message.modelId || this._selectedModelId,
+          requestedProviderId: message.providerId || this._selectedProviderId,
+          confirmedByUser: true,
+          confirmationChallenge: confirmResult.challenge,
+          readiness,
+        });
+
+        store.taskSubmitted(submitResult.taskId, studioId);
+        this._stateProjection?.upsertTask({
+          id: submitResult.taskId,
+          title: prompt,
+          status: 'pending',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        await this.postMessage({
+          type: 'taskSubmitted',
+          taskId: submitResult.taskId,
+        });
+      } else {
+        throw new Error('Bridge does not support submitTask.');
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      store.completeTask('failed', { message: errorMsg });
+      await this.postMessage({
+        type: 'error',
+        error: `Task submission failed: ${errorMsg}`,
+      });
+    }
+  }
+
+  private async _handleCancelTask(message: {
+    taskId?: string;
+    studioId?: string;
+  }): Promise<void> {
+    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Task cancellation is disabled by the capability matrix (task.cancel capability is not enabled).',
+      });
+      return;
+    }
+
+    const store = TaskExecutionStore.instance;
+    const taskId = message.taskId || store.getState().activeTaskId;
+    if (!taskId) {
+      await this.postMessage({
+        type: 'error',
+        error: 'Cannot cancel task: No active task ID found.',
+      });
+      return;
+    }
+
+    try {
+      if (typeof this.bridge.cancelTask === 'function') {
+        const result = await this.bridge.cancelTask(taskId, 'Cancelled by user operator');
+        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
+        await this.postMessage({
+          type: 'taskCancelled',
+          taskId,
+          result,
+        });
+      } else {
+        await this.bridge.cancelCurrentRun();
+        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
+        await this.postMessage({
+          type: 'taskCancelled',
+          taskId,
+        });
+      }
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      await this.postMessage({
+        type: 'error',
+        error: `Task cancellation failed: ${errorMsg}`,
+      });
+    }
+  }
+
   private _handleTimelineEvent(event: TimelineEvent): void {
+    TaskExecutionStore.instance.consumeDaemonTimelineEvent(event);
+
     if (event.type === 'approval_requested') {
       const approval = event.details as unknown as ApprovalRequest;
       if (approval) {
@@ -570,12 +967,45 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const session = await this.bridge.getCurrentSession().catch(() => null);
     const sessions = await this.bridge.listSessions().catch(() => []);
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
+      ? await this.bridge.getExecutionReadiness().catch(() => null)
+      : null;
+
+    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
+
+    let studioOptions: { id: string; name: string }[] | undefined;
+    if (sessions && sessions.length > 0) {
+      studioOptions = sessions.map((s) => ({
+        id: s.id,
+        name: s.title ? `${s.title} (${s.id})` : s.id,
+      }));
+    } else if (session) {
+      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
+    }
+    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
+
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    const workspaceStatus = wsVerification.status;
+    const isWorkspaceMatched = wsVerification.isAuthorized;
+    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
+
+    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
+    const isTaskSubmitEnabled =
+      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
+      isWorkspaceMatched &&
+      hasHealthyRuntime;
 
     await this.postMessage({
       type: 'syncState',
       state: {
         session,
         sessions,
+        runtimes: runtimeOptions,
+        studios: studioOptions,
+        selectedRuntime,
+        selectedStudioId,
         connectionState: this.bridge.connectionState,
         isPreview: this.isPreview,
         providers,
@@ -583,6 +1013,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         composerDraft: this._composerDraft,
         messages: this._messages,
         attachments: this._attachments,
+        executionState: TaskExecutionStore.instance.getState(),
+        workspaceStatus,
+        isWorkspaceMatched,
+        workspaceMismatchReason,
+        isTaskSubmitEnabled,
       },
     });
   }

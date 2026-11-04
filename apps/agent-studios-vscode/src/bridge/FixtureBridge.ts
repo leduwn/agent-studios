@@ -3,6 +3,7 @@
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from './AgentStudiosBridge';
 import {
@@ -23,6 +24,14 @@ import {
   TimelineEvent,
   ToolCallInfo,
 } from './types';
+import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
+import { CancelTaskResult } from './ipc/ExecutionClient';
+import {
+  RustArtifactRecord,
+  RustExecutionReadinessReport,
+  RustRecoveryStatusReport,
+} from './ipc/RustIpcProtocolTypes';
+import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
 
 /**
  * Developer fixture / preview bridge providing deterministic mock session data
@@ -471,6 +480,109 @@ export class FixtureBridge implements AgentStudiosBridge {
     return artifact ? artifact.diffContent : null;
   }
 
+  public async getTaskDiff(
+    studioId: string,
+    taskId: string,
+    _signal?: AbortSignal
+  ): Promise<ReassembledTaskDiff> {
+    const rawPatch = `diff --git a/src/example.ts b/src/example.ts
+index 1111111..2222222 100644
+--- a/src/example.ts
++++ b/src/example.ts
+@@ -1,3 +1,3 @@
+-console.log('old');
++console.log('new');
+`;
+    const buffer = Buffer.from(rawPatch, 'utf8');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return {
+      studioId,
+      taskId,
+      artifactId: 'fixture-diff-artifact',
+      baseCommit: 'commit-base-001',
+      headCommit: 'commit-head-002',
+      summary: {
+        files_changed: 1,
+        added_files: [],
+        modified_files: ['src/example.ts'],
+        deleted_files: [],
+        renamed_files: [],
+        binary_files: [],
+        patch_size_bytes: buffer.byteLength,
+        base_commit: 'commit-base-001',
+      },
+      rawBuffer: buffer,
+      text: rawPatch,
+      isBinary: false,
+      sha256: hash,
+      expectedSha256: hash,
+      integrity: 'VERIFIED',
+      totalBytes: buffer.byteLength,
+      chunkCount: 1,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+  }
+
+  public async listTaskArtifacts(
+    studioId: string,
+    taskId: string
+  ): Promise<RustArtifactRecord[]> {
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return [
+      {
+        id: `artifact-patch-${taskId}`,
+        studio_id: studioId,
+        task_id: taskId,
+        producer_agent_id: 'agent-coder-01',
+        kind: 'patch',
+        logical_name: 'unified.patch',
+        content_hash: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        location: '/tmp/artifacts/patch.diff',
+        created_at: new Date().toISOString(),
+        size_bytes: 120,
+      },
+    ];
+    /* eslint-enable @typescript-eslint/naming-convention */
+  }
+
+  public async fetchArtifactContent(
+    studioId: string,
+    artifactId: string,
+    _signal?: AbortSignal
+  ): Promise<ReassembledArtifactContent> {
+    const text = 'Fixture artifact content for preview.';
+    const buffer = Buffer.from(text, 'utf8');
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return {
+      studioId,
+      artifactId,
+      artifact: {
+        id: artifactId,
+        studio_id: studioId,
+        task_id: 'task-1',
+        producer_agent_id: 'agent-coder-01',
+        kind: 'file',
+        logical_name: 'fixture.txt',
+        content_hash: `sha256:${hash}`,
+        location: '/tmp/artifacts/fixture.txt',
+        created_at: new Date().toISOString(),
+        size_bytes: buffer.byteLength,
+      },
+      rawBuffer: buffer,
+      text,
+      isBinary: false,
+      sha256: hash,
+      expectedSha256: hash,
+      integrity: 'VERIFIED',
+      totalBytes: buffer.byteLength,
+      chunkCount: 1,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+  }
+
   public async listProviderSummaries(): Promise<ProviderSummary[]> {
     return this._providers.map(p => ({
       ...p,
@@ -742,6 +854,105 @@ export class FixtureBridge implements AgentStudiosBridge {
     this._isCancelled = true;
   }
 
+  public async submitTask(req: SubmitTaskRequest): Promise<SubmitTaskResult> {
+    const taskId = `task-fixture-${Date.now()}`;
+    this._nextSequenceNumber++;
+    const startEvt: TimelineEvent = {
+      sequenceNumber: this._nextSequenceNumber,
+      id: `evt-${this._nextSequenceNumber}`,
+      timestamp: Date.now(),
+      type: 'task_started',
+      summary: `Task "${req.prompt}" started`,
+      taskId,
+    };
+    this._timeline.push(startEvt);
+    this._onEvent.fire(startEvt);
+
+    return {
+      success: true,
+      taskId,
+      taskKey: `key-${taskId}`,
+      studioId: req.studioId,
+      displayTitle: req.prompt,
+    };
+  }
+
+  public async cancelTask(taskId: string, _reason?: string): Promise<CancelTaskResult> {
+    this._nextSequenceNumber++;
+    const cancelEvt: TimelineEvent = {
+      sequenceNumber: this._nextSequenceNumber,
+      id: `evt-${this._nextSequenceNumber}`,
+      timestamp: Date.now(),
+      type: 'task_cancelled',
+      summary: `Task ${taskId} cancelled`,
+      taskId,
+    };
+    this._timeline.push(cancelEvt);
+    this._onEvent.fire(cancelEvt);
+
+    return {
+      success: true,
+      taskId,
+      studioId: 'fixture-studio',
+      summary: {
+        cancelled_tasks: [taskId],
+        cancelled_runs: [],
+        cancelled_approvals: [],
+      },
+    };
+  }
+
+  public async getExecutionReadiness(): Promise<RustExecutionReadinessReport> {
+    /* eslint-disable @typescript-eslint/naming-convention */
+    return {
+      is_ready: true,
+      available_runtimes: ['claude-code'],
+      runtime_instances: [
+        {
+          instance_id: 'claude-code-local',
+          implementation: 'claude-code',
+          healthy: true,
+        },
+      ],
+      runtime_capabilities: {
+        'claude-code-local': {
+          streaming_events: 'supported',
+          stop: 'supported',
+        },
+      },
+      available_models: [
+        {
+          provider_instance_id: 'provider-anthropic-01',
+          model_id: 'claude-3-5-sonnet',
+          display_name: 'Claude 3.5 Sonnet',
+        },
+      ],
+      authorized_workspaces: [this._session.workspacePath],
+      defaults: {
+        default_repo_path: this._session.workspacePath,
+        default_provider_instance_id: 'provider-anthropic-01',
+        default_model_id: 'claude-3-5-sonnet',
+        configured_instance_id: 'claude-code-local',
+      },
+      blocking_reasons: [],
+    };
+  }
+
+  public async getRecoveryStatus(): Promise<RustRecoveryStatusReport> {
+    return {
+      last_recovery_at: new Date().toISOString(),
+      interrupted_tasks_count: 0,
+      interrupted_runs_count: 0,
+      worktrees_reconciled: 0,
+      worktrees_missing: 0,
+      worktrees_foreign: 0,
+      database_healthy: true,
+      database_path: null,
+      total_persisted_events: this._timeline.length,
+    };
+  }
+  /* eslint-enable @typescript-eslint/naming-convention */
+
   public async listSessions(): Promise<SessionSummary[]> {
     return this._sessions.map(s => ({
       id: s.id,
@@ -792,6 +1003,10 @@ export class FixtureBridge implements AgentStudiosBridge {
     }
     this._session = target;
     return { ...this._session };
+  }
+
+  public setSessionWorkspacePathForTesting(wsPath: string): void {
+    this._session = { ...this._session, workspacePath: wsPath };
   }
 
   public dispose(): void {

@@ -266,6 +266,14 @@ export class MissionControlHtmlBuilder {
         });
       };
 
+      // Open Artifact & Diff Review Workbench
+      window.openArtifactReview = function(taskId) {
+        vscode.postMessage({
+          type: 'openArtifactReview',
+          payload: { taskId: taskId }
+        });
+      };
+
       // Open Chat sidebar
       window.openChat = function(sessionId) {
         vscode.postMessage({

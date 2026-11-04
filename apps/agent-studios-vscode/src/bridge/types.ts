@@ -137,14 +137,18 @@ export type TimelineEventType =
   | 'task_failed'
   | 'task_blocked'
   | 'task_cancelled'
+  | 'task_state_transitioned'
+  | 'run_state_transitioned'
   | 'agent_assigned'
+  | 'tool_started'
   | 'tool_executing'
   | 'tool_completed'
   | 'tool_failed'
   | 'approval_requested'
   | 'approval_decided'
   | 'artifact_created'
-  | 'runtime_output_delta';
+  | 'runtime_output_delta'
+  | 'output_delta';
 
 export interface TimelineEvent {
   sequenceNumber: number;

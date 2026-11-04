@@ -3,6 +3,8 @@
  */
 /* eslint-disable @typescript-eslint/naming-convention */
 
+import * as path from 'path';
+
 export class MockDisposable {
   constructor(private readonly callOnDispose?: () => void) {}
 
@@ -204,7 +206,11 @@ export class MockUri {
     this.path = pathStr;
     this.query = query;
     this.fragment = fragment;
-    this.fsPath = pathStr;
+    if (/^\/[a-zA-Z]:/.test(pathStr)) {
+      this.fsPath = pathStr.slice(1).replace(/\//g, path.sep);
+    } else {
+      this.fsPath = pathStr;
+    }
   }
 
   public toString(): string {
@@ -321,6 +327,8 @@ export const mockWindowMessages = {
   modalWarningResponse: undefined as string | undefined,
   quickPickSelection: undefined as unknown,
   openDialogResult: undefined as MockUri[] | undefined,
+  saveDialogResult: undefined as MockUri | undefined,
+  clipboardText: '',
 };
 
 export function resetMockState(): void {
@@ -333,6 +341,8 @@ export function resetMockState(): void {
   mockWindowMessages.modalWarningResponse = undefined;
   mockWindowMessages.quickPickSelection = undefined;
   mockWindowMessages.openDialogResult = undefined;
+  mockWindowMessages.saveDialogResult = undefined;
+  mockWindowMessages.clipboardText = '';
   mockWorkspaceFindFilesResult.length = 0;
   mockDiagnosticsList.length = 0;
   vscodeMock.window.activeTextEditor = undefined;
@@ -410,6 +420,9 @@ export const vscodeMock = {
     showOpenDialog: async (_options?: unknown): Promise<MockUri[] | undefined> => {
       return mockWindowMessages.openDialogResult;
     },
+    showSaveDialog: async (_options?: unknown): Promise<MockUri | undefined> => {
+      return mockWindowMessages.saveDialogResult;
+    },
     registerWebviewViewProvider: (
       viewId: string,
       provider: unknown,
@@ -470,5 +483,13 @@ export const vscodeMock = {
     }),
   },
   ConfigurationTarget: MockConfigurationTarget,
+  env: {
+    clipboard: {
+      writeText: async (text: string): Promise<void> => {
+        mockWindowMessages.clipboardText = text;
+      },
+      readText: async (): Promise<string> => mockWindowMessages.clipboardText,
+    },
+  },
 };
 

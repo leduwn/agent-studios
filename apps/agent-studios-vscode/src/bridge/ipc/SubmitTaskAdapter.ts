@@ -1,17 +1,20 @@
 /**
  * Agent Studios — Submit Task IPC Adapter
- * Milestone M14 Integration Freeze & M15 UI Execution Preparation
+ * Milestone M15: Multi-Runtime Backend Integration & Authoritative Dispatch
  *
  * Implements typed submission of tasks against the authoritative Rust daemon command:
- * `IpcCommand::SubmitTask` with payload `task_spec: BatchTaskSpec`.
+ * `IpcCommand::SubmitTask` with payload `task_spec: BatchTaskSpec` and `execution: TaskExecutionSpec`.
  *
  * Strict Architectural Invariants:
  * - Active studio identity is explicit.
  * - Prompt text and task description are preserved verbatim.
- * - Operator confirmation is required before dispatching mutating coding tasks.
+ * - Single-use cryptographic operator confirmation token bound to session identity is required.
+ * - Verified daemon readiness report is mandatory for mutating task execution.
+ * - Multi-runtime adapter selection and capability validation prior to dispatch.
+ * - Per-task model and provider routing validated against authoritative daemon catalog.
  * - Task correlation uses genuine Rust-assigned UUIDs from `IpcResponse::TasksSubmitted`.
  * - Backend submission errors remain visible and are never swallowed.
- * - No fake or synthetic task success.
+ * - Zero simulated task success, zero synthetic cancellation state.
  * - No secrets or credentials transmitted or leaked into view state.
  */
 
@@ -22,6 +25,7 @@ import {
   RustIpcResponse,
   RustProviderInstance,
   RustModelDescriptor,
+  RustExecutionReadinessReport,
 } from './RustIpcProtocolTypes';
 import {
   CapabilityMatrix,
@@ -39,6 +43,8 @@ export interface SubmitTaskRequest {
   confirmationChallenge?: OperatorConfirmationChallenge | string;
   requestedModelId?: string;
   requestedProviderId?: string;
+  runtimeInstanceId?: string;
+  runtimePreference?: string;
   workspacePath?: string;
   daemonRepoRoot?: string;
   daemonEffectiveModel?: string;
@@ -46,6 +52,7 @@ export interface SubmitTaskRequest {
   customKey?: string;
   verifyDaemon?: boolean;
   requireWorkspace?: boolean;
+  readiness?: RustExecutionReadinessReport | null;
 }
 
 export interface VerifiedDaemonConfig {
@@ -74,6 +81,12 @@ export class TaskSubmissionError extends Error {
   }
 }
 
+export interface VerifyDaemonOptions {
+  explicitRepoPath?: string;
+  defaultModelEnv?: string;
+  readiness?: RustExecutionReadinessReport | null;
+}
+
 export class SubmitTaskAdapter {
   /**
    * Verifies effective daemon configuration over IPC:
@@ -85,10 +98,7 @@ export class SubmitTaskAdapter {
    */
   public static async verifyDaemonConfiguration(
     transport: { sendCommand: (cmd: RustIpcCommand, timeoutMs?: number) => Promise<RustIpcResponse> } | NativeIpcTransport,
-    options?: {
-      explicitRepoPath?: string;
-      defaultModelEnv?: string;
-    }
+    options?: VerifyDaemonOptions
   ): Promise<VerifiedDaemonConfig> {
     // 1. Verify health & liveness via IpcCommand::GetHealth
     const healthResp = await transport.sendCommand({ type: 'get_health' });
@@ -125,42 +135,66 @@ export class SubmitTaskAdapter {
     let defaultModelId: string | undefined;
     let defaultProviderId: string | undefined;
 
-    const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv);
-    if (parsedEnv) {
-      // Find model in catalog
-      const matched = availableModels.find((m) => {
-        if (parsedEnv.providerId) {
-          return m.provider_instance_id === parsedEnv.providerId && m.id === parsedEnv.modelId;
-        }
-        return m.id === parsedEnv.modelId;
-      });
+    if (options?.readiness?.defaults?.default_model_id) {
+      defaultModelId = options.readiness.defaults.default_model_id;
+      defaultProviderId = options.readiness.defaults.default_provider_instance_id ?? undefined;
 
-      if (!matched) {
-        throw new TaskSubmissionError(
-          `Configured default model '${parsedEnv.providerId ? `${parsedEnv.providerId}/${parsedEnv.modelId}` : parsedEnv.modelId}' not found in daemon provider catalog (parity: connection.rs:1788).`
-        );
+      // Verify defaultModelId exists in availableModels
+      if (availableModels.length > 0) {
+        const matched = availableModels.find((m) => {
+          if (defaultProviderId) {
+            return m.provider_instance_id === defaultProviderId && m.id === defaultModelId;
+          }
+          return m.id === defaultModelId;
+        });
+
+        if (!matched) {
+          throw new TaskSubmissionError(
+            `Daemon default model '${defaultProviderId ? `${defaultProviderId}/${defaultModelId}` : defaultModelId}' not found in daemon provider catalog.`
+          );
+        }
       }
-      defaultModelId = matched.id;
-      defaultProviderId = matched.provider_instance_id;
     } else {
-      if (availableModels.length === 0) {
-        // Catalog empty (test fixture backward compatibility)
-        defaultModelId = undefined;
-        defaultProviderId = undefined;
-      } else if (availableModels.length === 1) {
-        // Unambiguous single-model catalog (parity: connection.rs:1806)
-        defaultModelId = availableModels[0].id;
-        defaultProviderId = availableModels[0].provider_instance_id;
+      const parsedEnv = parseDefaultModelEnv(options?.defaultModelEnv || process.env.AGENT_STUDIOS_DEFAULT_MODEL);
+      if (parsedEnv) {
+        // Find model in catalog
+        const matched = availableModels.find((m) => {
+          if (parsedEnv.providerId) {
+            return m.provider_instance_id === parsedEnv.providerId && m.id === parsedEnv.modelId;
+          }
+          return m.id === parsedEnv.modelId;
+        });
+
+        if (!matched) {
+          throw new TaskSubmissionError(
+            `Configured default model '${parsedEnv.providerId ? `${parsedEnv.providerId}/${parsedEnv.modelId}` : parsedEnv.modelId}' not found in daemon provider catalog (parity: connection.rs:1788).`
+          );
+        }
+        defaultModelId = matched.id;
+        defaultProviderId = matched.provider_instance_id;
       } else {
-        // Multiple models in catalog without explicit AGENT_STUDIOS_DEFAULT_MODEL
-        // Backend agsd fails closed at connection.rs line 1809
-        throw new TaskSubmissionError(
-          `Multiple models available (${availableModels.length}) in daemon catalog, but no explicit model route configured. Set AGENT_STUDIOS_DEFAULT_MODEL (parity: connection.rs:1816).`
-        );
+        if (availableModels.length === 0) {
+          // Catalog empty (test fixture backward compatibility)
+          defaultModelId = undefined;
+          defaultProviderId = undefined;
+        } else if (availableModels.length === 1) {
+          // Unambiguous single-model catalog (parity: connection.rs:1806)
+          defaultModelId = availableModels[0].id;
+          defaultProviderId = availableModels[0].provider_instance_id;
+        } else {
+          // Multiple models in catalog without explicit default in readiness or catalog
+          // Backend agsd fails closed at connection.rs line 1809
+          throw new TaskSubmissionError(
+            `Multiple models available (${availableModels.length}) in daemon catalog, but no explicit model route configured. Set AGENT_STUDIOS_DEFAULT_MODEL (parity: connection.rs:1816).`
+          );
+        }
       }
     }
 
-    const daemonRepoRoot = options?.explicitRepoPath || process.env.AGENT_STUDIOS_REPO_PATH;
+    const daemonRepoRoot =
+      options?.readiness?.defaults?.default_repo_path ??
+      options?.explicitRepoPath ??
+      process.env.AGENT_STUDIOS_REPO_PATH;
 
     return {
       healthy: true,
@@ -174,13 +208,14 @@ export class SubmitTaskAdapter {
   }
 
   /**
-   * Evaluates preflight criteria and dispatches IpcCommand::SubmitTask to the real daemon.
+   * Evaluates preflight criteria against verified daemon readiness and dispatches IpcCommand::SubmitTask.
+   * Enforces fail-closed validation of runtime capabilities, model catalog routes, and operator confirmation.
    */
   public static async submitTask(
     transport: { sendCommand: (cmd: RustIpcCommand, timeoutMs?: number) => Promise<RustIpcResponse> } | NativeIpcTransport,
     req: SubmitTaskRequest
   ): Promise<SubmitTaskResult> {
-    // 0. Dynamic daemon configuration verification if requested
+    // Dynamic daemon configuration verification if requested
     let effectiveRepo = req.daemonRepoRoot;
     let effectiveModel = req.daemonEffectiveModel;
     let effectiveProvider = req.daemonEffectiveProvider;
@@ -189,6 +224,7 @@ export class SubmitTaskAdapter {
       const verified = await this.verifyDaemonConfiguration(transport, {
         explicitRepoPath: req.daemonRepoRoot,
         defaultModelEnv: req.daemonEffectiveModel,
+        readiness: req.readiness,
       });
       effectiveRepo = verified.daemonRepoRoot ?? effectiveRepo;
       effectiveModel = verified.defaultModelId ?? effectiveModel;
@@ -201,6 +237,8 @@ export class SubmitTaskAdapter {
       prompt: req.prompt,
       requestedModelId: req.requestedModelId,
       requestedProviderId: req.requestedProviderId,
+      runtimePreference: req.runtimePreference,
+      runtimeInstanceId: req.runtimeInstanceId,
       confirmedByUser: req.confirmedByUser,
       confirmationChallenge: req.confirmationChallenge,
       consumeChallenge: true, // Atomically consume challenge at dispatch boundary
@@ -212,6 +250,7 @@ export class SubmitTaskAdapter {
       requireWorkspace: req.requireWorkspace ?? (effectiveRepo !== undefined),
       requireAuthoritativeCheck: true,
       requireChallenge: true,
+      readiness: req.readiness,
     };
 
     const preflight: TaskSubmissionPreflightResult =
@@ -224,7 +263,7 @@ export class SubmitTaskAdapter {
       );
     }
 
-    // 2. Construct authoritative Rust BatchTaskSpec
+    // 2. Construct authoritative Rust BatchTaskSpec with execution spec (M15)
     /* eslint-disable @typescript-eslint/naming-convention */
     const taskSpec: RustBatchTaskSpec = {
       key: req.customKey || preflight.sanitizedSpec.key,
@@ -236,6 +275,18 @@ export class SubmitTaskAdapter {
       dependency_keys: [],
       dependency_task_ids: [],
       dependency_output_policy: 'task_success',
+      execution: {
+        initial_prompt: req.prompt,
+        repository_path: req.workspacePath ?? null,
+        runtime_instance_id:
+          req.runtimeInstanceId ?? preflight.resolvedRuntimeInstanceId ?? null,
+        runtime_preference:
+          req.runtimePreference ?? preflight.resolvedRuntimePreference ?? null,
+        provider_instance_id:
+          req.requestedProviderId ?? preflight.resolvedProviderId ?? effectiveProvider ?? null,
+        model_id:
+          req.requestedModelId ?? preflight.resolvedModelId ?? effectiveModel ?? null,
+      },
     };
 
     const command: RustIpcCommand = {

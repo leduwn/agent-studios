@@ -105,6 +105,12 @@
         "icon": "$(diff)"
       },
       {
+        "command": "agent-studios.openArtifactReview",
+        "title": "Agent Studios: Review Task Artifacts & Diff",
+        "category": "Agent Studios",
+        "icon": "$(diff)"
+      },
+      {
         "command": "agent-studios.approveAction",
         "title": "Agent Studios: Approve Action",
         "category": "Agent Studios",
