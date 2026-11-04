@@ -475,7 +475,10 @@ async fn test_two_phase_commit_stdin_write_failure_transitions_to_delivery_faile
 
     // Attempt stdin write - must fail due to closed pipe
     let write_res = process.write_stdin_line(&json_frame).await;
-    assert!(write_res.is_err(), "Stdin write must fail when pipe is closed");
+    assert!(
+        write_res.is_err(),
+        "Stdin write must fail when pipe is closed"
+    );
 
     // Phase 2: Failure triggers fail_delivery
     authority.fail_delivery(token.clone());
@@ -771,13 +774,10 @@ async fn test_watchdog_immediate_zero_duration_timeout_no_leak() {
             .expect("Registration should succeed");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let watchdog_handle = authority.spawn_watchdog(
-            approval_id,
-            Duration::ZERO,
-            move |deny_resp| async move {
+        let watchdog_handle =
+            authority.spawn_watchdog(approval_id, Duration::ZERO, move |deny_resp| async move {
                 let _ = tx.send(deny_resp);
-            },
-        );
+            });
 
         let deny = tokio::time::timeout(Duration::from_millis(200), rx)
             .await
@@ -872,7 +872,10 @@ async fn test_watchdog_timeout_stdin_failure_terminates_process_fail_closed() {
         .expect("Timeout handler should run within 400ms")
         .expect("Terminated signal should be received");
 
-    assert!(terminated, "Process must be terminated fail-closed when timeout stdin delivery fails");
+    assert!(
+        terminated,
+        "Process must be terminated fail-closed when timeout stdin delivery fails"
+    );
     assert_eq!(
         authority.get_approval_state(&approval_id),
         Some(ApprovalState::TimedOut)
