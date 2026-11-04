@@ -1,0 +1,139 @@
+﻿{
+    "timestamp":  "20261105T014500Z",
+    "canonical_repository":  "D:\\Projects\\agent-studios",
+    "canonical_branch":  "integration/m15-unified-codebase",
+    "canonical_head":  "843be620336de461b77708543dee5edd55e6f34e",
+    "zero_deletion_enforced":  true,
+    "worktrees":  [
+                      {
+                          "path":  "D:\\Projects\\agent-studios",
+                          "branch":  "integration/m15-unified-codebase",
+                          "head_sha":  "843be62033",
+                          "classification":  "CANONICAL_ACTIVE",
+                          "disk_size_mb":  1010,
+                          "reclaimable_mb":  0,
+                          "operator_approval_required":  false,
+                          "retention_reason":  "Canonical monorepo root"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-unified-staging",
+                          "branch":  "(detached)",
+                          "head_sha":  "843be62033",
+                          "classification":  "ACTIVE_STAGING",
+                          "disk_size_mb":  306,
+                          "reclaimable_mb":  306,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Decommission candidate after canonical validation"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-m15-04",
+                          "branch":  "feat/m15-04-durable-state-recovery",
+                          "head_sha":  "cf1e6c0f98",
+                          "classification":  "HOLD",
+                          "disk_size_mb":  4640,
+                          "reclaimable_mb":  0,
+                          "operator_approval_required":  false,
+                          "retention_reason":  "Authoritative backend tip pending PR #30 merge"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-ide-ui",
+                          "branch":  "feat/m15-real-agent-execution-ui",
+                          "head_sha":  "3de7c85a96",
+                          "classification":  "HOLD",
+                          "disk_size_mb":  461,
+                          "reclaimable_mb":  0,
+                          "operator_approval_required":  false,
+                          "retention_reason":  "Authoritative frontend tip pending PR #27 merge"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-mission-control",
+                          "branch":  "feat/m14-mission-control-workbench",
+                          "head_sha":  "3ee485cacd",
+                          "classification":  "HOLD",
+                          "disk_size_mb":  431,
+                          "reclaimable_mb":  0,
+                          "operator_approval_required":  false,
+                          "retention_reason":  "Divergent commits not in DAG history"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-ags-cli",
+                          "branch":  "feat/provider-management-v1",
+                          "head_sha":  "a98129ef7e",
+                          "classification":  "INDEPENDENT",
+                          "disk_size_mb":  4570,
+                          "reclaimable_mb":  0,
+                          "operator_approval_required":  false,
+                          "retention_reason":  "Standalone CLI and TUI project (PR #20)"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-m13",
+                          "branch":  "feat/m13-ipc-02-control-plane",
+                          "head_sha":  "ce0396c1f1",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  4460,
+                          "reclaimable_mb":  4460,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-m15",
+                          "branch":  "feat/m15-01-per-task-execution-contract",
+                          "head_sha":  "a5dbbfc5eb",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  4470,
+                          "reclaimable_mb":  4470,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-m15-02",
+                          "branch":  "feat/m15-02-multi-runtime-registry",
+                          "head_sha":  "b307b9a6e2",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  4480,
+                          "reclaimable_mb":  4480,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-m15-03",
+                          "branch":  "feat/m15-03-artifact-diff-review",
+                          "head_sha":  "cc1c3e8f39",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  4500,
+                          "reclaimable_mb":  4500,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-vscode-m14-02",
+                          "branch":  "feat/m14-vscode-extension-host-hardening",
+                          "head_sha":  "ed80b243c9",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  421,
+                          "reclaimable_mb":  421,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-vscode-ipc-03",
+                          "branch":  "feat/m14-ipc-03-connected-client",
+                          "head_sha":  "73b7298ca3",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  427,
+                          "reclaimable_mb":  427,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      },
+                      {
+                          "path":  "D:\\Projects\\agent-studios-mission-control-integration",
+                          "branch":  "feat/m14-mission-control-connected-integration",
+                          "head_sha":  "a13230ee93",
+                          "classification":  "APPROVED_CANDIDATE",
+                          "disk_size_mb":  434,
+                          "reclaimable_mb":  434,
+                          "operator_approval_required":  true,
+                          "retention_reason":  "Fully merged and subsumed in unified baseline"
+                      }
+                  ]
+}

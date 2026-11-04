@@ -1,0 +1,32 @@
+﻿{
+    "timestamp":  "20261105T015000Z",
+    "canonical_repository":  "D:\\Projects\\agent-studios",
+    "canonical_branch":  "integration/m15-unified-codebase",
+    "canonical_head_sha":  "843be620336de461b77708543dee5edd55e6f34e",
+    "git_common_dir":  ".git",
+    "remote_origin":  "https://github.com/leduwn/agent-studios.git",
+    "provider_wip":  {
+                         "branch":  "feat/provider-discovery-v1.2-wip",
+                         "commit_sha":  "96dfb4946ef77a06bb075bd8e22d3641c3ecfe88",
+                         "pushed_to_remote":  true,
+                         "backup_directory":  "D:\\Projects\\agent-studios-preservation\\provider-discovery-20261105T012118Z",
+                         "manifest_path":  "D:\\Projects\\agent-studios-preservation\\provider-discovery-20261105T012118Z\\provider_wip_manifest.json",
+                         "preserved_file_count":  59
+                     },
+    "staging_worktree":  {
+                             "path":  "D:\\Projects\\agent-studios-unified-staging",
+                             "state":  "detached_head",
+                             "commit_sha":  "843be620336de461b77708543dee5edd55e6f34e"
+                         },
+    "quality_gates":  {
+                          "cargo_fmt":  "PASS",
+                          "cargo_check":  "PASS",
+                          "cargo_clippy":  "PASS",
+                          "zero_billable_spend":  ".00"
+                      },
+    "safety_invariants":  {
+                              "zero_destructive_deletions":  true,
+                              "zero_worktrees_removed":  true,
+                              "zero_secrets_leaked":  true
+                          }
+}
