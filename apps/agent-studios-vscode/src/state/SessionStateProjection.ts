@@ -314,6 +314,19 @@ export class SessionStateProjection implements vscode.Disposable {
         break;
       }
 
+      case 'task_submitted': {
+        if (event.taskId) {
+          this.upsertTask({
+            id: event.taskId,
+            title: event.summary || `Task ${event.taskId}`,
+            status: 'pending',
+            createdAt: event.timestamp,
+            updatedAt: event.timestamp,
+          });
+        }
+        break;
+      }
+
       case 'task_started': {
         if (event.taskId) {
           const task = this._tasks.find(t => t.id === event.taskId);
@@ -324,6 +337,15 @@ export class SessionStateProjection implements vscode.Disposable {
             }
             task.updatedAt = event.timestamp;
             this._onTasksChanged.fire(this.tasks);
+          } else {
+            this.upsertTask({
+              id: event.taskId,
+              title: event.summary || `Task ${event.taskId}`,
+              status: 'running',
+              assignedAgentName: event.agentName,
+              createdAt: event.timestamp,
+              updatedAt: event.timestamp,
+            });
           }
         }
         break;
@@ -343,6 +365,15 @@ export class SessionStateProjection implements vscode.Disposable {
               this._onSessionChanged.fire(this.session);
             }
             this._onTasksChanged.fire(this.tasks);
+          } else {
+            this.upsertTask({
+              id: event.taskId,
+              title: event.summary || `Task ${event.taskId}`,
+              status: 'succeeded',
+              progress: 100,
+              createdAt: event.timestamp,
+              updatedAt: event.timestamp,
+            });
           }
         }
         break;
@@ -350,11 +381,52 @@ export class SessionStateProjection implements vscode.Disposable {
 
       case 'task_failed': {
         if (event.taskId) {
+          const payload = (event.details && typeof event.details === 'object')
+            ? (event.details as Record<string, unknown>)
+            : {};
+          const isInterrupted = payload.reason === 'daemon_interrupted' ||
+            payload.error === 'daemon_interrupted' ||
+            (typeof event.summary === 'string' && event.summary.includes('daemon_interrupted'));
+          const errMessage = (typeof payload.error === 'string' ? payload.error : undefined) ||
+            (typeof payload.message === 'string' ? payload.message : undefined) ||
+            event.summary ||
+            (isInterrupted ? 'daemon_interrupted' : 'Task failed');
+
           const task = this._tasks.find(t => t.id === event.taskId);
           if (task) {
             task.status = 'failed';
+            task.error = errMessage;
             task.updatedAt = event.timestamp;
             this._onTasksChanged.fire(this.tasks);
+          } else {
+            this.upsertTask({
+              id: event.taskId,
+              title: event.summary || `Task ${event.taskId}`,
+              status: 'failed',
+              error: errMessage,
+              createdAt: event.timestamp,
+              updatedAt: event.timestamp,
+            });
+          }
+        }
+        break;
+      }
+
+      case 'task_cancelled': {
+        if (event.taskId) {
+          const task = this._tasks.find(t => t.id === event.taskId);
+          if (task) {
+            task.status = 'cancelled';
+            task.updatedAt = event.timestamp;
+            this._onTasksChanged.fire(this.tasks);
+          } else {
+            this.upsertTask({
+              id: event.taskId,
+              title: event.summary || `Task ${event.taskId}`,
+              status: 'cancelled',
+              createdAt: event.timestamp,
+              updatedAt: event.timestamp,
+            });
           }
         }
         break;
@@ -439,6 +511,48 @@ export class SessionStateProjection implements vscode.Disposable {
     }
   }
 
+  public upsertTask(task: Partial<TaskNode> & { id: string }): TaskNode {
+    const existing = this._tasks.find(t => t.id === task.id);
+    if (existing) {
+      Object.assign(existing, task, { updatedAt: task.updatedAt ?? Date.now() });
+      this._onTasksChanged.fire(this.tasks);
+      return { ...existing };
+    }
+    const newTask: TaskNode = {
+      id: task.id,
+      runId: task.runId ?? (this._session?.id || 'default_run'),
+      title: task.title || `Task ${task.id}`,
+      description: task.description ?? '',
+      status: task.status || 'pending',
+      assignedAgentId: task.assignedAgentId,
+      assignedAgentName: task.assignedAgentName,
+      dependencies: task.dependencies ?? [],
+      createdAt: task.createdAt ?? Date.now(),
+      updatedAt: task.updatedAt ?? Date.now(),
+      progress: task.progress,
+      error: task.error,
+    };
+    this._tasks.push(newTask);
+    this._onTasksChanged.fire(this.tasks);
+    return { ...newTask };
+  }
+
+  public reconcileInterruptedTasks(reason: string = 'daemon_interrupted'): void {
+    let changed = false;
+    for (const t of this._tasks) {
+      if (t.status === 'running' || t.status === 'pending' || t.status === 'ready' || t.status === 'blocked') {
+        t.status = 'failed';
+        t.error = `Task interrupted: daemon_interrupted (${reason})`;
+        t.updatedAt = Date.now();
+        changed = true;
+      }
+    }
+    TaskExecutionStore.instance.reconcileDaemonRestart(reason);
+    if (changed) {
+      this._onTasksChanged.fire(this.tasks);
+    }
+  }
+
   public addChatMessage(message: ChatMessage): void {
     this._chatMessages.push({ ...message });
     this._onChatMessageAdded.fire({ ...message });
@@ -461,10 +575,28 @@ export class SessionStateProjection implements vscode.Disposable {
   }
 
   public switchSession(session: SessionInfo | null): void {
+    const isNewSession = (session?.id ?? null) !== this._activeSessionId;
     this._session = session ? { ...session } : null;
     this._activeSessionId = session?.id ?? null;
+    if (isNewSession) {
+      this._tasks = [];
+      this._approvals = [];
+      this._artifacts = [];
+      this._timeline = [];
+      this._chatMessages = [];
+      this._lastProcessedSequence = 0;
+      this._healthState = 'nominal';
+      TaskExecutionStore.instance.switchStudio(session?.id ?? null);
+      OperatorConfirmationManager.clearPendingChallenges();
+    }
     this._onSessionSwitched.fire(this.session);
     this._onSessionChanged.fire(this.session);
+    if (isNewSession) {
+      this._onTasksChanged.fire(this.tasks);
+      this._onApprovalsChanged.fire(this.approvals);
+      this._onArtifactsChanged.fire(this.artifacts);
+      this._onTimelineChanged.fire(this.timeline);
+    }
   }
 
   public dispose(): void {

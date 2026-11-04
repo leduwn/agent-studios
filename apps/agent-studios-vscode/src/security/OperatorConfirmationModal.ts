@@ -45,8 +45,100 @@ export type OperatorConfirmationDialogHandler = (
   formattedDetail: string
 ) => Promise<boolean>;
 
+export interface ModalKeyboardEvent {
+  key: string;
+  shiftKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  altKey?: boolean;
+  preventDefault?: () => void;
+}
+
+export interface ModalActionHandlers {
+  onConfirm: () => void;
+  onCancel: () => void;
+  onNavigate?: (newIndex: number) => void;
+  focusedIndex?: number;
+  totalElements?: number;
+}
+
 export class OperatorConfirmationModal {
   private static customDialogHandler?: OperatorConfirmationDialogHandler;
+
+  /**
+   * Traps keyboard focus within modal elements, wrapping from last to first (forward)
+   * or first to last (backward).
+   */
+  public static trapFocus(
+    currentIndex: number,
+    totalElements: number,
+    direction: 'forward' | 'backward'
+  ): number {
+    if (totalElements <= 0) {
+      return 0;
+    }
+    if (direction === 'forward') {
+      return (currentIndex + 1) % totalElements;
+    }
+    return (currentIndex - 1 + totalElements) % totalElements;
+  }
+
+  /**
+   * Formats an accessible screen-reader announcement describing the pending mutation.
+   */
+  public static formatScreenReaderAnnouncement(
+    request: OperatorConfirmationDialogRequest
+  ): string {
+    const cleanPrompt = request.prompt.trim().replace(/\r?\n+/g, ' ');
+    const preview = cleanPrompt.length > 120
+      ? `${cleanPrompt.substring(0, 120)}...`
+      : cleanPrompt;
+    return [
+      `Security Alert: Operator confirmation required for ${request.actionDescription || 'Mutating Agent Task Execution'}.`,
+      `Studio: ${request.studioName || request.studioId}.`,
+      `Runtime: ${request.runtime}.`,
+      `Model: ${request.providerId || 'default'} / ${request.modelId || 'default'}.`,
+      `Workspace: ${request.workspacePath || 'None configured'}.`,
+      `Prompt Preview: "${preview}".`,
+      'Warning: This task may modify workspace files or execute commands.',
+      'Keyboard controls: Press Enter to Confirm and Execute, or Escape to Cancel.',
+    ].join(' ');
+  }
+
+  /**
+   * Handles keyboard navigation within confirmation modal.
+   * Enforces Esc key cancellation (which purges challenges), Enter confirmation,
+   * and Tab/Shift+Tab focus wrapping.
+   */
+  public static handleModalKeyDown(
+    event: ModalKeyboardEvent,
+    handlers: ModalActionHandlers
+  ): boolean {
+    if (event.key === 'Escape') {
+      event.preventDefault?.();
+      OperatorConfirmationManager.clearPendingChallenges();
+      handlers.onCancel();
+      return true;
+    }
+
+    if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault?.();
+      handlers.onConfirm();
+      return true;
+    }
+
+    if (event.key === 'Tab') {
+      event.preventDefault?.();
+      const current = handlers.focusedIndex ?? 0;
+      const total = handlers.totalElements ?? 2;
+      const direction = event.shiftKey ? 'backward' : 'forward';
+      const nextIndex = this.trapFocus(current, total, direction);
+      handlers.onNavigate?.(nextIndex);
+      return true;
+    }
+
+    return false;
+  }
 
   /**
    * Sets custom confirmation dialog handler for automated tests.

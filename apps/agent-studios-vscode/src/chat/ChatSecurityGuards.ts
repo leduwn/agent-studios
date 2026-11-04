@@ -24,6 +24,7 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'attachContext',
   'removeAttachment',
   'switchMode',
+  'switchTask',
   'switchProviderModel',
   'switchSession',
   'newSession',

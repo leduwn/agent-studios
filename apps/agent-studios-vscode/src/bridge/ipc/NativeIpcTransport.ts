@@ -40,6 +40,8 @@ export interface TransportOptions {
   clientKey: string;
   capabilities?: string[];
   commandTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  connectRetryDelayMs?: number;
 }
 
 interface QueuedCommand {
@@ -51,6 +53,9 @@ interface QueuedCommand {
 
 export class NativeIpcTransport extends EventEmitter {
   private socket: net.Socket | null = null;
+  private connectingSocket: net.Socket | null = null;
+  private connectRetryTimer: NodeJS.Timeout | null = null;
+  private connectRetryAbort: (() => void) | null = null;
   private state: TransportState = 'disconnected';
   private accumulatedBuffer: Buffer = Buffer.alloc(0);
 
@@ -87,6 +92,7 @@ export class NativeIpcTransport extends EventEmitter {
 
   /**
    * Connects to the native socket and drives the 2-phase handshake.
+   * Includes resilient connection retry logic on transient ENOENT, ECONNREFUSED, EPIPE.
    */
   public async connect(): Promise<void> {
     if (this.state === 'ready' || this.state === 'connecting' || this.state === 'authenticating') {
@@ -95,30 +101,28 @@ export class NativeIpcTransport extends EventEmitter {
 
     this.setState('connecting');
 
-    await new Promise<void>((resolve, reject) => {
-      let isConnected = false;
-      const socket = net.createConnection(this.options.endpoint, () => {
-        isConnected = true;
-        this.socket = socket;
-        resolve();
-      });
+    let socket: net.Socket;
+    try {
+      socket = await this.connectSocketWithRetry();
+    } catch (err: unknown) {
+      if ((this.state as TransportState) !== 'disconnected') {
+        this.setState('error');
+      }
+      throw err;
+    }
 
-      socket.on('data', (chunk: Buffer) => {
-        this.handleData(chunk);
-      });
+    this.socket = socket;
 
-      socket.on('error', (err: Error) => {
-        if (!isConnected) {
-          this.setState('error');
-          reject(err);
-        } else {
-          this.handleSocketError(err);
-        }
-      });
+    socket.on('data', (chunk: Buffer) => {
+      this.handleData(chunk);
+    });
 
-      socket.on('close', () => {
-        this.handleSocketClose();
-      });
+    socket.on('error', (err: Error) => {
+      this.handleSocketError(err);
+    });
+
+    socket.on('close', () => {
+      this.handleSocketClose();
     });
 
     try {
@@ -130,10 +134,113 @@ export class NativeIpcTransport extends EventEmitter {
     }
   }
 
+  private async connectSocketWithRetry(): Promise<net.Socket> {
+    const timeoutMs = this.options.connectTimeoutMs ?? 1500;
+    const retryDelayMs = this.options.connectRetryDelayMs ?? 50;
+    const deadline = Date.now() + timeoutMs;
+
+    const isRetryable = (err: unknown): boolean => {
+      if (!err || typeof err !== 'object') {
+        return false;
+      }
+      const code = (err as { code?: string }).code;
+      if (code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'EPIPE') {
+        return true;
+      }
+      const msg = (err as { message?: string }).message;
+      return (
+        typeof msg === 'string' &&
+        (msg.includes('ENOENT') || msg.includes('ECONNREFUSED') || msg.includes('EPIPE'))
+      );
+    };
+
+    while (true) {
+      if (this.state !== 'connecting') {
+        throw new Error('Connection aborted: transport is no longer in connecting state.');
+      }
+
+      try {
+        const socket = await new Promise<net.Socket>((resolve, reject) => {
+          let connected = false;
+          let candidateSocket: net.Socket | null = null;
+
+          const cleanup = () => {
+            if (candidateSocket && !connected) {
+              candidateSocket.removeAllListeners();
+              candidateSocket.destroy();
+            }
+            if (this.connectingSocket === candidateSocket) {
+              this.connectingSocket = null;
+            }
+          };
+
+          try {
+            candidateSocket = net.createConnection(this.options.endpoint, () => {
+              connected = true;
+              this.connectingSocket = null;
+              resolve(candidateSocket!);
+            });
+            this.connectingSocket = candidateSocket;
+          } catch (syncErr) {
+            cleanup();
+            reject(syncErr);
+            return;
+          }
+
+          candidateSocket.once('error', (err: Error) => {
+            if (!connected) {
+              cleanup();
+              reject(err);
+            }
+          });
+        });
+
+        return socket;
+      } catch (err: unknown) {
+        if (this.state !== 'connecting') {
+          throw err;
+        }
+
+        if (isRetryable(err) && Date.now() < deadline) {
+          const remaining = deadline - Date.now();
+          const delay = Math.min(retryDelayMs, remaining);
+          if (delay > 0) {
+            await new Promise<void>((resolve, reject) => {
+              this.connectRetryAbort = () => {
+                reject(new Error('Connection aborted: transport disconnected.'));
+              };
+              this.connectRetryTimer = setTimeout(() => {
+                this.connectRetryTimer = null;
+                this.connectRetryAbort = null;
+                resolve();
+              }, delay);
+            });
+            continue;
+          }
+        }
+
+        throw err;
+      }
+    }
+  }
+
   /**
    * Disconnects the socket cleanly and clears pending command queue.
    */
   public disconnect(): void {
+    if (this.connectRetryTimer) {
+      clearTimeout(this.connectRetryTimer);
+      this.connectRetryTimer = null;
+    }
+    if (this.connectRetryAbort) {
+      this.connectRetryAbort();
+      this.connectRetryAbort = null;
+    }
+    if (this.connectingSocket) {
+      this.connectingSocket.removeAllListeners();
+      this.connectingSocket.destroy();
+      this.connectingSocket = null;
+    }
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();
@@ -301,8 +408,14 @@ export class NativeIpcTransport extends EventEmitter {
       if (response.type === 'error') {
         const err = new Error(response.message);
         this.emit('subscription_error', err);
-        if (this.listenerCount('error') > 0) {
-          this.emit('error', err);
+        const isSequenceGap =
+          response.message.includes('Sequence gap') ||
+          response.message.includes('SequenceGapRecoverable') ||
+          response.message.includes('Failed to replay events');
+        if (!isSequenceGap || this.listenerCount('subscription_error') === 0) {
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', err);
+          }
         }
       }
       return;

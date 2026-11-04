@@ -567,11 +567,12 @@ describe('Tier 3: Real Agent Execution & Runtime E2E Suite', function () {
       );
 
       // Attempt 2: Prompt hash mismatch
+      const challenge2 = OperatorConfirmationManager.createChallenge(validStudioId, 'original prompt');
       const reqMismatchedPrompt: SubmitTaskRequest = {
         studioId: validStudioId,
         prompt: 'tampered prompt content',
         confirmedByUser: true,
-        confirmationChallenge: challenge,
+        confirmationChallenge: challenge2,
       };
 
       await assert.rejects(

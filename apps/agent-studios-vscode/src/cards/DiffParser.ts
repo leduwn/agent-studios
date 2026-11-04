@@ -37,6 +37,7 @@ export interface ParsedDiffFile {
   additions: number;
   deletions: number;
   rawPatch: string;
+  hasPathTraversal?: boolean;
 }
 
 export interface ParsedDiff {
@@ -50,7 +51,7 @@ export interface ParsedDiff {
  * Decodes Git C-style quoted path string containing octal UTF-8 escapes (e.g. "\341\273\207").
  */
 export function unquoteGitPath(str: string): string {
-  if (!str.startsWith('"') || !str.endsWith('"')) {
+  if (str.length < 2 || !str.startsWith('"') || !str.endsWith('"')) {
     return str;
   }
   const inner = str.slice(1, -1);
@@ -93,10 +94,23 @@ export function unquoteGitPath(str: string): string {
       } else if (c === '\\' || c === '"') {
         bytes.push(c.charCodeAt(0));
       } else {
-        bytes.push(c.charCodeAt(0));
+        const codePoint = c.codePointAt(0)!;
+        const char = String.fromCodePoint(codePoint);
+        const encoded = Buffer.from(char, 'utf8');
+        for (let b = 0; b < encoded.length; b++) {
+          bytes.push(encoded[b]);
+        }
       }
     } else {
-      bytes.push(inner.charCodeAt(i));
+      const codePoint = inner.codePointAt(i)!;
+      const char = String.fromCodePoint(codePoint);
+      const encoded = Buffer.from(char, 'utf8');
+      for (let b = 0; b < encoded.length; b++) {
+        bytes.push(encoded[b]);
+      }
+      if (char.length > 1) {
+        i += char.length - 1;
+      }
     }
     i++;
   }
@@ -105,52 +119,183 @@ export function unquoteGitPath(str: string): string {
 }
 
 /**
- * Strips Git a/ and b/ diff prefixes and unquotes path.
+ * Detects whether a path contains path traversal sequences, absolute paths, or control characters.
  */
-export function cleanGitPath(raw: string): string {
+export function isPathTraversal(rawPath?: string | null): boolean {
+  if (!rawPath || typeof rawPath !== 'string') {
+    return false;
+  }
+  // Check for control characters (ASCII 0-31 and 127)
+  if (/[\x00-\x1f\x7f]/.test(rawPath)) {
+    return true;
+  }
+  // Check for directory traversal sequences (.. or ../ or ..\ or /.. or \..)
+  if (/(?:^|[/\\])\.\.(?:[/\\]|$)/.test(rawPath)) {
+    return true;
+  }
+  // Check for Windows drive letter prefix (e.g. C:\, D:/)
+  if (/^[a-zA-Z]:[/\\]?/.test(rawPath)) {
+    return true;
+  }
+  // Check for UNC paths (\\server\share or //server/share)
+  if (/^[/\\]{2}/.test(rawPath)) {
+    return true;
+  }
+  // Check for Unix root absolute path (starts with / or \)
+  if (/^[/\\]/.test(rawPath)) {
+    return true;
+  }
+  // Check for sensitive system paths like /etc/
+  if (/(?:^|[/\\])etc(?:[/\\]|$)/i.test(rawPath)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Sanitizes an artifact or task ID by removing directory traversal,
+ * absolute path prefixes, drive letters, and control characters.
+ */
+export function sanitizeArtifactId(rawId: string): string {
+  if (!rawId || typeof rawId !== 'string') {
+    return 'unknown';
+  }
+  // Strip control characters
+  let sanitized = rawId.replace(/[\x00-\x1f\x7f]/g, '');
+  // Strip Windows drive letters
+  sanitized = sanitized.replace(/^[a-zA-Z]:[/\\]*/, '');
+  // Strip traversal segments
+  sanitized = sanitized.replace(/(?:^|[/\\])\.\.(?=[/\\]|$)/g, '');
+  // Strip leading slashes
+  sanitized = sanitized.replace(/^[/\\]+/, '');
+  // Strip /etc/ or etc/ prefix
+  sanitized = sanitized.replace(/^(?:etc[/\\]+)+/i, '');
+  // Strip leading slashes again if any left
+  sanitized = sanitized.replace(/^[/\\]+/, '');
+  // Normalize multiple slashes to underscore
+  sanitized = sanitized.replace(/[/\\]+/g, '_');
+  sanitized = sanitized.replace(/^_+|_+$/g, '');
+  sanitized = sanitized.trim();
+  if (sanitized.length === 0 || sanitized === '.' || sanitized === '..') {
+    return 'safe_artifact';
+  }
+  return sanitized;
+}
+
+/**
+ * Sanitizes a file path from a diff header:
+ * - Unquotes Git C-style quotes
+ * - Strips control characters
+ * - Strips Windows drive letters and UNC prefixes
+ * - Strips leading absolute slashes
+ * - Safely eliminates traversal segments (..)
+ */
+export function sanitizePath(rawPath?: string | null): string {
+  if (!rawPath || typeof rawPath !== 'string') {
+    return '';
+  }
+  let pathStr = unquoteGitPath(rawPath.trim());
+  // Strip control characters
+  pathStr = pathStr.replace(/[\x00-\x1f\x7f]/g, '');
+  // Strip Windows drive letters (e.g. C:\)
+  pathStr = pathStr.replace(/^[a-zA-Z]:[/\\]*/, '');
+  // Strip UNC / leading slashes
+  pathStr = pathStr.replace(/^[/\\]+/, '');
+  // Normalize backslashes to forward slashes
+  pathStr = pathStr.replace(/\\/g, '/');
+  // Strip leading etc/ prefix
+  pathStr = pathStr.replace(/^(?:etc\/)+/i, '');
+  // Split segments and filter out '.' and resolve '..' safely
+  const segments = pathStr.split('/').filter(Boolean);
+  const safeSegments: string[] = [];
+  for (const seg of segments) {
+    if (seg === '.') {
+      continue;
+    }
+    if (seg === '..') {
+      if (safeSegments.length > 0) {
+        safeSegments.pop();
+      }
+      continue;
+    }
+    safeSegments.push(seg);
+  }
+  while (safeSegments.length > 0 && safeSegments[0].toLowerCase() === 'etc') {
+    safeSegments.shift();
+  }
+  return safeSegments.join('/');
+}
+
+/**
+ * Strips Git a/ and b/ diff prefixes and unquotes path.
+ * Optionally sanitizes path traversal sequences if sanitize is true.
+ */
+export function cleanGitPath(raw: string, sanitize = false): string {
   let unquoted = unquoteGitPath(raw.trim());
   if (unquoted.startsWith('a/')) {
     unquoted = unquoted.substring(2);
   } else if (unquoted.startsWith('b/')) {
     unquoted = unquoted.substring(2);
   }
+  if (sanitize) {
+    return sanitizePath(unquoted);
+  }
   return unquoted;
+}
+
+export interface ParseDiffGitHeaderOptions {
+  rejectTraversal?: boolean;
 }
 
 /**
  * Parses a `diff --git ...` header line supporting quoted and unquoted paths with spaces.
  */
-export function parseDiffGitHeader(line: string): { oldPath: string; newPath: string } | null {
+export function parseDiffGitHeader(
+  line: string,
+  options?: ParseDiffGitHeaderOptions
+): { oldPath: string; newPath: string } | null {
   if (!line.startsWith('diff --git ')) {
     return null;
   }
   const rest = line.substring(11).trim();
   const match = rest.match(/^(?:"((?:\\.|[^"\\])*)"|(\S+))\s+(?:"((?:\\.|[^"\\])*)"|(\S+))$/);
+  let oldPath = '';
+  let newPath = '';
+
   if (match) {
     const rawOld = match[1] !== undefined ? `"${match[1]}"` : match[2];
     const rawNew = match[3] !== undefined ? `"${match[3]}"` : match[4];
-    return {
-      oldPath: cleanGitPath(rawOld),
-      newPath: cleanGitPath(rawNew),
-    };
+    oldPath = cleanGitPath(rawOld);
+    newPath = cleanGitPath(rawNew);
+  } else {
+    const unquotedMatch = rest.match(/^a\/(.+?)\s+b\/(.+)$/);
+    if (unquotedMatch) {
+      oldPath = unquotedMatch[1];
+      newPath = unquotedMatch[2];
+    } else {
+      return null;
+    }
   }
 
-  const unquotedMatch = rest.match(/^a\/(.+?)\s+b\/(.+)$/);
-  if (unquotedMatch) {
-    return {
-      oldPath: unquotedMatch[1],
-      newPath: unquotedMatch[2],
-    };
+  if (options?.rejectTraversal) {
+    if (isPathTraversal(oldPath) || isPathTraversal(newPath)) {
+      return null;
+    }
   }
 
-  return null;
+  return { oldPath, newPath };
+}
+
+export interface ParseUnifiedDiffOptions {
+  rejectTraversal?: boolean;
+  sanitizePaths?: boolean;
 }
 
 export class DiffParser {
   /**
    * Parses a raw unified diff string into structured file entries and hunks.
    */
-  public static parseUnifiedDiff(rawDiff: string): ParsedDiff {
+  public static parseUnifiedDiff(rawDiff: string, options?: ParseUnifiedDiffOptions): ParsedDiff {
     if (!rawDiff || rawDiff.trim().length === 0) {
       return {
         files: [],
@@ -173,6 +318,30 @@ export class DiffParser {
           currentHunk = null;
         }
         currentFile.rawPatch = fileLines.join('\n');
+
+        const hasTraversal =
+          isPathTraversal(currentFile.newPath) ||
+          (currentFile.oldPath ? isPathTraversal(currentFile.oldPath) : false);
+        currentFile.hasPathTraversal = hasTraversal;
+
+        if (options?.rejectTraversal && hasTraversal) {
+          currentFile = null;
+          fileLines = [];
+          return;
+        }
+
+        if (options?.sanitizePaths) {
+          if (currentFile.displayPath) {
+            currentFile.displayPath = sanitizePath(currentFile.displayPath);
+          }
+          if (currentFile.newPath) {
+            currentFile.newPath = sanitizePath(currentFile.newPath);
+          }
+          if (currentFile.oldPath) {
+            currentFile.oldPath = sanitizePath(currentFile.oldPath);
+          }
+        }
+
         files.push(currentFile as ParsedDiffFile);
         currentFile = null;
         fileLines = [];
@@ -185,9 +354,16 @@ export class DiffParser {
       if (line.startsWith('diff --git ')) {
         finalizeFile();
 
-        const paths = parseDiffGitHeader(line);
+        const paths = parseDiffGitHeader(line, options);
+        if (options?.rejectTraversal && !paths) {
+          currentFile = null;
+          fileLines = [];
+          continue;
+        }
+
         const oldP = paths ? paths.oldPath : '';
         const newP = paths ? paths.newPath : '';
+        const hasTraversal = isPathTraversal(oldP) || isPathTraversal(newP);
 
         currentFile = {
           oldPath: oldP,
@@ -199,6 +375,7 @@ export class DiffParser {
           additions: 0,
           deletions: 0,
           rawPatch: '',
+          hasPathTraversal: hasTraversal,
         };
         fileLines = [line];
         continue;
@@ -283,6 +460,14 @@ export class DiffParser {
     finalizeFile();
 
     if (files.length === 0 && rawDiff.trim().length > 0) {
+      if (options?.rejectTraversal) {
+        return {
+          files: [],
+          totalAdditions: 0,
+          totalDeletions: 0,
+          totalFiles: 0,
+        };
+      }
       // Unclassified / unparsed raw patch fallback
       return {
         files: [

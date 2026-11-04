@@ -19,6 +19,7 @@ import {
   TimelineEvent,
 } from '../../bridge/types';
 import { RustHealthResponse } from '../../bridge/ipc/RustIpcProtocolTypes';
+import { TaskExecutionStore } from '../../state/TaskExecutionStore';
 import {
   MissionControlState,
   MissionControlTabId,
@@ -43,6 +44,11 @@ export class MissionControlProjection implements vscode.Disposable {
   private _selectedTaskId?: string;
   private _selectedRunId?: string;
   private readonly _timelineEvents: TimelineEventRecord[] = [];
+
+  private _refreshGeneration = 0;
+  private _inFlightRefresh: Promise<void> | null = null;
+  private _pendingRefresh = false;
+  private _debounceTimer?: NodeJS.Timeout;
 
   private _disposables: vscode.Disposable[] = [];
   private _bridgeSubscriptions: vscode.Disposable[] = [];
@@ -91,10 +97,34 @@ export class MissionControlProjection implements vscode.Disposable {
     this._onDidChangeState.fire(this._currentState);
   }
 
-  public async refresh(): Promise<void> {
+  public refresh(): Promise<void> {
+    if (this._isDisposed) {
+      return Promise.resolve();
+    }
+
+    if (this._inFlightRefresh) {
+      this._pendingRefresh = true;
+      return this._inFlightRefresh;
+    }
+
+    this._inFlightRefresh = this._executeRefresh()
+      .finally(async () => {
+        this._inFlightRefresh = null;
+        if (this._pendingRefresh && !this._isDisposed) {
+          this._pendingRefresh = false;
+          await this.refresh();
+        }
+      });
+
+    return this._inFlightRefresh;
+  }
+
+  private async _executeRefresh(): Promise<void> {
     if (this._isDisposed) {
       return;
     }
+
+    const currentGeneration = ++this._refreshGeneration;
 
     if (this._bridgeManager.isPreviewMode) {
       const preview = createPreviewMissionControlState();
@@ -102,6 +132,9 @@ export class MissionControlProjection implements vscode.Disposable {
       preview.selectedAgentId = this._selectedAgentId ?? preview.selectedAgentId;
       preview.selectedTaskId = this._selectedTaskId ?? preview.selectedTaskId;
       preview.selectedRunId = this._selectedRunId ?? preview.selectedRunId;
+      if (this._isDisposed || currentGeneration !== this._refreshGeneration) {
+        return;
+      }
       this._currentState = preview;
       this._onDidChangeState.fire(this._currentState);
       return;
@@ -111,6 +144,9 @@ export class MissionControlProjection implements vscode.Disposable {
     const connState = bridge.connectionState;
 
     if (connState === 'disconnected') {
+      if (this._isDisposed || currentGeneration !== this._refreshGeneration) {
+        return;
+      }
       this._currentState = this.buildDisconnectedState();
       this._onDidChangeState.fire(this._currentState);
       return;
@@ -156,6 +192,10 @@ export class MissionControlProjection implements vscode.Disposable {
         bridge.listProviderSummaries(),
         isConnectedBridge ? (bridge as DaemonConnectedBridge).getHealth() : Promise.resolve(null),
       ]);
+
+      if (this._isDisposed || currentGeneration !== this._refreshGeneration) {
+        return;
+      }
 
       const queryErrors: QueryErrors = {};
 
@@ -207,12 +247,28 @@ export class MissionControlProjection implements vscode.Disposable {
       );
       this._onDidChangeState.fire(this._currentState);
     } catch {
+      if (this._isDisposed || currentGeneration !== this._refreshGeneration) {
+        return;
+      }
       this._currentState = {
         ...this._currentState,
         connectionState: connState,
       };
       this._onDidChangeState.fire(this._currentState);
     }
+  }
+
+  private scheduleDebouncedRefresh(delayMs = 50): void {
+    if (this._isDisposed) {
+      return;
+    }
+    if (this._debounceTimer) {
+      clearTimeout(this._debounceTimer);
+    }
+    this._debounceTimer = setTimeout(() => {
+      this._debounceTimer = undefined;
+      void this.refresh();
+    }, delayMs);
   }
 
   private buildInitialState(): MissionControlState {
@@ -292,7 +348,60 @@ export class MissionControlProjection implements vscode.Disposable {
     health: RustHealthResponse | null,
     queryErrors: QueryErrors
   ): MissionControlState {
-    const mappedTasks: TaskLifecycleModel[] = tasks.map((t) => {
+    const taskMap = new Map<string, TaskNode>();
+    for (const t of tasks) {
+      taskMap.set(t.id, { ...t });
+    }
+
+    if (!queryErrors.tasks && this._bridgeManager.stateProjection) {
+      for (const st of this._bridgeManager.stateProjection.tasks) {
+        if (session && st.runId && st.runId !== session.id && st.runId !== session.activeRunId) {
+          continue;
+        }
+        const existing = taskMap.get(st.id);
+        if (!existing) {
+          taskMap.set(st.id, { ...st });
+        } else {
+          if (st.status === 'failed' || st.status === 'succeeded' || st.status === 'cancelled') {
+            existing.status = st.status;
+          }
+          if (st.error && !existing.error) {
+            existing.error = st.error;
+          }
+        }
+      }
+    }
+
+    const activeStoreState = TaskExecutionStore.instance.getState();
+    if (
+      !queryErrors.tasks &&
+      activeStoreState.activeTaskId &&
+      (!session || !activeStoreState.activeStudioId || activeStoreState.activeStudioId === session.id) &&
+      !taskMap.has(activeStoreState.activeTaskId)
+    ) {
+      taskMap.set(activeStoreState.activeTaskId, {
+        id: activeStoreState.activeTaskId,
+        runId: activeStoreState.activeRunId || session?.id || 'run-default',
+        title: activeStoreState.displayTitle || activeStoreState.prompt || `Task ${activeStoreState.activeTaskId}`,
+        description: activeStoreState.prompt || '',
+        dependencies: [],
+        status: activeStoreState.status === 'running'
+          ? 'running'
+          : activeStoreState.status === 'succeeded'
+            ? 'succeeded'
+            : activeStoreState.status === 'failed'
+              ? 'failed'
+              : activeStoreState.status === 'cancelled'
+                ? 'cancelled'
+                : 'pending',
+        createdAt: activeStoreState.startedAt || Date.now(),
+        updatedAt: Date.now(),
+        error: activeStoreState.lastError?.message,
+      });
+    }
+
+    const mergedTasks = Array.from(taskMap.values());
+    const mappedTasks: TaskLifecycleModel[] = mergedTasks.map((t) => {
       let state: TaskLifecycleModel['state'] = 'pending';
       const statusLower = (t.status || '').toLowerCase();
       if (statusLower === 'running') {
@@ -313,6 +422,35 @@ export class MissionControlProjection implements vscode.Disposable {
         state = 'paused';
       } else if (statusLower === 'cancelled') {
         state = 'cancelled';
+      }
+
+      // Reconcile with TaskExecutionStore authoritative execution state
+      const taskStoreState = TaskExecutionStore.instance.getTaskState(t.id) ||
+        (activeStoreState.activeTaskId === t.id ? activeStoreState : undefined);
+
+      if (taskStoreState) {
+        if (taskStoreState.status === 'failed') {
+          state = 'failed';
+          t.error = taskStoreState.lastError?.message ?? t.error;
+        } else if (taskStoreState.status === 'succeeded') {
+          state = 'succeeded';
+        } else if (taskStoreState.status === 'cancelled') {
+          state = 'cancelled';
+        } else if (taskStoreState.status === 'running') {
+          state = 'running';
+        } else if (taskStoreState.status === 'queued' || taskStoreState.status === 'submitting') {
+          if (state !== 'running' && state !== 'succeeded' && state !== 'failed' && state !== 'cancelled') {
+            state = 'pending';
+          }
+        }
+
+        if (
+          taskStoreState.lastError?.code === 'daemon_interrupted' ||
+          (taskStoreState.lastError?.message && taskStoreState.lastError.message.includes('daemon_interrupted'))
+        ) {
+          state = 'failed';
+          t.error = taskStoreState.lastError.message;
+        }
       }
 
       return {
@@ -351,7 +489,7 @@ export class MissionControlProjection implements vscode.Disposable {
 
     // Synthesize fleet members from task assignments without fabricated runtimes or models
     const agentMap = new Map<string, AgentFleetMember>();
-    for (const t of tasks) {
+    for (const t of mergedTasks) {
       if (t.assignedAgentId) {
         if (!agentMap.has(t.assignedAgentId)) {
           agentMap.set(t.assignedAgentId, {
@@ -569,10 +707,29 @@ export class MissionControlProjection implements vscode.Disposable {
     this._disposables.push(
       this._bridgeManager.onBridgeChanged(() => {
         this.rebindActiveBridgeListeners();
-        this.refresh();
+        void this.refresh();
       }),
-      this._bridgeManager.stateProjection.onSessionChanged(() => {
-        this.refresh();
+      this._bridgeManager.stateProjection.onSessionChanged((newSession) => {
+        if (newSession && this._currentState.currentSession && newSession.id !== this._currentState.currentSession.id) {
+          this._timelineEvents.length = 0;
+          this._selectedAgentId = undefined;
+          this._selectedTaskId = undefined;
+          this._selectedRunId = undefined;
+        }
+        this.scheduleDebouncedRefresh(20);
+      }),
+      this._bridgeManager.stateProjection.onSessionSwitched(() => {
+        this._timelineEvents.length = 0;
+        this._selectedAgentId = undefined;
+        this._selectedTaskId = undefined;
+        this._selectedRunId = undefined;
+        this.scheduleDebouncedRefresh(20);
+      }),
+      this._bridgeManager.stateProjection.onTasksChanged(() => {
+        this.scheduleDebouncedRefresh(30);
+      }),
+      TaskExecutionStore.instance.onDidChangeExecutionState(() => {
+        this.scheduleDebouncedRefresh(30);
       })
     );
 
@@ -626,12 +783,18 @@ export class MissionControlProjection implements vscode.Disposable {
         this._timelineEvents.shift();
       }
     }
-    this.refresh();
+
+    const isStreamDelta = event.type === 'runtime_output_delta' || event.type === 'output_delta';
+    this.scheduleDebouncedRefresh(isStreamDelta ? 150 : 30);
   }
 
   public dispose(): void {
     if (!this._isDisposed) {
       this._isDisposed = true;
+      if (this._debounceTimer) {
+        clearTimeout(this._debounceTimer);
+        this._debounceTimer = undefined;
+      }
       this._onDidChangeState.dispose();
 
       for (const d of this._bridgeSubscriptions) {

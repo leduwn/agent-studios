@@ -33,13 +33,17 @@ import {
 import {
   cleanGitPath,
   DiffParser,
+  isPathTraversal,
   parseDiffGitHeader,
+  sanitizeArtifactId,
+  sanitizePath,
   unquoteGitPath,
 } from '../../cards/DiffParser';
 import {
   ArtifactReviewOptions,
   ArtifactReviewPanel,
 } from '../../webviews/ArtifactReviewPanel';
+import { WorkbenchViewProvider } from '../../views/workbench/WorkbenchViewProvider';
 import {
   mockWindowMessages,
   resetMockState,
@@ -804,6 +808,362 @@ describe('Artifact & Cryptographic Security Regression Tests (M15 UI-04)', () =>
       assert.strictEqual(mockWindowMessages.warning.length, 0);
       assert.strictEqual(fs.existsSync(targetPath), true);
       assert.deepStrictEqual(fs.readFileSync(targetPath), verifiedBytes);
+    });
+  });
+
+  // =========================================================================
+  // 8. Phase E Security Hardening Invariants (M15 UI-05A)
+  // =========================================================================
+  describe('8. Phase E Security Hardening Invariants (M15 UI-05A)', () => {
+    it('8.1 malformed SHA-256 hash triggers INTEGRITY_FAILED and blocks export', async () => {
+      const payload = Buffer.from('diff --git a/file.txt b/file.txt\n+line\n', 'utf8');
+      const fakeTransport: IpcTransportSender = {
+        sendCommand: async (): Promise<RustIpcResponse> => ({
+          type: 'task_diff',
+          diff: {
+            studio_id: validStudioId,
+            task_id: validTaskId,
+            summary: {
+              files_changed: 1,
+              added_files: ['file.txt'],
+              modified_files: [],
+              deleted_files: [],
+              renamed_files: [],
+              binary_files: [],
+              patch_size_bytes: payload.length,
+              base_commit: 'abc',
+            },
+            patch: '',
+            offset: 0,
+            limit: 1024,
+            total_bytes: payload.length,
+            has_more: false,
+            patch_base64: payload.toString('base64'),
+            encoding: 'base64',
+            patch_sha256: 'malformed_not_64_hex_digits',
+            chunk_bytes: payload.length,
+          },
+        }),
+      };
+
+      const diff = await ArtifactClient.fetchTaskDiff(fakeTransport, validStudioId, validTaskId);
+      assert.strictEqual(diff.integrity, 'INTEGRITY_FAILED');
+
+      const provider = new WorkbenchViewProvider();
+      assert.strictEqual(provider.canExport(diff), false);
+
+      const targetPath = path.join(tempDir, 'blocked_malformed.patch');
+      await assert.rejects(
+        async () => {
+          await provider.exportPatch(diff, targetPath);
+        },
+        /Export blocked: Cryptographic SHA-256 integrity verification failed/
+      );
+      assert.strictEqual(fs.existsSync(targetPath), false);
+    });
+
+    it('8.2 tampered SHA-256 hash triggers INTEGRITY_FAILED and blocks export', async () => {
+      const payload = Buffer.from('diff --git a/code.ts b/code.ts\n+code\n', 'utf8');
+      const tamperedHex64 = '0000000000000000000000000000000000000000000000000000000000000000';
+      const fakeTransport: IpcTransportSender = {
+        sendCommand: async (): Promise<RustIpcResponse> => ({
+          type: 'task_diff',
+          diff: {
+            studio_id: validStudioId,
+            task_id: validTaskId,
+            summary: {
+              files_changed: 1,
+              added_files: ['code.ts'],
+              modified_files: [],
+              deleted_files: [],
+              renamed_files: [],
+              binary_files: [],
+              patch_size_bytes: payload.length,
+              base_commit: 'abc',
+            },
+            patch: '',
+            offset: 0,
+            limit: 1024,
+            total_bytes: payload.length,
+            has_more: false,
+            patch_base64: payload.toString('base64'),
+            encoding: 'base64',
+            patch_sha256: tamperedHex64,
+            chunk_bytes: payload.length,
+          },
+        }),
+      };
+
+      const diff = await ArtifactClient.fetchTaskDiff(fakeTransport, validStudioId, validTaskId);
+      assert.strictEqual(diff.integrity, 'INTEGRITY_FAILED');
+
+      const provider = new WorkbenchViewProvider();
+      assert.strictEqual(provider.canExport(diff), false);
+
+      const targetPath = path.join(tempDir, 'blocked_tampered.patch');
+      await assert.rejects(
+        async () => {
+          await provider.exportPatch(diff, targetPath);
+        },
+        /Export blocked: Cryptographic SHA-256 integrity verification failed/
+      );
+    });
+
+    it('8.3 path traversal in diff headers rejected when rejectTraversal is true', () => {
+      const traversalHeader = 'diff --git "a/../../etc/passwd" "b/../../etc/passwd"';
+      const rejectedHeader = parseDiffGitHeader(traversalHeader, { rejectTraversal: true });
+      assert.strictEqual(rejectedHeader, null);
+
+      const traversalDiff = [
+        'diff --git "a/../../../etc/passwd" "b/../../../etc/passwd"',
+        '--- a/../../../etc/passwd',
+        '+++ b/../../../etc/passwd',
+        '@@ -1,1 +1,1 @@',
+        '+root:0:0:',
+      ].join('\n');
+
+      const rejectedParsed = DiffParser.parseUnifiedDiff(traversalDiff, { rejectTraversal: true });
+      assert.strictEqual(rejectedParsed.files.length, 0);
+
+      // Windows traversal header
+      const winTraversalHeader = 'diff --git "a/C:\\secret.txt" "b/C:\\secret.txt"';
+      const winRejected = parseDiffGitHeader(winTraversalHeader, { rejectTraversal: true });
+      assert.strictEqual(winRejected, null);
+
+      // Sanitization safely eliminates traversal segments
+      const sanitized = sanitizePath('../../var/log/../../etc/passwd');
+      assert.strictEqual(sanitized, 'passwd');
+      assert.strictEqual(isPathTraversal(sanitized), false);
+    });
+
+    it('8.4 path traversal in studioId, taskId, or artifactId triggers PATH_TRAVERSAL_DETECTED', async () => {
+      const dummyTransport: IpcTransportSender = {
+        sendCommand: async () => ({ type: 'error', code: 'UNEXPECTED', message: 'Should not reach' }),
+      };
+
+      await assert.rejects(
+        async () => {
+          await ArtifactClient.fetchTaskDiff(dummyTransport, '../rogue_studio', validTaskId);
+        },
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'PATH_TRAVERSAL_DETECTED');
+          return true;
+        }
+      );
+
+      await assert.rejects(
+        async () => {
+          await ArtifactClient.fetchTaskDiff(dummyTransport, validStudioId, '..\\..\\Windows\\System32');
+        },
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'PATH_TRAVERSAL_DETECTED');
+          return true;
+        }
+      );
+
+      await assert.rejects(
+        async () => {
+          await ArtifactClient.fetchArtifactContent(dummyTransport, validStudioId, '/etc/passwd');
+        },
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'PATH_TRAVERSAL_DETECTED');
+          return true;
+        }
+      );
+
+      assert.strictEqual(sanitizeArtifactId('../../../etc/passwd'), 'passwd');
+      assert.strictEqual(sanitizeArtifactId('C:\\Windows\\System32\\cmd.exe'), 'Windows_System32_cmd.exe');
+    });
+
+    it('8.5 accurate Vietnamese diacritic octal decoding for complex diacritics and mixed UTF-8', () => {
+      // ệ = \341\273\207
+      assert.strictEqual(unquoteGitPath('"\\341\\273\\207"'), 'ệ');
+      // ắ = \341\272\257
+      assert.strictEqual(unquoteGitPath('"\\341\\272\\257"'), 'ắ');
+      // ễ = \341\273\205
+      assert.strictEqual(unquoteGitPath('"\\341\\273\\205"'), 'ễ');
+      // ỗ = \341\273\227
+      assert.strictEqual(unquoteGitPath('"\\341\\273\\227"'), 'ỗ');
+      // ở = \341\273\237
+      assert.strictEqual(unquoteGitPath('"\\341\\273\\237"'), 'ở');
+      // ự = \341\273\261
+      assert.strictEqual(unquoteGitPath('"\\341\\273\\261"'), 'ự');
+      // đ = \304\221
+      assert.strictEqual(unquoteGitPath('"\\304\\221"'), 'đ');
+
+      // Mixed raw UTF-8 string with embedded octal escapes
+      const mixedString = '"báo_cáo_\\341\\273\\207_hệ_thống.txt"';
+      assert.strictEqual(unquoteGitPath(mixedString), 'báo_cáo_ệ_hệ_thống.txt');
+    });
+
+    it('8.6 memory limits enforced upfront when declared total_bytes exceeds maxBytes', async () => {
+      const fakeTransport: IpcTransportSender = {
+        sendCommand: async (): Promise<RustIpcResponse> => ({
+          type: 'task_diff',
+          diff: {
+            studio_id: validStudioId,
+            task_id: validTaskId,
+            summary: {
+              files_changed: 1,
+              added_files: ['huge.bin'],
+              modified_files: [],
+              deleted_files: [],
+              renamed_files: [],
+              binary_files: [],
+              patch_size_bytes: 200 * 1024 * 1024,
+              base_commit: 'abc',
+            },
+            patch: '',
+            offset: 0,
+            limit: 1024,
+            total_bytes: 150 * 1024 * 1024, // 150MB > 100MB max
+            has_more: true,
+            patch_base64: Buffer.from('data').toString('base64'),
+            encoding: 'base64',
+            patch_sha256: null,
+            chunk_bytes: 4,
+          },
+        }),
+      };
+
+      await assert.rejects(
+        async () => {
+          await ArtifactClient.fetchTaskDiff(fakeTransport, validStudioId, validTaskId, {
+            maxBytes: 100 * 1024 * 1024,
+          });
+        },
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'EXCEEDED_MAX_BYTES');
+          return true;
+        }
+      );
+    });
+
+    it('8.7 AbortController terminates in-flight stream cleanly', async () => {
+      const abortController = new AbortController();
+
+      const fakeTransport: IpcTransportSender = {
+        sendCommand: async (): Promise<RustIpcResponse> => {
+          // Delay simulating network transport latency
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return {
+            type: 'task_diff',
+            diff: {
+              studio_id: validStudioId,
+              task_id: validTaskId,
+              summary: {
+                files_changed: 0,
+                added_files: [],
+                modified_files: [],
+                deleted_files: [],
+                renamed_files: [],
+                binary_files: [],
+                patch_size_bytes: 0,
+                base_commit: 'abc',
+              },
+              patch: '',
+              offset: 0,
+              limit: 1024,
+              total_bytes: 0,
+              has_more: false,
+              patch_base64: '',
+              encoding: 'base64',
+              patch_sha256: null,
+              chunk_bytes: 0,
+            },
+          };
+        },
+      };
+
+      // Trigger abort while in-flight
+      const fetchPromise = ArtifactClient.fetchTaskDiff(fakeTransport, validStudioId, validTaskId, {
+        signal: abortController.signal,
+      });
+
+      // Abort after 10ms
+      setTimeout(() => abortController.abort(), 10);
+
+      await assert.rejects(
+        fetchPromise,
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'ABORTED');
+          assert.ok(err.message.includes('aborted by client'));
+          return true;
+        }
+      );
+
+      // Pre-aborted signal check
+      const preAborted = new AbortController();
+      preAborted.abort();
+      await assert.rejects(
+        ArtifactClient.fetchTaskDiff(fakeTransport, validStudioId, validTaskId, {
+          signal: preAborted.signal,
+        }),
+        (err: ArtifactRetrievalError) => {
+          assert.strictEqual(err.code, 'ABORTED');
+          return true;
+        }
+      );
+    });
+
+    it('8.8 studio switch invalidates active artifact cache', () => {
+      const diff1 = buildDiffFixture({
+        studioId: 'studio-alpha',
+        taskId: 'task-101',
+        rawBuffer: Buffer.from('diff alpha'),
+      });
+      const diff2 = buildDiffFixture({
+        studioId: 'studio-beta',
+        taskId: 'task-202',
+        rawBuffer: Buffer.from('diff beta'),
+      });
+
+      ArtifactClient.cacheTaskDiff(diff1);
+      ArtifactClient.cacheTaskDiff(diff2);
+
+      assert.ok(ArtifactClient.getCachedTaskDiff('studio-alpha', 'task-101') !== undefined);
+      assert.ok(ArtifactClient.getCachedTaskDiff('studio-beta', 'task-202') !== undefined);
+
+      const workbench = new WorkbenchViewProvider();
+      workbench.setStudio('studio-alpha');
+      // Switching studio to studio-gamma must invalidate studio-alpha cache
+      workbench.setStudio('studio-gamma');
+
+      assert.strictEqual(ArtifactClient.getCachedTaskDiff('studio-alpha', 'task-101'), undefined);
+      // studio-beta remains intact
+      assert.ok(ArtifactClient.getCachedTaskDiff('studio-beta', 'task-202') !== undefined);
+
+      // Invalidate studio-beta
+      ArtifactClient.invalidateCache('studio-beta');
+      assert.strictEqual(ArtifactClient.getCachedTaskDiff('studio-beta', 'task-202'), undefined);
+    });
+
+    it('8.9 WorkbenchViewProvider preserves CRLF line endings byte-for-byte and rejects traversal export path', async () => {
+      const crlfBuffer = Buffer.from('diff --git a/crlf.txt b/crlf.txt\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n');
+      const sha256 = crypto.createHash('sha256').update(crlfBuffer).digest('hex').toLowerCase();
+      const diff = buildDiffFixture({
+        studioId: validStudioId,
+        taskId: validTaskId,
+        rawBuffer: crlfBuffer,
+        expectedSha256: sha256,
+        integrity: 'VERIFIED',
+      });
+
+      const provider = new WorkbenchViewProvider();
+      const exportFile = path.join(tempDir, 'crlf_verified.patch');
+      await provider.exportPatch(diff, exportFile);
+
+      const writtenBytes = fs.readFileSync(exportFile);
+      assert.deepStrictEqual(writtenBytes, crlfBuffer);
+      assert.ok(writtenBytes.includes(Buffer.from('\r\n')));
+
+      // Path traversal export path rejected
+      await assert.rejects(
+        async () => {
+          await provider.exportPatch(diff, '../../../../etc/escape.patch');
+        },
+        /Export blocked: Target path contains directory traversal sequence/
+      );
     });
   });
 });

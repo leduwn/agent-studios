@@ -73,6 +73,7 @@ export class TaskExecutionStore implements vscode.Disposable {
   }
 
   private _state: TaskExecutionState;
+  private readonly _taskStates = new Map<string, TaskExecutionState>();
   private readonly _onDidChangeExecutionState = new vscode.EventEmitter<TaskExecutionState>();
   public readonly onDidChangeExecutionState: vscode.Event<TaskExecutionState> =
     this._onDidChangeExecutionState.event;
@@ -193,11 +194,86 @@ export class TaskExecutionStore implements vscode.Disposable {
       lastError: error,
       activeTool: undefined,
     };
+    if (this._state.activeTaskId) {
+      this._taskStates.set(this._state.activeTaskId, { ...this._state });
+    }
     this.notifyStateChanged();
+  }
+
+  public switchTask(taskId: string, studioId?: string): void {
+    if (this._state.activeTaskId === taskId) {
+      return;
+    }
+    if (this._state.activeTaskId) {
+      this._taskStates.set(this._state.activeTaskId, { ...this._state });
+    }
+
+    const cached = this._taskStates.get(taskId);
+    if (cached) {
+      this._state = { ...cached };
+    } else {
+      this._state = {
+        ...this.buildInitialState(),
+        activeTaskId: taskId,
+        activeStudioId: studioId || this._state.activeStudioId,
+      };
+      this._taskStates.set(taskId, { ...this._state });
+    }
+    this.notifyStateChanged();
+  }
+
+  public switchStudio(studioId: string | null): void {
+    this.stopTimer();
+    this._taskStates.clear();
+    this._state = {
+      ...this.buildInitialState(),
+      activeStudioId: studioId ?? undefined,
+    };
+    this.notifyStateChanged();
+  }
+
+  public getTaskState(taskId: string): TaskExecutionState | undefined {
+    if (this._state.activeTaskId === taskId) {
+      return { ...this._state };
+    }
+    const cached = this._taskStates.get(taskId);
+    return cached ? { ...cached } : undefined;
+  }
+
+  public reconcileDaemonRestart(reason: string = 'daemon_interrupted'): void {
+    const error: ExecutionError = {
+      code: 'daemon_interrupted',
+      message: `Task interrupted: daemon_interrupted (${reason})`,
+    };
+
+    if (
+      this._state.status === 'submitting' ||
+      this._state.status === 'queued' ||
+      this._state.status === 'running'
+    ) {
+      this.completeTask('failed', error);
+    }
+
+    for (const [taskId, tState] of this._taskStates.entries()) {
+      if (
+        tState.status === 'submitting' ||
+        tState.status === 'queued' ||
+        tState.status === 'running'
+      ) {
+        this._taskStates.set(taskId, {
+          ...tState,
+          status: 'failed',
+          finishedAt: Date.now(),
+          lastError: error,
+          activeTool: undefined,
+        });
+      }
+    }
   }
 
   public reset(): void {
     this.stopTimer();
+    this._taskStates.clear();
     this._state = this.buildInitialState();
     this.notifyStateChanged();
   }
@@ -205,11 +281,29 @@ export class TaskExecutionStore implements vscode.Disposable {
   public consumeDaemonTimelineEvent(event: TimelineEvent): void {
     if (!event) return;
 
-    // Filter by active task if set
+    // Filter by active task if set; background tasks are updated in isolation without leaking into active task
     if (this._state.activeTaskId && event.taskId && event.taskId !== this._state.activeTaskId) {
+      let bgState = this._taskStates.get(event.taskId);
+      if (!bgState) {
+        bgState = {
+          ...this.buildInitialState(),
+          activeTaskId: event.taskId,
+          activeStudioId: this._state.activeStudioId,
+        };
+        this._taskStates.set(event.taskId, bgState);
+      }
+      this.applyEventToTaskState(bgState, event, false);
       return;
     }
 
+    this.applyEventToTaskState(this._state, event, true);
+  }
+
+  private applyEventToTaskState(
+    target: TaskExecutionState,
+    event: TimelineEvent,
+    isActive: boolean
+  ): void {
     const payload = (event.details && typeof event.details === 'object')
       ? (event.details as Record<string, unknown>)
       : {};
@@ -217,17 +311,16 @@ export class TaskExecutionStore implements vscode.Disposable {
     switch (event.type) {
       case 'task_started':
       case 'run_started':
-        if (this._state.status === 'submitting' || this._state.status === 'queued') {
+        if (target.status === 'submitting' || target.status === 'queued') {
           const exec = payload.execution as Record<string, unknown> | undefined;
-          this._state = {
-            ...this._state,
-            status: 'running',
-            activeTaskId: event.taskId ?? this._state.activeTaskId,
-            activeRunId: ((payload.run_id || payload.runId) as string | undefined) ?? this._state.activeRunId,
-            runtimePreference: ((payload.runtime_preference || exec?.runtime_preference) as string | undefined) ?? this._state.runtimePreference,
-            runtimeInstanceId: ((payload.runtime_instance_id || exec?.runtime_instance_id) as string | undefined) ?? this._state.runtimeInstanceId,
-          };
-          this.notifyStateChanged();
+          target.status = 'running';
+          target.activeTaskId = event.taskId ?? target.activeTaskId;
+          target.activeRunId = ((payload.run_id || payload.runId) as string | undefined) ?? target.activeRunId;
+          target.runtimePreference = ((payload.runtime_preference || exec?.runtime_preference) as string | undefined) ?? target.runtimePreference;
+          target.runtimeInstanceId = ((payload.runtime_instance_id || exec?.runtime_instance_id) as string | undefined) ?? target.runtimeInstanceId;
+          if (isActive) {
+            this.notifyStateChanged();
+          }
         }
         break;
 
@@ -235,117 +328,196 @@ export class TaskExecutionStore implements vscode.Disposable {
       case 'run_state_transitioned': {
         const toState = (payload.to_state || payload.new_state || payload.state) as string | undefined;
         if (toState === 'running' || toState === 'executing') {
-          if (this._state.status === 'submitting' || this._state.status === 'queued') {
-            this._state = {
-              ...this._state,
-              status: 'running',
-              activeTaskId: event.taskId ?? this._state.activeTaskId,
-              activeRunId: ((payload.run_id || payload.runId) as string | undefined) ?? this._state.activeRunId,
-            };
-            this.notifyStateChanged();
+          if (target.status === 'submitting' || target.status === 'queued') {
+            target.status = 'running';
+            target.activeTaskId = event.taskId ?? target.activeTaskId;
+            target.activeRunId = ((payload.run_id || payload.runId) as string | undefined) ?? target.activeRunId;
+            if (isActive) {
+              this.notifyStateChanged();
+            }
           }
         } else if (toState === 'succeeded' || toState === 'completed') {
-          this.completeTask('succeeded');
-        } else if (toState === 'failed') {
-          this.completeTask('failed', {
-            message: event.summary || 'Task transitioned to failed state',
+          if (isActive) {
+            this.completeTask('succeeded');
+          } else {
+            target.status = 'succeeded';
+            target.finishedAt = Date.now();
+            target.activeTool = undefined;
+          }
+        } else if (toState === 'failed' || toState === 'daemon_interrupted' || toState === 'interrupted' || toState === 'error') {
+          const isInterrupted = toState === 'daemon_interrupted' || toState === 'interrupted' || payload.reason === 'daemon_interrupted';
+          const err: ExecutionError = {
+            code: isInterrupted ? 'daemon_interrupted' : (typeof payload.code === 'string' ? payload.code : undefined),
+            message: event.summary || (isInterrupted ? 'Task interrupted by daemon restart' : 'Task transitioned to failed state'),
             details: payload,
-          });
+          };
+          if (isActive) {
+            this.completeTask('failed', err);
+          } else {
+            target.status = 'failed';
+            target.finishedAt = Date.now();
+            target.lastError = err;
+            target.activeTool = undefined;
+          }
         } else if (toState === 'cancelled') {
-          this.completeTask('cancelled', {
+          const err: ExecutionError = {
             message: event.summary || 'Task transitioned to cancelled state',
             details: payload,
-          });
+          };
+          if (isActive) {
+            this.completeTask('cancelled', err);
+          } else {
+            target.status = 'cancelled';
+            target.finishedAt = Date.now();
+            target.lastError = err;
+            target.activeTool = undefined;
+          }
         }
         break;
       }
 
       case 'tool_started':
-      case 'tool_executing':
+      case 'tool_executing': {
+        let toolName = 'unknown';
         if (typeof payload.tool_name === 'string') {
-          this.setToolExecution(payload.tool_name, 'executing');
+          toolName = payload.tool_name;
         } else if (typeof payload.name === 'string') {
-          this.setToolExecution(payload.name, 'executing');
+          toolName = payload.name;
         } else if (event.summary && event.summary.startsWith('Tool ')) {
           const match = event.summary.match(/^Tool (\S+)/);
-          this.setToolExecution(match ? match[1] : 'unknown', 'executing');
+          toolName = match ? match[1] : 'unknown';
+        }
+        if (isActive) {
+          this.setToolExecution(toolName, 'executing');
+        } else {
+          target.activeTool = { name: toolName, status: 'executing', timestamp: Date.now() };
         }
         break;
+      }
 
-      case 'tool_completed':
-        if (typeof payload.tool_name === 'string') {
-          this.setToolExecution(payload.tool_name, 'completed');
-        } else if (typeof payload.name === 'string') {
-          this.setToolExecution(payload.name, 'completed');
-        } else if (this._state.activeTool) {
-          this.setToolExecution(this._state.activeTool.name, 'completed');
+      case 'tool_completed': {
+        const toolName = typeof payload.tool_name === 'string'
+          ? payload.tool_name
+          : (typeof payload.name === 'string' ? payload.name : (target.activeTool?.name || 'unknown'));
+        if (isActive) {
+          this.setToolExecution(toolName, 'completed');
+        } else {
+          target.activeTool = { name: toolName, status: 'completed', timestamp: Date.now() };
         }
         break;
+      }
 
       case 'tool_failed': {
         const toolName = typeof payload.tool_name === 'string'
           ? payload.tool_name
           : typeof payload.name === 'string'
             ? payload.name
-            : (this._state.activeTool?.name || 'unknown');
+            : (target.activeTool?.name || 'unknown');
         const err = typeof payload.error === 'string'
           ? payload.error
           : (typeof payload.message === 'string' ? payload.message : undefined);
-        this.setToolExecution(toolName, 'failed', err);
+        if (isActive) {
+          this.setToolExecution(toolName, 'failed', err);
+        } else {
+          target.activeTool = { name: toolName, status: 'failed', error: err, timestamp: Date.now() };
+        }
         break;
       }
 
       case 'runtime_output_delta':
-      case 'output_delta':
-        if (typeof payload.text === 'string') {
-          this.appendStreamChunk(payload.text);
-        } else if (typeof payload.output === 'string') {
-          this.appendStreamChunk(payload.output);
-        } else if (typeof payload.chunk === 'string') {
-          this.appendStreamChunk(payload.chunk);
+      case 'output_delta': {
+        const text = typeof payload.text === 'string'
+          ? payload.text
+          : (typeof payload.output === 'string' ? payload.output : (typeof payload.chunk === 'string' ? payload.chunk : undefined));
+        if (text) {
+          if (isActive) {
+            this.appendStreamChunk(text);
+          } else {
+            target.streamOutput += text;
+          }
         }
         break;
+      }
 
       case 'task_completed':
       case 'run_completed':
-        this.completeTask('succeeded');
+        if (isActive) {
+          this.completeTask('succeeded');
+        } else {
+          target.status = 'succeeded';
+          target.finishedAt = Date.now();
+          target.activeTool = undefined;
+        }
         break;
 
       case 'task_failed':
-      case 'run_failed':
-        this.completeTask('failed', {
-          message: event.summary || 'Task failed on daemon',
+      case 'run_failed': {
+        const isInterrupted = payload.reason === 'daemon_interrupted' ||
+          payload.error === 'daemon_interrupted' ||
+          payload.to_state === 'daemon_interrupted' ||
+          (typeof event.summary === 'string' && event.summary.includes('daemon_interrupted'));
+        const err: ExecutionError = {
+          code: isInterrupted ? 'daemon_interrupted' : (typeof payload.code === 'string' ? payload.code : undefined),
+          message: event.summary || (isInterrupted ? 'Task interrupted by daemon restart' : 'Task failed on daemon'),
           details: payload,
-        });
+        };
+        if (isActive) {
+          this.completeTask('failed', err);
+        } else {
+          target.status = 'failed';
+          target.finishedAt = Date.now();
+          target.lastError = err;
+          target.activeTool = undefined;
+        }
         break;
+      }
 
-      case 'task_cancelled':
-        this.completeTask('cancelled', {
+      case 'task_cancelled': {
+        const err: ExecutionError = {
           message: event.summary || 'Task was cancelled',
           details: payload,
-        });
+        };
+        if (isActive) {
+          this.completeTask('cancelled', err);
+        } else {
+          target.status = 'cancelled';
+          target.finishedAt = Date.now();
+          target.lastError = err;
+          target.activeTool = undefined;
+        }
         break;
+      }
     }
 
     // Capture stdout or stderr text delta if payload carries stream content outside delta events
     if (event.type !== 'runtime_output_delta' && event.type !== 'output_delta') {
-      if (typeof payload.output === 'string') {
-        this.appendStreamChunk(payload.output);
-      } else if (typeof payload.chunk === 'string') {
-        this.appendStreamChunk(payload.chunk);
+      const extraOutput = typeof payload.output === 'string'
+        ? payload.output
+        : (typeof payload.chunk === 'string' ? payload.chunk : undefined);
+      if (extraOutput) {
+        if (isActive) {
+          this.appendStreamChunk(extraOutput);
+        } else {
+          target.streamOutput += extraOutput;
+        }
       }
     }
 
     // Capture metrics authoritatively if reported in event payload
     if (payload.metrics && typeof payload.metrics === 'object') {
       const m = payload.metrics as Record<string, unknown>;
-      this.updateMetrics({
+      const metricsData = {
         promptTokens: typeof m.prompt_tokens === 'number' ? m.prompt_tokens : (typeof m.promptTokens === 'number' ? m.promptTokens : undefined),
         completionTokens: typeof m.completion_tokens === 'number' ? m.completion_tokens : (typeof m.completionTokens === 'number' ? m.completionTokens : undefined),
         totalTokens: typeof m.total_tokens === 'number' ? m.total_tokens : (typeof m.totalTokens === 'number' ? m.totalTokens : undefined),
         costUsd: typeof m.cost_usd === 'number' ? m.cost_usd : (typeof m.costUsd === 'number' ? m.costUsd : undefined),
         latencyMs: typeof m.latency_ms === 'number' ? m.latency_ms : (typeof m.latencyMs === 'number' ? m.latencyMs : undefined),
-      });
+      };
+      if (isActive) {
+        this.updateMetrics(metricsData);
+      } else {
+        target.metrics = { ...metricsData, isReported: true };
+      }
     }
   }
 

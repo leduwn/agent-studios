@@ -27,6 +27,7 @@ import { CHAT_STYLES } from './styles.css';
 import { OnboardingWorkflow } from './OnboardingWorkflow';
 import { TaskExecutionState, ExecutionMetrics } from '../state/TaskExecutionStore';
 import { WorkspaceAuthorizationStatus } from '../security/WorkspaceVerification';
+import { CapabilityMatrix } from '../bridge/ipc/CapabilityMatrix';
 
 export interface RuntimeOption {
   id: string;
@@ -100,7 +101,10 @@ export class ChatHtmlBuilder {
       ?? (initialState?.isWorkspaceMatched === false ? 'MISMATCH' : (initialState?.isWorkspaceMatched ? 'AUTHORIZED' : 'UNAVAILABLE'));
     const isWorkspaceAuthorized = workspaceStatus === 'AUTHORIZED';
     const workspaceMismatchReason = initialState?.workspaceMismatchReason || '';
-    const isTaskSubmitEnabled = (initialState?.isTaskSubmitEnabled ?? true) && isWorkspaceAuthorized;
+    const isTaskSubmitEnabled =
+      (initialState?.isTaskSubmitEnabled ?? CapabilityMatrix.isCapabilityEnabled('task.submit')) &&
+      isWorkspaceAuthorized &&
+      CapabilityMatrix.isCapabilityEnabled('task.submit');
     const executionState = initialState?.executionState;
 
     let badgeLabel = '⚠ Unavailable';
@@ -167,26 +171,10 @@ export class ChatHtmlBuilder {
           { id: '', name: 'No runtimes available (daemon unready)', enabled: false },
         ];
 
-    const runtimeOptionsHtml = runtimeOptions.map((r) => {
-      const isSelected = Boolean(
-        selectedRuntime &&
-        (r.id === selectedRuntime ||
-          r.instanceId === selectedRuntime ||
-          r.id.startsWith(selectedRuntime + '|') ||
-          r.id.endsWith('|' + selectedRuntime))
-      );
-      const parts = [`value="${escapeHtml(r.id)}"`];
-      if (isSelected) {
-        parts.push('selected');
-      }
-      if (!r.enabled) {
-        parts.push('disabled');
-      }
-      if (r.tooltip) {
-        parts.push(`title="${escapeHtml(r.tooltip)}"`);
-      }
-      return `<option ${parts.join(' ')}>${escapeHtml(r.name)}</option>`;
-    }).join('\n');
+    const runtimeOptionsHtml = ChatHtmlBuilder.renderRuntimeOptions(
+      runtimeOptions,
+      selectedRuntime
+    );
 
     // Studio options HTML
     const studioOptions: StudioOption[] = (initialState?.studios && initialState.studios.length > 0)
@@ -1132,6 +1120,16 @@ export class ChatHtmlBuilder {
         } else if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
           submitPrompt();
+        } else if (e.key === 'Escape' && state.isExecuting) {
+          e.preventDefault();
+          cancelExecution();
+        }
+      });
+
+      window.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && state.isExecuting) {
+          e.preventDefault();
+          cancelExecution();
         }
       });
 
@@ -1431,6 +1429,18 @@ export class ChatHtmlBuilder {
               }
               if (msg.state.workspaceMismatchReason !== undefined) {
                 state.workspaceMismatchReason = msg.state.workspaceMismatchReason;
+                var badgeEl = document.getElementById('workspaceBadge');
+                if (badgeEl && state.workspaceMismatchReason) {
+                  badgeEl.title = state.workspaceMismatchReason;
+                }
+              }
+              if (msg.state.runtimeOptions && Array.isArray(msg.state.runtimeOptions) && runtimeSelect) {
+                runtimeSelect.innerHTML = msg.state.runtimeOptions.map(function(opt) {
+                  var selected = opt.id === state.runtime ? ' selected' : '';
+                  var disabled = !opt.enabled ? ' disabled' : '';
+                  var title = opt.tooltip ? ' title="' + opt.tooltip.replace(/"/g, '&quot;') + '"' : '';
+                  return '<option value="' + opt.id.replace(/"/g, '&quot;') + '"' + selected + disabled + title + '>' + opt.name.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</option>';
+                }).join('');
               }
               if (msg.state.isTaskSubmitEnabled !== undefined) {
                 state.isTaskSubmitEnabled = msg.state.isTaskSubmitEnabled;
@@ -1539,6 +1549,40 @@ export class ChatHtmlBuilder {
         const isSelected = s.id === currentSessionId;
         const title = s.title.length > 28 ? s.title.substring(0, 25) + '...' : s.title;
         return `<option value="${escapeHtml(s.id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(title)}</option>`;
+      })
+      .join('\n');
+  }
+
+  public static renderRuntimeOptions(
+    runtimes?: RuntimeOption[],
+    selectedRuntime?: string
+  ): string {
+    const list = runtimes && runtimes.length > 0
+      ? runtimes
+      : [
+          { id: '', name: 'No runtimes available (daemon unready)', enabled: false, tooltip: 'Daemon execution readiness report is unavailable or degraded.' },
+        ];
+
+    return list
+      .map((r) => {
+        const isSelected = Boolean(
+          selectedRuntime &&
+          (r.id === selectedRuntime ||
+            r.instanceId === selectedRuntime ||
+            r.id.startsWith(selectedRuntime + '|') ||
+            r.id.endsWith('|' + selectedRuntime))
+        );
+        const parts = [`value="${escapeHtml(r.id)}"`];
+        if (isSelected) {
+          parts.push('selected');
+        }
+        if (!r.enabled) {
+          parts.push('disabled');
+        }
+        if (r.tooltip) {
+          parts.push(`title="${escapeHtml(r.tooltip)}"`);
+        }
+        return `<option ${parts.join(' ')}>${escapeHtml(r.name)}</option>`;
       })
       .join('\n');
   }

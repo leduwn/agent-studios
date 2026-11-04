@@ -17,8 +17,8 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import { ReassembledTaskDiff } from '../bridge/ipc/ArtifactClient';
-import { DiffParser, ParsedDiff, ParsedDiffFile } from '../cards/DiffParser';
+import { ArtifactClient, ReassembledTaskDiff } from '../bridge/ipc/ArtifactClient';
+import { DiffParser, ParsedDiff, ParsedDiffFile, sanitizeArtifactId } from '../cards/DiffParser';
 import { escapeHtml } from './markdownRenderer';
 
 export interface ArtifactReviewOptions {
@@ -130,9 +130,13 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       const panel = ArtifactReviewPanel.currentPanel;
       panel._panel.reveal(column || vscode.ViewColumn.Beside);
 
+      const isSwitchingStudio = panel._options.studioId !== options.studioId;
       const isSwitchingTask =
-        panel._options.taskId !== options.taskId ||
-        panel._options.studioId !== options.studioId;
+        panel._options.taskId !== options.taskId || isSwitchingStudio;
+
+      if (isSwitchingStudio) {
+        ArtifactClient.invalidateCache(panel._options.studioId);
+      }
 
       if (isSwitchingTask) {
         // Abort in-flight retrieval for previous task
@@ -324,7 +328,8 @@ export class ArtifactReviewPanel implements vscode.Disposable {
       }
     }
 
-    const defaultUri = vscode.Uri.file(`task-${this._options.taskId}.patch`);
+    const safeTaskId = sanitizeArtifactId(this._options.taskId);
+    const defaultUri = vscode.Uri.file(`task-${safeTaskId}.patch`);
     const targetUri = await vscode.window.showSaveDialog({
       defaultUri,
       filters: { 'Patch Files': ['patch', 'diff'], 'All Files': ['*'] },

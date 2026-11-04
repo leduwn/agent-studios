@@ -274,7 +274,14 @@ export class OperatorConfirmationManager {
       return { valid: false, reason: 'Missing required challenge fields' };
     }
 
+    const shouldConsume = options?.consume ?? true;
+
     if (Date.now() > parsed.expiresAt) {
+      const tracked = this.activeChallenges.get(parsed.token);
+      if (tracked && shouldConsume) {
+        tracked.consumed = true;
+        tracked.consumedAt = Date.now();
+      }
       return { valid: false, reason: 'Confirmation challenge expired' };
     }
 
@@ -298,6 +305,11 @@ export class OperatorConfirmationManager {
     const sigBuf = Buffer.from(parsed.signature, 'hex');
     const expBuf = Buffer.from(expectedSig, 'hex');
     if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      const tracked = this.activeChallenges.get(parsed.token);
+      if (tracked && shouldConsume) {
+        tracked.consumed = true;
+        tracked.consumedAt = Date.now();
+      }
       return { valid: false, reason: 'Forged confirmation challenge: invalid cryptographic signature' };
     }
 
@@ -315,6 +327,12 @@ export class OperatorConfirmationManager {
         valid: false,
         reason: 'Challenge token has already been consumed (replay prevented)',
       };
+    }
+
+    // Challenge tokens must be single-use (consumed on attempt)
+    if (shouldConsume) {
+      tracked.consumed = true;
+      tracked.consumedAt = Date.now();
     }
 
     if (!tracked.confirmed) {
@@ -465,9 +483,8 @@ export class OperatorConfirmationManager {
       };
     }
 
-    // Single-use atomic consumption
-    const shouldConsume = options?.consume ?? true;
-    if (shouldConsume) {
+    // Single-use challenge token was already atomically marked consumed on attempt
+    if (shouldConsume && !tracked.consumed) {
       tracked.consumed = true;
       tracked.consumedAt = Date.now();
     }
@@ -492,7 +509,9 @@ export class OperatorConfirmationManager {
       consume?: boolean;
     }
   ): { valid: boolean; reason?: string } {
-    return this.verifyAndConsumeChallenge(challenge, expected, options);
+    return this.verifyAndConsumeChallenge(challenge, expected, {
+      consume: options?.consume ?? false,
+    });
   }
 }
 

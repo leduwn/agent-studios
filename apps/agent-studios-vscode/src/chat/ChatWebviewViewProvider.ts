@@ -444,6 +444,12 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         }
         break;
 
+      case 'switchTask':
+        if (message.taskId) {
+          TaskExecutionStore.instance.switchTask(message.taskId, message.studioId);
+        }
+        break;
+
       case 'switchProviderModel':
         this._selectedModelId = message.modelId;
         this._selectedProviderId = message.providerId;
@@ -703,6 +709,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private async _handleSwitchSession(sessionId: string): Promise<void> {
     try {
       const session = await this.bridge.switchSession(sessionId);
+      this._stateProjection?.switchSession(session);
       this._messages = [];
       await this.postMessage({
         type: 'syncState',
@@ -721,6 +728,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private async _handleNewSession(): Promise<void> {
     try {
       const session = await this.bridge.createSession();
+      this._stateProjection?.switchSession(session);
       this._messages = [];
       this._attachments = [];
       this._composerDraft = '';
@@ -854,6 +862,13 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         });
 
         store.taskSubmitted(submitResult.taskId, studioId);
+        this._stateProjection?.upsertTask({
+          id: submitResult.taskId,
+          title: prompt,
+          status: 'pending',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
         await this.postMessage({
           type: 'taskSubmitted',
           taskId: submitResult.taskId,
