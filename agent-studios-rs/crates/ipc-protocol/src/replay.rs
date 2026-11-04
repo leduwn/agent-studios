@@ -52,6 +52,71 @@ impl ReplayBuffer {
         Ok(buf)
     }
 
+    /// Creates a new `ReplayBuffer` with an initial last-assigned sequence number
+    /// from durable persistence.
+    pub fn with_initial_sequence(
+        capacity: usize,
+        initial_last_sequence: u64,
+    ) -> Result<Self, ProtocolError> {
+        if capacity == 0 {
+            return Err(ProtocolError::InvalidCapacity(
+                "Buffer capacity must be greater than zero".into(),
+            ));
+        }
+
+        Ok(Self {
+            buffer: VecDeque::with_capacity(capacity),
+            capacity,
+            last_sequence: if initial_last_sequence > 0 {
+                Some(initial_last_sequence)
+            } else {
+                None
+            },
+            contiguous_only: false,
+        })
+    }
+
+    /// Hydrates the buffer with a sequence of historical events, enforcing monotonicity
+    /// and retaining up to `capacity` most recent events.
+    pub fn hydrate_tail(
+        &mut self,
+        events: impl IntoIterator<Item = IpcEvent>,
+    ) -> Result<(), ProtocolError> {
+        for event in events {
+            match self.buffer.back() {
+                Some(back) if self.contiguous_only && event.sequence != back.sequence + 1 => {
+                    return Err(ProtocolError::SequenceGapRecoverable {
+                        expected: back.sequence + 1,
+                        found: event.sequence,
+                    });
+                }
+                Some(back) if !self.contiguous_only && event.sequence <= back.sequence => {
+                    return Err(ProtocolError::InvalidState(format!(
+                        "Non-monotonic sequence number: incoming {} <= last in buffer {}",
+                        event.sequence, back.sequence
+                    )));
+                }
+                _ => {}
+            }
+
+            if self.last_sequence.is_none_or(|l| event.sequence > l) {
+                self.last_sequence = Some(event.sequence);
+            }
+
+            if self.buffer.len() >= self.capacity {
+                self.buffer.pop_front();
+            }
+
+            self.buffer.push_back(event);
+        }
+        Ok(())
+    }
+
+    /// Returns the maximum capacity of the buffer.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub fn push(&mut self, event: IpcEvent) -> Result<(), ProtocolError> {
         if self.contiguous_only {
             return self.push_contiguous(event);
@@ -101,7 +166,10 @@ impl ReplayBuffer {
     }
 
     pub fn latest_sequence(&self) -> Option<u64> {
-        self.buffer.back().map(|e| e.sequence)
+        self.buffer
+            .back()
+            .map(|e| e.sequence)
+            .or(self.last_sequence)
     }
 
     pub fn len(&self) -> usize {
@@ -118,10 +186,17 @@ impl ReplayBuffer {
         limit: Option<usize>,
     ) -> Result<Vec<IpcEvent>, ProtocolError> {
         if self.buffer.is_empty() {
-            if from_sequence > 1 {
+            let expected = self.last_sequence.map(|l| l + 1).unwrap_or(1);
+            if from_sequence > expected {
                 return Err(ProtocolError::SequenceGapRecoverable {
-                    expected: 1,
+                    expected,
                     found: from_sequence,
+                });
+            }
+            if from_sequence < expected {
+                return Err(ProtocolError::SequenceGapUnrecoverable {
+                    expected: from_sequence,
+                    found: expected,
                 });
             }
             return Ok(Vec::new());
@@ -411,5 +486,94 @@ mod tests {
                 found: 4
             }
         );
+    }
+
+    #[test]
+    fn test_replay_buffer_with_initial_sequence_caught_up() {
+        let mut buffer = ReplayBuffer::with_initial_sequence(10, 42).unwrap();
+        assert_eq!(buffer.len(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.oldest_sequence(), None);
+        assert_eq!(buffer.latest_sequence(), Some(42));
+
+        // Replaying 43 (caught up) returns empty vec
+        let caught_up = buffer.replay_from(43, None).unwrap();
+        assert!(caught_up.is_empty());
+
+        // Replaying 40 (< latest + 1) reports unrecoverable gap so caller falls back to persistent store
+        let unrec_err = buffer.replay_from(40, None).unwrap_err();
+        assert_eq!(
+            unrec_err,
+            ProtocolError::SequenceGapUnrecoverable {
+                expected: 40,
+                found: 43,
+            }
+        );
+
+        // Replaying 44 (> latest + 1) reports recoverable gap
+        let gap_err = buffer.replay_from(44, None).unwrap_err();
+        assert_eq!(
+            gap_err,
+            ProtocolError::SequenceGapRecoverable {
+                expected: 43,
+                found: 44,
+            }
+        );
+
+        // Next push must strictly exceed 42
+        let push_err = buffer.push(IpcEvent::new(42, "dup", serde_json::json!({})));
+        assert!(push_err.is_err());
+
+        // Pushing 43 succeeds
+        buffer
+            .push(IpcEvent::new(43, "next", serde_json::json!({})))
+            .unwrap();
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.oldest_sequence(), Some(43));
+        assert_eq!(buffer.latest_sequence(), Some(43));
+    }
+
+    #[test]
+    fn test_replay_buffer_hydrate_tail_and_eviction() {
+        let mut buffer = ReplayBuffer::new(5).unwrap();
+        let events: Vec<IpcEvent> = (1..=10)
+            .map(|seq| IpcEvent::new(seq, "chunk", serde_json::json!({ "seq": seq })))
+            .collect();
+
+        buffer.hydrate_tail(events).unwrap();
+        assert_eq!(buffer.len(), 5);
+        assert_eq!(buffer.oldest_sequence(), Some(6));
+        assert_eq!(buffer.latest_sequence(), Some(10));
+
+        // Sequence before oldest fails unrecoverable
+        assert_eq!(
+            buffer.replay_from(5, None).unwrap_err(),
+            ProtocolError::SequenceGapUnrecoverable {
+                expected: 5,
+                found: 6,
+            }
+        );
+
+        // Sequence 6..=10 replays all 5 events
+        let replayed = buffer.replay_from(6, None).unwrap();
+        assert_eq!(replayed.len(), 5);
+        assert_eq!(replayed[0].sequence, 6);
+        assert_eq!(replayed[4].sequence, 10);
+
+        // Sequence 11 returns empty (caught up)
+        assert!(buffer.replay_from(11, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_replay_buffer_hydrate_tail_rejects_non_monotonic() {
+        let mut buffer = ReplayBuffer::new(5).unwrap();
+        let events = vec![
+            IpcEvent::new(1, "e1", serde_json::json!({})),
+            IpcEvent::new(3, "e3", serde_json::json!({})),
+            IpcEvent::new(2, "e2_regressed", serde_json::json!({})),
+        ];
+
+        let err = buffer.hydrate_tail(events).unwrap_err();
+        assert!(err.to_string().contains("Non-monotonic"));
     }
 }

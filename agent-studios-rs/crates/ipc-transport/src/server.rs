@@ -191,20 +191,7 @@ impl ServerState {
         let mut replay = self.replay_buffer.lock().unwrap();
         for envelope in envelopes {
             let next_seq = replay.latest_sequence().unwrap_or(0) + 1;
-            let kind = serde_json::to_value(&envelope.event)
-                .ok()
-                .and_then(|v| {
-                    v.get("kind")
-                        .and_then(|k| k.as_str().map(|s| s.to_string()))
-                })
-                .unwrap_or_else(|| "control_plane_event".to_string());
-            let payload = serde_json::to_value(&envelope).unwrap_or_default();
-            let event = IpcEvent {
-                sequence: next_seq,
-                timestamp: envelope.timestamp,
-                event_type: kind,
-                payload,
-            };
+            let event = envelope_to_ipc_event(next_seq, &envelope);
             replay.push(event.clone())?;
             let _ = self.broadcast_tx.send(event);
         }
@@ -225,6 +212,24 @@ impl ServerState {
         &self,
     ) -> Vec<agent_studios_external_runtime::id::RuntimeImplementationId> {
         self.runtime_registry.list_ids().await
+    }
+}
+
+/// Converts a domain `EventEnvelope` into a framed wire `IpcEvent` with a given sequence number.
+pub fn envelope_to_ipc_event(sequence: u64, envelope: &EventEnvelope) -> IpcEvent {
+    let kind = serde_json::to_value(&envelope.event)
+        .ok()
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|k| k.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "control_plane_event".to_string());
+    let payload = serde_json::to_value(envelope).unwrap_or_default();
+    IpcEvent {
+        sequence,
+        timestamp: envelope.timestamp,
+        event_type: kind,
+        payload,
     }
 }
 
@@ -431,12 +436,8 @@ impl IpcServerBuilder {
     }
 
     pub fn build(self) -> Result<IpcServer, TransportError> {
-        let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
-        let nonce_tracker = NonceTracker::new(60_000, 10_000);
-
-        let (control_plane, recovery_status) = if let Some(cp) = self.control_plane {
-            let total_events = cp.all_events().map(|v| v.len()).unwrap_or(0);
+        let (cp, recovery_status) = if let Some(cp) = self.control_plane {
+            let total_events = cp.event_count().unwrap_or(0);
             let status = self.recovery_status.unwrap_or_else(|| {
                 agent_studios_ipc_protocol::RecoveryStatusReport {
                     last_recovery_at: None,
@@ -453,7 +454,7 @@ impl IpcServerBuilder {
                     total_persisted_events: total_events,
                 }
             });
-            (Arc::new(tokio::sync::RwLock::new(cp)), status)
+            (cp, status)
         } else if let Some(ref db_path) = self.db_path {
             let store = agent_studios_control_plane::sqlite_store::SqliteEventStore::open(db_path)
                 .map_err(|e| {
@@ -493,7 +494,7 @@ impl IpcServerBuilder {
                     total_persisted_events: total_events,
                 }
             });
-            (Arc::new(tokio::sync::RwLock::new(cp)), status)
+            (cp, status)
         } else {
             let cp = ControlPlane::new_default();
             let status =
@@ -509,8 +510,30 @@ impl IpcServerBuilder {
                         database_path: None,
                         total_persisted_events: 0,
                     });
-            (Arc::new(tokio::sync::RwLock::new(cp)), status)
+            (cp, status)
         };
+
+        let capacity = self.replay_capacity.max(1);
+        let total_persisted = recovery_status.total_persisted_events;
+        let replay_buffer = if total_persisted > 0 {
+            let mut buf = ReplayBuffer::with_initial_sequence(capacity, total_persisted as u64)?;
+            let tail_limit = capacity.min(total_persisted);
+            if let Ok(tail_envelopes) = cp.events_tail(tail_limit) {
+                let start_seq = (total_persisted - tail_envelopes.len() + 1) as u64;
+                let ipc_events = tail_envelopes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, env)| envelope_to_ipc_event(start_seq + idx as u64, env));
+                let _ = buf.hydrate_tail(ipc_events);
+            }
+            buf
+        } else {
+            ReplayBuffer::new(capacity)?
+        };
+
+        let control_plane = Arc::new(tokio::sync::RwLock::new(cp));
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
+        let nonce_tracker = NonceTracker::new(60_000, 10_000);
 
         let catalog_arc = Arc::new(
             self.provider_catalog

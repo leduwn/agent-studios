@@ -236,6 +236,106 @@ impl SqliteEventStore {
         usize::try_from(count)
             .map_err(|e| StoreError::StorageFailure(format!("Invalid event count {count}: {e}")))
     }
+
+    /// Returns the most recent `limit` events persisted in the database in ascending chronological order.
+    pub fn events_tail(&self, limit: usize) -> Result<Vec<EventEnvelope>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::StorageFailure("Poisoned connection mutex".to_string()))?;
+
+        let limit_i64 = i64::try_from(limit)
+            .map_err(|e| StoreError::StorageFailure(format!("limit overflow {limit}: {e}")))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, schema_version, studio_id, sequence, timestamp, event_payload
+                 FROM (
+                     SELECT rowid, event_id, schema_version, studio_id, sequence, timestamp, event_payload
+                     FROM event_store
+                     ORDER BY rowid DESC
+                     LIMIT ?1
+                 ) sub
+                 ORDER BY rowid ASC",
+            )
+            .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit_i64], |row| {
+                Ok(StoredEventRow {
+                    event_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    studio_id: row.get(2)?,
+                    sequence: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    payload: row.get(5)?,
+                })
+            })
+            .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+
+        let mut envelopes = Vec::new();
+        for r in rows {
+            let stored = r.map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+            envelopes.push(stored.into_envelope()?);
+        }
+
+        Ok(envelopes)
+    }
+
+    /// Returns a slice of events starting from row offset `offset` up to `limit` in ascending chronological order.
+    pub fn events_slice(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<EventEnvelope>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| StoreError::StorageFailure("Poisoned connection mutex".to_string()))?;
+
+        let limit_i64 = i64::try_from(limit)
+            .map_err(|e| StoreError::StorageFailure(format!("limit overflow {limit}: {e}")))?;
+        let offset_i64 = i64::try_from(offset)
+            .map_err(|e| StoreError::StorageFailure(format!("offset overflow {offset}: {e}")))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_id, schema_version, studio_id, sequence, timestamp, event_payload
+                 FROM event_store
+                 ORDER BY rowid ASC
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit_i64, offset_i64], |row| {
+                Ok(StoredEventRow {
+                    event_id: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    studio_id: row.get(2)?,
+                    sequence: row.get(3)?,
+                    timestamp: row.get(4)?,
+                    payload: row.get(5)?,
+                })
+            })
+            .map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+
+        let mut envelopes = Vec::new();
+        for r in rows {
+            let stored = r.map_err(|e| StoreError::StorageFailure(e.to_string()))?;
+            envelopes.push(stored.into_envelope()?);
+        }
+
+        Ok(envelopes)
+    }
 }
 
 impl EventStore for SqliteEventStore {
@@ -508,6 +608,14 @@ impl EventStore for SqliteEventStore {
     fn event_count(&self) -> Result<usize, StoreError> {
         self.event_count()
     }
+
+    fn events_tail(&self, limit: usize) -> Result<Vec<EventEnvelope>, StoreError> {
+        self.events_tail(limit)
+    }
+
+    fn events_slice(&self, offset: usize, limit: usize) -> Result<Vec<EventEnvelope>, StoreError> {
+        self.events_slice(offset, limit)
+    }
 }
 
 /// Internal database row structure.
@@ -694,5 +802,68 @@ mod tests {
             .unwrap();
         // SQLite synchronous NORMAL is 1
         assert_eq!(sync_val_normal, 1);
+    }
+
+    #[test]
+    fn test_sqlite_store_events_tail_and_slice() {
+        let mut store = SqliteEventStore::in_memory().unwrap();
+        let studio_id = StudioId::new();
+        let now = Utc::now();
+
+        // Empty store queries
+        assert!(store.events_tail(10).unwrap().is_empty());
+        assert!(store.events_slice(0, 10).unwrap().is_empty());
+        assert!(store.events_tail(0).unwrap().is_empty());
+        assert!(store.events_slice(0, 0).unwrap().is_empty());
+
+        // Insert 10 events
+        for seq in 1..=10 {
+            let event = ControlPlaneEvent::StudioCreated {
+                studio: Studio::with_id(studio_id, format!("Studio {seq}"), now),
+            };
+            let env = EventEnvelope::new(studio_id, seq, now, event);
+            store.append(env).unwrap();
+        }
+
+        assert_eq!(store.event_count().unwrap(), 10);
+
+        // Limit 0 returns empty
+        assert!(store.events_tail(0).unwrap().is_empty());
+        assert!(store.events_slice(0, 0).unwrap().is_empty());
+
+        // events_tail(3) returns sequences [8, 9, 10] in ascending order
+        let tail_3 = store.events_tail(3).unwrap();
+        assert_eq!(tail_3.len(), 3);
+        assert_eq!(tail_3[0].sequence, 8);
+        assert_eq!(tail_3[1].sequence, 9);
+        assert_eq!(tail_3[2].sequence, 10);
+
+        // events_tail(20) returns all 10 events
+        let tail_all = store.events_tail(20).unwrap();
+        assert_eq!(tail_all.len(), 10);
+        assert_eq!(tail_all[0].sequence, 1);
+        assert_eq!(tail_all[9].sequence, 10);
+
+        // events_slice(0, 4) returns sequences [1, 2, 3, 4]
+        let slice_first = store.events_slice(0, 4).unwrap();
+        assert_eq!(slice_first.len(), 4);
+        assert_eq!(slice_first[0].sequence, 1);
+        assert_eq!(slice_first[3].sequence, 4);
+
+        // events_slice(4, 4) returns sequences [5, 6, 7, 8]
+        let slice_mid = store.events_slice(4, 4).unwrap();
+        assert_eq!(slice_mid.len(), 4);
+        assert_eq!(slice_mid[0].sequence, 5);
+        assert_eq!(slice_mid[3].sequence, 8);
+
+        // events_slice(8, 4) returns sequences [9, 10]
+        let slice_tail = store.events_slice(8, 4).unwrap();
+        assert_eq!(slice_tail.len(), 2);
+        assert_eq!(slice_tail[0].sequence, 9);
+        assert_eq!(slice_tail[1].sequence, 10);
+
+        // events_slice(10, 4) returns empty vec
+        let slice_out_of_bounds = store.events_slice(10, 4).unwrap();
+        assert!(slice_out_of_bounds.is_empty());
     }
 }

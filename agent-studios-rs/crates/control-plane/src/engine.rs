@@ -3839,6 +3839,24 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         self.store.event_count().map_err(ControlPlaneError::Store)
     }
 
+    /// Returns the most recent `limit` events across all studios in ascending chronological order.
+    pub fn events_tail(&self, limit: usize) -> Result<Vec<EventEnvelope>, ControlPlaneError> {
+        self.store
+            .events_tail(limit)
+            .map_err(ControlPlaneError::Store)
+    }
+
+    /// Returns a slice of events starting from chronological index `offset` (0-indexed) up to `limit`.
+    pub fn events_slice(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<EventEnvelope>, ControlPlaneError> {
+        self.store
+            .events_slice(offset, limit)
+            .map_err(ControlPlaneError::Store)
+    }
+
     /// Reconstructs a ControlPlane instance strictly by replaying an event sequence.
     /// Validates schema version, sequence numbers, event ID uniqueness, entity references,
     /// studio boundaries, and state transitions.

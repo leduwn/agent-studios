@@ -1558,6 +1558,58 @@ fn test_control_plane_sqlite_restore_from_store_and_resume_mutations() {
 }
 
 #[test]
+fn test_control_plane_events_tail_and_slice() {
+    use agent_studios_control_plane::sqlite_store::SqliteEventStore;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("bounded_events.db");
+    let now = Utc::now();
+
+    let store = SqliteEventStore::open(&db_path).unwrap();
+    let mut cp = ControlPlane::new(FixedClock::new(now), store);
+
+    let studio = cp.create_studio("Bounded Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Agent 1", AgentKind::Internal, None)
+        .unwrap();
+
+    for i in 1..=5 {
+        cp.create_task(
+            studio.id,
+            format!("Task {i}"),
+            "Task desc",
+            None,
+            Some(agent.id),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    // Total events: StudioCreated(1) + AgentRegistered(2) + 5 Tasks(3..=7) = 7 events
+    assert_eq!(cp.event_count().unwrap(), 7);
+
+    // events_tail(3) returns the last 3 events (sequences 5, 6, 7)
+    let tail_3 = cp.events_tail(3).unwrap();
+    assert_eq!(tail_3.len(), 3);
+    assert_eq!(tail_3[0].sequence, 5);
+    assert_eq!(tail_3[1].sequence, 6);
+    assert_eq!(tail_3[2].sequence, 7);
+
+    // events_slice(0, 2) returns first 2 events
+    let slice_head = cp.events_slice(0, 2).unwrap();
+    assert_eq!(slice_head.len(), 2);
+    assert_eq!(slice_head[0].sequence, 1);
+    assert_eq!(slice_head[1].sequence, 2);
+
+    // events_slice(4, 10) returns remaining 3 events
+    let slice_tail = cp.events_slice(4, 10).unwrap();
+    assert_eq!(slice_tail.len(), 3);
+    assert_eq!(slice_tail[0].sequence, 5);
+    assert_eq!(slice_tail[2].sequence, 7);
+}
+
+#[test]
 fn test_control_plane_reconcile_interrupted_executions() {
     use agent_studios_control_plane::sqlite_store::SqliteEventStore;
     use tempfile::tempdir;
