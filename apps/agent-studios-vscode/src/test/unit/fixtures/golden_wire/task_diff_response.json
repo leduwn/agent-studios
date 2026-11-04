@@ -1,0 +1,31 @@
+{
+  "type": "task_diff",
+  "diff": {
+    "studio_id": "c0a80101-0000-0000-0000-000000000001",
+    "task_id": "c0a80101-0000-0000-0000-000000000003",
+    "artifact_id": "c0a80101-0000-0000-0000-000000000002",
+    "base_commit": "0123456789abcdef0123456789abcdef01234567",
+    "head_commit": "fedcba9876543210fedcba9876543210fedcba98",
+    "summary": {
+      "files_changed": 1,
+      "added_files": [
+        "file.txt"
+      ],
+      "modified_files": [],
+      "deleted_files": [],
+      "renamed_files": [],
+      "binary_files": [],
+      "patch_size_bytes": 33,
+      "base_commit": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "patch": "diff --git a/file.txt b/file.txt\n",
+    "offset": 0,
+    "limit": 1048576,
+    "total_bytes": 33,
+    "has_more": false,
+    "patch_base64": "ZGlmZiAtLWdpdCBhL2ZpbGUudHh0IGIvZmlsZS50eHQK",
+    "encoding": "base64",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "chunk_bytes": 33
+  }
+}

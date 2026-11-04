@@ -1,0 +1,126 @@
+name: Agent Studios M14 UI CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'feature/**'
+    paths:
+      - 'apps/agent-studios-vscode/**'
+      - '.github/workflows/agent-studios-m14-ui-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'apps/agent-studios-vscode/**'
+      - '.github/workflows/agent-studios-m14-ui-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    defaults:
+      run:
+        working-directory: apps/agent-studios-vscode
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Rust backend (M15 IPC agsd)
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          PINNED_SHA="dcbcb39bf61225a4660be5b533cf1ffd5de14b29"
+          echo "Fetching pinned backend commit: $PINNED_SHA"
+          git fetch --depth=1 --force origin "$PINNED_SHA":backend-pin || {
+            echo "::error::Failed to fetch pinned backend commit $PINNED_SHA. Branch fallback disabled."
+            exit 1
+          }
+          ACTUAL_SHA=$(git rev-parse backend-pin)
+          echo "Verified fetched backend commit: $ACTUAL_SHA"
+          if [ "$ACTUAL_SHA" != "$PINNED_SHA" ]; then
+            echo "::error::Backend commit mismatch: expected $PINNED_SHA but got $ACTUAL_SHA"
+            exit 1
+          fi
+          rm -rf agent-studios-rs
+          git checkout backend-pin -- agent-studios-rs/
+          echo "Successfully extracted agent-studios-rs/ from pinned commit $ACTUAL_SHA"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-studios-rs
+          key: dcbcb39bf61225a4660be5b533cf1ffd5de14b29
+
+      - name: Build agsd native daemon
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          cargo build --manifest-path agent-studios-rs/Cargo.toml --bin agsd -p agent-studios-ipc-transport
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            test -f "agent-studios-rs/target/debug/agsd.exe" || { echo "::error::agsd.exe not found"; exit 1; }
+            echo "AGSD_BIN_PATH=${{ github.workspace }}\\agent-studios-rs\\target\\debug\\agsd.exe" >> "$GITHUB_ENV"
+          else
+            test -f "agent-studios-rs/target/debug/agsd" || { echo "::error::agsd not found"; exit 1; }
+            chmod +x "agent-studios-rs/target/debug/agsd"
+            echo "AGSD_BIN_PATH=${{ github.workspace }}/agent-studios-rs/target/debug/agsd" >> "$GITHUB_ENV"
+          fi
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: apps/agent-studios-vscode/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint source files
+        run: npm run lint
+
+      - name: Typecheck TypeScript
+        run: npm run typecheck
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Run pure unit test suite
+        run: npm run test:unit
+
+      - name: Run real daemon E2E tests (Linux)
+        if: runner.os == 'Linux'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}/agent-studios-rs/target/debug/agsd
+        run: npm run test:e2e
+
+      - name: Run real daemon E2E tests (Windows)
+        if: runner.os == 'Windows'
+        env:
+          AGSD_BIN_PATH: ${{ github.workspace }}\agent-studios-rs\target\debug\agsd.exe
+        run: npm run test:e2e
+
+      - name: Run VS Code extension host integration tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration
+
+      - name: Run VS Code extension host integration tests (Windows)
+        if: runner.os == 'Windows'
+        run: npm run test:integration
+
+      - name: Validate VSIX packaging
+        run: npx @vscode/vsce package --no-dependencies

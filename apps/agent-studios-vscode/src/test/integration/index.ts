@@ -1,0 +1,34 @@
+import * as path from 'path';
+import * as fs from 'fs';
+import Mocha from 'mocha';
+
+export function run(): Promise<void> {
+  const mocha = new Mocha({
+    ui: 'bdd',
+    color: true,
+    timeout: 30000,
+  });
+
+  const testsRoot = path.resolve(__dirname, '.');
+
+  return new Promise((resolve, reject) => {
+    try {
+      const files = fs.readdirSync(testsRoot);
+      const testFiles = files.filter(f => f.endsWith('.test.js'));
+
+      for (const file of testFiles) {
+        mocha.addFile(path.resolve(testsRoot, file));
+      }
+
+      mocha.run(failures => {
+        if (failures > 0) {
+          reject(new Error(`${failures} tests failed in real VS Code Extension Host.`));
+        } else {
+          resolve();
+        }
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
