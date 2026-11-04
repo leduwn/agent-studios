@@ -13,6 +13,7 @@ members = [
     "crates/workspace",
     "crates/external-runtime",
     "crates/opencode-runtime",
+    "crates/claude-code-runtime",
     "crates/ipc-protocol",
     "crates/ipc-transport",
 ]

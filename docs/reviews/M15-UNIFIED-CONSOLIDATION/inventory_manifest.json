@@ -1,0 +1,729 @@
+﻿{
+    "manifest_version":  "1.0.0",
+    "audit_date":  "2026-11-04",
+    "auditor":  "Agent D (Workspace Inventory \u0026 Cleanup Auditor)",
+    "workspace_root":  "D:\\Projects",
+    "canonical_repository":  "D:\\Projects\\agent-studios",
+    "remote_origin_url":  "https://github.com/leduwn/agent-studios.git",
+    "summary":  {
+                    "total_directories":  12,
+                    "total_bytes":  53199496155,
+                    "total_megabytes":  50734.99,
+                    "total_gigabytes":  49.546,
+                    "total_files":  269004,
+                    "canonical_count":  1,
+                    "active_worktree_count":  2,
+                    "unmerged_work_count":  1,
+                    "hold_count":  1,
+                    "archive_candidate_count":  7,
+                    "dirty_directories_count":  1,
+                    "clean_directories_count":  11,
+                    "worktrees_registered_in_git":  292,
+                    "temp_worktrees_in_appdata":  281
+                },
+    "directories":  [
+                        {
+                            "directory_name":  "agent-studios",
+                            "absolute_path":  "D:\\Projects\\agent-studios",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios",
+                                                 "common_dir":  ".git",
+                                                 "git_dir":  ".git",
+                                                 "is_root_repository":  true,
+                                                 "is_linked_worktree":  false,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m12-claude-code-runtime",
+                            "head_commit":  {
+                                                "sha":  "3207b7462f9e3055ceee6996c4bfc914cf26fae7",
+                                                "short_sha":  "3207b7462f",
+                                                "subject":  "docs(reviews): add M12.3 security hardening audit report and handoff",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-28 12:46:36 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m12-claude-code-runtime",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  7,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  false,
+                                                        "total_uncommitted":  9,
+                                                        "modified_files":  [
+                                                                               "agent-studios-rs/Cargo.lock",
+                                                                               "agent-studios-rs/crates/provider/Cargo.toml",
+                                                                               "agent-studios-rs/crates/provider/src/error.rs",
+                                                                               "agent-studios-rs/crates/provider/src/lib.rs",
+                                                                               "agent-studios-rs/crates/provider/src/secret.rs"
+                                                                           ],
+                                                        "untracked_files":  [
+                                                                                "AGENTS.md",
+                                                                                "agent-studios-rs/crates/provider/src/discovery.rs",
+                                                                                "agent-studios-rs/crates/provider/tests/discovery_tests.rs",
+                                                                                "docs/reviews/M13-IPC-02.2.2/"
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  5796019570,
+                                               "megabytes":  5527.52,
+                                               "gigabytes":  5.398,
+                                               "file_count":  28050
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "CANONICAL_CANDIDATE",
+                            "classification_reason":  "Root repository hosting primary .git directory and object store; contains Claude Code runtime branch with 9 uncommitted changes needing preservation/resolution."
+                        },
+                        {
+                            "directory_name":  "agent-studios-ags-cli",
+                            "absolute_path":  "D:\\Projects\\agent-studios-ags-cli",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-ags-cli",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-ags-cli",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/provider-management-v1",
+                            "head_commit":  {
+                                                "sha":  "a98129ef7e03816b936fe194adede0c25e287674",
+                                                "short_sha":  "a98129ef7e",
+                                                "subject":  "fix(provider): report RateLimited on HTTP 429 and standardize PR governance",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 10:37:49 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/provider-management-v1",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  15,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  99289011,
+                                               "megabytes":  94.69,
+                                               "gigabytes":  0.092,
+                                               "file_count":  9238
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "UNMERGED_WORK",
+                            "classification_reason":  "Provider Management v1 feature branch pushed to origin but not yet merged to main; clean worktree."
+                        },
+                        {
+                            "directory_name":  "agent-studios-ide-ui",
+                            "absolute_path":  "D:\\Projects\\agent-studios-ide-ui",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-ide-ui",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-ide-ui",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m15-real-agent-execution-ui",
+                            "head_commit":  {
+                                                "sha":  "3de7c85a966d1b46a293235b11170219d53cc7f3",
+                                                "short_sha":  "3de7c85a96",
+                                                "subject":  "feat(m15-ui): frontend reliability, shared state consistency and integration readiness (M15-UI-05A)",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-11-04 10:30:00 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m15-real-agent-execution-ui",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  34,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  1280797216,
+                                               "megabytes":  1221.46,
+                                               "gigabytes":  1.193,
+                                               "file_count":  25068
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ACTIVE_WORKTREE",
+                            "classification_reason":  "Highest milestone branch for frontend UI / VS Code execution (M15 Real Agent Execution UI). Active consolidation target."
+                        },
+                        {
+                            "directory_name":  "agent-studios-m13",
+                            "absolute_path":  "D:\\Projects\\agent-studios-m13",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-m13",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-m13",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m13-ipc-02-control-plane",
+                            "head_commit":  {
+                                                "sha":  "ce0396c1f165760ea271110eaf9bfd6dc84a67a7",
+                                                "short_sha":  "ce0396c1f1",
+                                                "subject":  "feat(ipc): freeze protocol contract, add golden fixtures, audit M15 readiness and author cross-team handoff (M13 IPC-02.2.2)",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 18:57:10 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  null,
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  17,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  94085886,
+                                               "megabytes":  89.73,
+                                               "gigabytes":  0.088,
+                                               "file_count":  9188
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-m15",
+                            "absolute_path":  "D:\\Projects\\agent-studios-m15",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-m15",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-m15",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m15-01-per-task-execution-contract",
+                            "head_commit":  {
+                                                "sha":  "a5dbbfc5ebada254727db9a788c0ee40e3035ea8",
+                                                "short_sha":  "a5dbbfc5eb",
+                                                "subject":  "feat(ipc): harden readiness semantics, workspace containment, and golden fixtures (M15-01.1)",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-31 02:34:24 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m15-01-per-task-execution-contract",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  19,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  94212010,
+                                               "megabytes":  89.85,
+                                               "gigabytes":  0.088,
+                                               "file_count":  9194
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-m15-02",
+                            "absolute_path":  "D:\\Projects\\agent-studios-m15-02",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-m15-02",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-m15-02",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m15-02-multi-runtime-registry",
+                            "head_commit":  {
+                                                "sha":  "b307b9a6e2bea51873d22e98127562b745eed4fb",
+                                                "short_sha":  "b307b9a6e2",
+                                                "subject":  "feat(ipc): implement M15-02 multi-runtime adapter registry and deterministic routing",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-31 10:56:19 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m15-02-multi-runtime-registry",
+                                             "ahead":  0,
+                                             "behind":  12,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  20,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  7936106140,
+                                               "megabytes":  7568.46,
+                                               "gigabytes":  7.391,
+                                               "file_count":  26211
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-m15-03",
+                            "absolute_path":  "D:\\Projects\\agent-studios-m15-03",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-m15-03",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-m15-03",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m15-03-artifact-diff-review",
+                            "head_commit":  {
+                                                "sha":  "cc1c3e8f398a5acfa24cf643cfcb2b043f6e163b",
+                                                "short_sha":  "cc1c3e8f39",
+                                                "subject":  "feat(ipc): implement lossless diff streaming, binary pagination and protocol hardening (M15-03.1)",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-11-02 00:50:18 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  null,
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  34,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  14554805135,
+                                               "megabytes":  13880.54,
+                                               "gigabytes":  13.555,
+                                               "file_count":  35364
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-m15-04",
+                            "absolute_path":  "D:\\Projects\\agent-studios-m15-04",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-m15-04",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-m15-04",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m15-04-durable-state-recovery",
+                            "head_commit":  {
+                                                "sha":  "cf1e6c0f98d568ed0b4c9da9ecf80c6d3eea456d",
+                                                "short_sha":  "cf1e6c0f98",
+                                                "subject":  "feat(backend): implement durable event replay, crash-safe reconnect \u0026 real execution readiness (M15-05)",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-11-04 10:35:49 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m15-04-durable-state-recovery",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  2,
+                                                   "behind":  59
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  20382983128,
+                                               "megabytes":  19438.73,
+                                               "gigabytes":  18.983,
+                                               "file_count":  34364
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ACTIVE_WORKTREE",
+                            "classification_reason":  "Highest milestone branch for backend/IPC/engine execution (M15-05). Active consolidation target."
+                        },
+                        {
+                            "directory_name":  "agent-studios-mission-control",
+                            "absolute_path":  "D:\\Projects\\agent-studios-mission-control",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-mission-control",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-mission-control",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m14-mission-control-workbench",
+                            "head_commit":  {
+                                                "sha":  "3ee485cacd778ffec063f3d328661e74111ecc2a",
+                                                "short_sha":  "3ee485cacd",
+                                                "subject":  "docs(mission-control): align product spec and reference inventory with research findings",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 15:29:44 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m14-mission-control-workbench",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  7,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  203407437,
+                                               "megabytes":  193.98,
+                                               "gigabytes":  0.189,
+                                               "file_count":  21389
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "HOLD",
+                            "classification_reason":  "Contains 3 unique commits (workbench DAG, review interface, spec docs) not merged into integration branch or M15 UI."
+                        },
+                        {
+                            "directory_name":  "agent-studios-mission-control-integration",
+                            "absolute_path":  "D:\\Projects\\agent-studios-mission-control-integration",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-mission-control-integration",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-mission-control-integration",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m14-mission-control-connected-integration",
+                            "head_commit":  {
+                                                "sha":  "a13230ee93afd101f8b0f0c5b6b0e3d61013c9af",
+                                                "short_sha":  "a13230ee93",
+                                                "subject":  "fix(cross-platform): validate foreign-platform path before confirmation challenge evaluation",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 22:06:30 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m14-mission-control-connected-integration",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  18,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  1277829581,
+                                               "megabytes":  1218.63,
+                                               "gigabytes":  1.19,
+                                               "file_count":  24851
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-vscode-ipc-03",
+                            "absolute_path":  "D:\\Projects\\agent-studios-vscode-ipc-03",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-vscode-ipc-03",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-vscode-ipc-03",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m14-ipc-03-connected-client",
+                            "head_commit":  {
+                                                "sha":  "73b7298ca38cd0eaf2ce0e6ae169cd6919670550",
+                                                "short_sha":  "73b7298ca3",
+                                                "subject":  "feat(vscode): deliver M14-IPC-03 real ConnectedClient vertical slice",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 14:01:43 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m14-ipc-03-connected-client",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  5,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  203243767,
+                                               "megabytes":  193.83,
+                                               "gigabytes":  0.189,
+                                               "file_count":  21342
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        },
+                        {
+                            "directory_name":  "agent-studios-vscode-m14-02",
+                            "absolute_path":  "D:\\Projects\\agent-studios-vscode-m14-02",
+                            "git_identity":  {
+                                                 "top_level":  "D:/Projects/agent-studios-vscode-m14-02",
+                                                 "common_dir":  "D:/Projects/agent-studios/.git",
+                                                 "git_dir":  "D:/Projects/agent-studios/.git/worktrees/agent-studios-vscode-m14-02",
+                                                 "is_root_repository":  false,
+                                                 "is_linked_worktree":  true,
+                                                 "is_shallow":  true
+                                             },
+                            "branch":  "feat/m14-vscode-extension-host-hardening",
+                            "head_commit":  {
+                                                "sha":  "ed80b243c9e9fce911a86e023790131c6d3688c7",
+                                                "short_sha":  "ed80b243c9",
+                                                "subject":  "feat(vscode): deliver M14-UI-02.1 protocol correctness and security hardening",
+                                                "author":  "Duwn \u003ccoigayto@gmail.com\u003e",
+                                                "date":  "2026-10-30 11:24:58 +0700"
+                                            },
+                            "upstream":  {
+                                             "tracking_branch":  "origin/feat/m14-vscode-extension-host-hardening",
+                                             "ahead":  0,
+                                             "behind":  0,
+                                             "unpushed_commits":  0
+                                         },
+                            "vs_origin_main":  {
+                                                   "ahead":  4,
+                                                   "behind":  0
+                                               },
+                            "working_tree_status":  {
+                                                        "is_clean":  true,
+                                                        "total_uncommitted":  0,
+                                                        "modified_files":  [
+
+                                                                           ],
+                                                        "untracked_files":  [
+
+                                                                            ],
+                                                        "staged_files":  [
+
+                                                                         ]
+                                                    },
+                            "disk_usage":  {
+                                               "bytes":  1276717274,
+                                               "megabytes":  1217.57,
+                                               "gigabytes":  1.189,
+                                               "file_count":  24745
+                                           },
+                            "process_locks":  {
+                                                  "active_locks":  false,
+                                                  "locking_processes":  [
+
+                                                                        ],
+                                                  "notes":  "No process holds exclusive file locks in this directory."
+                                              },
+                            "classification":  "ARCHIVE_CANDIDATE",
+                            "classification_reason":  "Historical intermediate milestone worktree; fully subsumed by downstream tip branches (M15-04 or M15-UI) and clean."
+                        }
+                    ]
+}
