@@ -1,3 +1,4 @@
+use crate::discovery::DiscoveryError;
 use crate::id::{ModelId, ProviderId, ProviderInstanceId};
 use crate::protocol::ProtocolFamily;
 use thiserror::Error;
@@ -76,4 +77,7 @@ pub enum ProviderError {
 
     #[error("Unsupported catalog schema version: {version} (supported: {supported})")]
     UnsupportedSchemaVersion { version: u32, supported: u32 },
+
+    #[error("Model discovery error: {0}")]
+    DiscoveryError(#[from] DiscoveryError),
 }

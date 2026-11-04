@@ -12,5 +12,9 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1.40", features = ["sync"] }
 
 [dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1.40", features = ["full"] }

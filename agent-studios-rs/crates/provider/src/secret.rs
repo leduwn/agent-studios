@@ -79,6 +79,80 @@ impl fmt::Display for SecretReference {
     }
 }
 
+/// Trait for resolving secret references into concrete secret strings.
+pub trait SecretStore: Send + Sync {
+    /// Retrieves the secret value identified by `reference`.
+    fn get_secret(&self, reference: &SecretReference) -> Result<String, String>;
+
+    /// Alias for `get_secret`.
+    fn resolve_secret(&self, reference: &SecretReference) -> Result<String, String> {
+        self.get_secret(reference)
+    }
+}
+
+impl<T: SecretStore + ?Sized> SecretStore for std::sync::Arc<T> {
+    fn get_secret(&self, reference: &SecretReference) -> Result<String, String> {
+        (**self).get_secret(reference)
+    }
+}
+
+impl<F> SecretStore for F
+where
+    F: Fn(&SecretReference) -> Result<String, String> + Send + Sync,
+{
+    fn get_secret(&self, reference: &SecretReference) -> Result<String, String> {
+        self(reference)
+    }
+}
+
+/// In-memory secret store for testing and runtime credential caching.
+#[derive(Debug, Default)]
+pub struct InMemorySecretStore {
+    secrets: std::sync::RwLock<std::collections::HashMap<SecretReference, String>>,
+}
+
+impl InMemorySecretStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, reference: SecretReference, secret: impl Into<String>) {
+        let mut map = self.secrets.write().unwrap();
+        map.insert(reference, secret.into());
+    }
+
+    pub fn with_secret(self, reference: SecretReference, secret: impl Into<String>) -> Self {
+        self.insert(reference, secret);
+        self
+    }
+}
+
+impl SecretStore for InMemorySecretStore {
+    fn get_secret(&self, reference: &SecretReference) -> Result<String, String> {
+        let map = self.secrets.read().unwrap();
+        map.get(reference)
+            .cloned()
+            .ok_or_else(|| format!("Secret not found for reference: {reference}"))
+    }
+}
+
+/// Secret store that resolves credentials from environment variables.
+#[derive(Debug, Default)]
+pub struct EnvSecretStore;
+
+impl SecretStore for EnvSecretStore {
+    fn get_secret(&self, reference: &SecretReference) -> Result<String, String> {
+        match reference.backend {
+            SecretBackend::EnvironmentVariable => std::env::var(&reference.locator)
+                .map_err(|e| format!("Environment variable '{}' error: {e}", reference.locator)),
+            _ => Err(format!(
+                "Unsupported backend '{}' for EnvSecretStore",
+                reference.backend
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
