@@ -44,5 +44,5 @@ The migration of the Agent Studios development environment to the single canonic
 ## 3. Immediate Operator Actions Required
 
 1. **Review Draft PR**: Visit [Create Draft PR on GitHub](https://github.com/leduwn/agent-studios/pull/new/integration/m15-unified-codebase), confirm parameters against `05_DRAFT_PR_STATUS.md`, and authorize merge of `integration/m15-unified-codebase` into `main`.
-2. **Authorize Worktree Cleanup**: Review `cleanup_approval_manifest.json` and approve removal of 7 candidate worktrees to reclaim ~23.49+ GB of disk space.
+2. **Authorize Worktree Cleanup (P0 Critical Disk Space)**: Drive `D:\` is at 100% capacity (110.00 GB / 110.00 GB used, 56 KB free). Review `cleanup_approval_manifest.json` and approve removal of 7 candidate worktrees to reclaim ~19.19 GB to ~23.49+ GB of disk space immediately.
 3. **Authorize Real Model Execution Budget**: Provide an explicit operator challenge token and budget ($1.00–$5.00 cap) for final live agent testing.

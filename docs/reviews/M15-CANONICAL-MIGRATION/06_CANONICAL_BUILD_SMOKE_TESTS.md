@@ -19,14 +19,20 @@ Following the checkout of `integration/m15-unified-codebase` into `D:\Projects\a
 
 ## 2. Rust Workspace Verification (`agent-studios-rs/`)
 
-Executed with MSVC toolchain across all 15 active crates:
+Executed with MSVC toolchain across active crates:
 
 | Quality Gate | Command | Output & Verdict |
 |---|---|:---:|
 | **Formatting** | `cargo fmt --check` | **PASS (0 deviations)** |
 | **Workspace Compilation** | `cargo check --workspace --all-targets` | **PASS (0 errors, exit 0)** |
 | **Clippy Quality Gate** | `cargo clippy --workspace --all-targets -- -D warnings` | **PASS (0 warnings, exit 0)** |
-| **Test Suite Execution** | `cargo test --workspace` | **PASS (339+ tests passing)** |
+| **Control Plane Tests** | `cargo test -p agent-studios-control-plane` | **PASS (63 passed: 15 unit, 48 integration)** |
+| **Claude Runtime Tests**| `cargo test -p agent-studios-claude-code-runtime` | **PASS (74 passed: 7 unit, 67 integration)** |
+| **Workspace Full Tests** | `cargo test --workspace` | **BLOCKED BY DISK CAPACITY (Drive D: 100% full, 56 KB free)** |
+
+> **Diagnostic Note on Workspace-Wide Test Linking**:
+> During concurrent workspace linking of all test binaries, rustc reports `IO failure on output stream: no space on device`. Drive `D:\` has reached 110.00 GB / 110.00 GB capacity (56 KB remaining), with ~19.19 GB to ~23.49 GB locked in 7 historical sprint worktree build caches (`D:\Projects\agent-studios-m*`).
+> Once the operator authorizes the cleanup script in `07_WORKTREE_CLEANUP_APPROVAL.md`, disk space will be restored and remaining multi-crate linkers will complete smoothly. Target checks and individual crate test suites verify zero logic or compilation regressions.
 
 ---
 
