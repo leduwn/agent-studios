@@ -73,6 +73,7 @@ pub struct ServerState {
     pub in_flight_cancellations: Arc<Mutex<HashSet<agent_studios_protocol::id::TaskId>>>,
     pub authorized_workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
     pub strict_workspace_roots: bool,
+    pub recovery_status: Arc<Mutex<agent_studios_ipc_protocol::RecoveryStatusReport>>,
 }
 
 impl ServerState {
@@ -190,20 +191,7 @@ impl ServerState {
         let mut replay = self.replay_buffer.lock().unwrap();
         for envelope in envelopes {
             let next_seq = replay.latest_sequence().unwrap_or(0) + 1;
-            let kind = serde_json::to_value(&envelope.event)
-                .ok()
-                .and_then(|v| {
-                    v.get("kind")
-                        .and_then(|k| k.as_str().map(|s| s.to_string()))
-                })
-                .unwrap_or_else(|| "control_plane_event".to_string());
-            let payload = serde_json::to_value(&envelope).unwrap_or_default();
-            let event = IpcEvent {
-                sequence: next_seq,
-                timestamp: envelope.timestamp,
-                event_type: kind,
-                payload,
-            };
+            let event = envelope_to_ipc_event(next_seq, &envelope);
             replay.push(event.clone())?;
             let _ = self.broadcast_tx.send(event);
         }
@@ -227,6 +215,24 @@ impl ServerState {
     }
 }
 
+/// Converts a domain `EventEnvelope` into a framed wire `IpcEvent` with a given sequence number.
+pub fn envelope_to_ipc_event(sequence: u64, envelope: &EventEnvelope) -> IpcEvent {
+    let kind = serde_json::to_value(&envelope.event)
+        .ok()
+        .and_then(|v| {
+            v.get("kind")
+                .and_then(|k| k.as_str().map(|s| s.to_string()))
+        })
+        .unwrap_or_else(|| "control_plane_event".to_string());
+    let payload = serde_json::to_value(envelope).unwrap_or_default();
+    IpcEvent {
+        sequence,
+        timestamp: envelope.timestamp,
+        event_type: kind,
+        payload,
+    }
+}
+
 pub struct IpcServerBuilder {
     auth_keys: HashMap<String, Vec<u8>>,
     key_roles: HashMap<String, ClientRole>,
@@ -243,6 +249,9 @@ pub struct IpcServerBuilder {
     configured_instance_id: Option<agent_studios_external_runtime::id::RuntimeInstanceId>,
     authorized_workspaces: Vec<std::path::PathBuf>,
     strict_workspace_roots: bool,
+    recovery_status: Option<agent_studios_ipc_protocol::RecoveryStatusReport>,
+    state_dir: Option<std::path::PathBuf>,
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl Default for IpcServerBuilder {
@@ -257,6 +266,9 @@ impl IpcServerBuilder {
             auth_keys: HashMap::new(),
             key_roles: HashMap::new(),
             replay_capacity: 1000,
+            recovery_status: None,
+            state_dir: None,
+            db_path: None,
             supported_capabilities: vec![
                 "worktree_isolation".to_string(),
                 "approval_routing".to_string(),
@@ -405,14 +417,123 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_recovery_status(
+        mut self,
+        status: agent_studios_ipc_protocol::RecoveryStatusReport,
+    ) -> Self {
+        self.recovery_status = Some(status);
+        self
+    }
+
+    pub fn with_state_dir(mut self, state_dir: std::path::PathBuf) -> Self {
+        self.state_dir = Some(state_dir);
+        self
+    }
+
+    pub fn with_db_path(mut self, db_path: std::path::PathBuf) -> Self {
+        self.db_path = Some(db_path);
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
-        let replay_buffer = ReplayBuffer::new(self.replay_capacity.max(1))?;
+        let (cp, recovery_status) = if let Some(cp) = self.control_plane {
+            let total_events = cp.event_count().unwrap_or(0);
+            let status = self.recovery_status.unwrap_or_else(|| {
+                agent_studios_ipc_protocol::RecoveryStatusReport {
+                    last_recovery_at: None,
+                    interrupted_tasks_count: 0,
+                    interrupted_runs_count: 0,
+                    worktrees_reconciled: 0,
+                    worktrees_missing: 0,
+                    worktrees_foreign: 0,
+                    database_healthy: true,
+                    database_path: self
+                        .db_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    total_persisted_events: total_events,
+                }
+            });
+            (cp, status)
+        } else if let Some(ref db_path) = self.db_path {
+            let store = agent_studios_control_plane::sqlite_store::SqliteEventStore::open(db_path)
+                .map_err(|e| {
+                    TransportError::Io(std::io::Error::other(format!(
+                        "Failed to open durable SQLite database at {}: {e}",
+                        db_path.display()
+                    )))
+                })?;
+            let mut cp = ControlPlane::restore_from_store(
+                agent_studios_control_plane::SystemClock,
+                agent_studios_control_plane::AnyEventStore::Sqlite(store),
+            )
+            .map_err(|e| {
+                TransportError::Io(std::io::Error::other(format!(
+                    "Failed to restore control plane from store: {e}"
+                )))
+            })?;
+
+            let (interrupted_tasks, interrupted_runs) =
+                cp.reconcile_interrupted_executions().map_err(|e| {
+                    TransportError::Io(std::io::Error::other(format!(
+                        "Failed to reconcile interrupted executions: {e}"
+                    )))
+                })?;
+
+            let total_events = cp.event_count().unwrap_or(0);
+            let status = self.recovery_status.unwrap_or_else(|| {
+                agent_studios_ipc_protocol::RecoveryStatusReport {
+                    last_recovery_at: Some(chrono::Utc::now()),
+                    interrupted_tasks_count: interrupted_tasks,
+                    interrupted_runs_count: interrupted_runs,
+                    worktrees_reconciled: 0,
+                    worktrees_missing: 0,
+                    worktrees_foreign: 0,
+                    database_healthy: true,
+                    database_path: Some(db_path.to_string_lossy().to_string()),
+                    total_persisted_events: total_events,
+                }
+            });
+            (cp, status)
+        } else {
+            let cp = ControlPlane::new_default();
+            let status =
+                self.recovery_status
+                    .unwrap_or(agent_studios_ipc_protocol::RecoveryStatusReport {
+                        last_recovery_at: None,
+                        interrupted_tasks_count: 0,
+                        interrupted_runs_count: 0,
+                        worktrees_reconciled: 0,
+                        worktrees_missing: 0,
+                        worktrees_foreign: 0,
+                        database_healthy: true,
+                        database_path: None,
+                        total_persisted_events: 0,
+                    });
+            (cp, status)
+        };
+
+        let capacity = self.replay_capacity.max(1);
+        let total_persisted = recovery_status.total_persisted_events;
+        let replay_buffer = if total_persisted > 0 {
+            let mut buf = ReplayBuffer::with_initial_sequence(capacity, total_persisted as u64)?;
+            let tail_limit = capacity.min(total_persisted);
+            if let Ok(tail_envelopes) = cp.events_tail(tail_limit) {
+                let start_seq = (total_persisted - tail_envelopes.len() + 1) as u64;
+                let ipc_events = tail_envelopes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, env)| envelope_to_ipc_event(start_seq + idx as u64, env));
+                let _ = buf.hydrate_tail(ipc_events);
+            }
+            buf
+        } else {
+            ReplayBuffer::new(capacity)?
+        };
+
+        let control_plane = Arc::new(tokio::sync::RwLock::new(cp));
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
         let nonce_tracker = NonceTracker::new(60_000, 10_000);
-
-        let control_plane = Arc::new(tokio::sync::RwLock::new(
-            self.control_plane.unwrap_or_else(ControlPlane::new_default),
-        ));
 
         let catalog_arc = Arc::new(
             self.provider_catalog
@@ -500,6 +621,7 @@ impl IpcServerBuilder {
             in_flight_cancellations: Arc::new(Mutex::new(HashSet::new())),
             authorized_workspaces: Arc::new(Mutex::new(self.authorized_workspaces)),
             strict_workspace_roots: self.strict_workspace_roots,
+            recovery_status: Arc::new(Mutex::new(recovery_status)),
         });
 
         Ok(IpcServer { state })
@@ -518,6 +640,10 @@ impl IpcServer {
 
     pub fn state(&self) -> Arc<ServerState> {
         self.state.clone()
+    }
+
+    pub fn recovery_status(&self) -> Arc<Mutex<agent_studios_ipc_protocol::RecoveryStatusReport>> {
+        self.state.recovery_status.clone()
     }
 
     pub fn control_plane(&self) -> Arc<tokio::sync::RwLock<ControlPlane>> {

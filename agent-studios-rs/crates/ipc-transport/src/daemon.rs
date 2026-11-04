@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[allow(unused_imports)]
 use tracing::{info, warn};
 
@@ -261,6 +262,9 @@ pub struct DaemonConfig {
     pub key_id: String,
     pub capacity: usize,
     pub auto_execute: bool,
+    pub state_dir: Option<PathBuf>,
+    pub db_path: Option<PathBuf>,
+    pub durability: agent_studios_control_plane::sqlite_store::DurabilityMode,
 }
 
 impl Default for DaemonConfig {
@@ -273,6 +277,58 @@ impl Default for DaemonConfig {
             key_id: "ags-client".to_string(),
             capacity: 1000,
             auto_execute: true,
+            state_dir: None,
+            db_path: None,
+            durability: agent_studios_control_plane::sqlite_store::DurabilityMode::Full,
+        }
+    }
+}
+
+impl DaemonConfig {
+    /// Resolves the effective SQLite database path based on configuration and platform defaults.
+    pub fn resolve_db_path(&self) -> PathBuf {
+        if let Some(ref db) = self.db_path {
+            return db.clone();
+        }
+        let state_dir = self
+            .state_dir
+            .clone()
+            .unwrap_or_else(Self::default_state_dir);
+        state_dir.join("agsd.db")
+    }
+
+    /// Returns standard platform-specific state directory.
+    pub fn default_state_dir() -> PathBuf {
+        #[cfg(windows)]
+        {
+            if let Ok(app_data) = std::env::var("APPDATA") {
+                return PathBuf::from(app_data).join("AgentStudios");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home)
+                    .join(".local")
+                    .join("share")
+                    .join("agent-studios");
+            }
+        }
+        std::env::temp_dir().join("agent-studios-state")
+    }
+}
+
+struct BootstrapCleanupGuard {
+    runtime_path: PathBuf,
+    admin_runtime_path: PathBuf,
+    active: bool,
+}
+
+impl Drop for BootstrapCleanupGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_file(&self.runtime_path);
+            let _ = std::fs::remove_file(&self.admin_runtime_path);
         }
     }
 }
@@ -306,6 +362,105 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
     #[cfg(not(any(windows, unix)))]
     let endpoint = "unsupported".to_string();
 
+    let state_dir = config
+        .state_dir
+        .clone()
+        .unwrap_or_else(DaemonConfig::default_state_dir);
+    if !state_dir.exists() {
+        std::fs::create_dir_all(&state_dir).map_err(TransportError::Io)?;
+    }
+
+    let db_path = config.resolve_db_path();
+    if let Some(parent) = db_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(TransportError::Io)?;
+    }
+
+    info!(
+        db_path = %db_path.display(),
+        "Acquiring single-writer cross-process database lock"
+    );
+    let _db_lock = crate::lock::DatabaseLock::acquire(&db_path)?;
+
+    info!(
+        db_path = %db_path.display(),
+        durability = ?config.durability,
+        "Opening durable SQLite EventStore for daemon"
+    );
+    let store = agent_studios_control_plane::sqlite_store::SqliteEventStore::open_with_durability(
+        &db_path,
+        config.durability,
+    )
+    .map_err(|e| {
+        TransportError::Io(std::io::Error::other(format!(
+            "Failed to open SQLite store at {}: {e}",
+            db_path.display()
+        )))
+    })?;
+
+    let mut control_plane = agent_studios_control_plane::ControlPlane::restore_from_store(
+        agent_studios_control_plane::SystemClock,
+        agent_studios_control_plane::AnyEventStore::Sqlite(store),
+    )
+    .map_err(|e| {
+        TransportError::Io(std::io::Error::other(format!(
+            "Failed to restore control plane state from durable store: {e}"
+        )))
+    })?;
+
+    let (interrupted_tasks, interrupted_runs) = control_plane
+        .reconcile_interrupted_executions()
+        .map_err(|e| {
+            TransportError::Io(std::io::Error::other(format!(
+                "Failed to reconcile interrupted executions: {e}"
+            )))
+        })?;
+
+    let (reconciled_wts, missing_wts) =
+        control_plane.reconcile_missing_worktrees().map_err(|e| {
+            TransportError::Io(std::io::Error::other(format!(
+                "Failed to reconcile worktrees: {e}"
+            )))
+        })?;
+
+    let total_events = control_plane.event_count().unwrap_or(0);
+
+    let recovery_status = agent_studios_ipc_protocol::RecoveryStatusReport {
+        last_recovery_at: Some(chrono::Utc::now()),
+        interrupted_tasks_count: interrupted_tasks,
+        interrupted_runs_count: interrupted_runs,
+        worktrees_reconciled: reconciled_wts,
+        worktrees_missing: missing_wts,
+        worktrees_foreign: 0,
+        database_healthy: true,
+        database_path: Some(db_path.to_string_lossy().to_string()),
+        total_persisted_events: total_events,
+    };
+
+    info!(
+        interrupted_tasks,
+        interrupted_runs,
+        reconciled_wts,
+        missing_wts,
+        total_events,
+        "Daemon startup durable recovery complete"
+    );
+
+    let wt_root = state_dir.join("worktrees");
+    let art_root = state_dir.join("artifacts");
+    if !wt_root.exists() {
+        std::fs::create_dir_all(&wt_root).map_err(TransportError::Io)?;
+    }
+    if !art_root.exists() {
+        std::fs::create_dir_all(&art_root).map_err(TransportError::Io)?;
+    }
+    let workspace_orchestrator =
+        agent_studios_workspace::WorkspaceOrchestrator::new(&wt_root, &art_root).map_err(|e| {
+            TransportError::Daemon(format!("Failed to initialize workspace orchestrator: {e}"))
+        })?;
+
+    // Only write bootstrap credentials AFTER durable store, lock and recovery succeed
     let bootstrap_info = DaemonBootstrapInfo {
         endpoint: endpoint.clone(),
         key_id: config.key_id.clone(),
@@ -314,7 +469,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         pid: std::process::id(),
         created_at: chrono::Utc::now().timestamp(),
     };
-
     bootstrap_info.save_to_file(&runtime_path)?;
 
     let admin_bootstrap_info = DaemonAdminBootstrapInfo {
@@ -324,8 +478,13 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         pid: std::process::id(),
         created_at: chrono::Utc::now().timestamp(),
     };
-
     admin_bootstrap_info.save_to_file(&admin_runtime_path)?;
+
+    let mut bootstrap_guard = BootstrapCleanupGuard {
+        runtime_path: runtime_path.clone(),
+        admin_runtime_path: admin_runtime_path.clone(),
+        active: true,
+    };
 
     info!(
         runtime_path = ?runtime_path,
@@ -339,7 +498,9 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         .with_admin_auth_key(&admin_key_id, admin_key.into_bytes())
         .with_replay_capacity(config.capacity)
         .with_auto_execute(config.auto_execute)
-        .with_control_plane(agent_studios_control_plane::ControlPlane::new_default())
+        .with_control_plane(control_plane)
+        .with_recovery_status(recovery_status)
+        .with_workspace_orchestrator(Arc::new(workspace_orchestrator))
         .with_provider_catalog(agent_studios_provider::ProviderCatalog::with_builtin_definitions())
         .build()?;
 
@@ -372,6 +533,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
     }
 
     // Clean up runtime connection info files on graceful exit
+    bootstrap_guard.active = false;
     let _ = std::fs::remove_file(&runtime_path);
     let _ = std::fs::remove_file(&admin_runtime_path);
 

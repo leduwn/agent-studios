@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 
 use crate::clock::{Clock, SystemClock};
 use crate::error::{ControlPlaneError, ReplayError, StoreError, TaskGraphError};
-use crate::store::{EventStore, InMemoryStore};
+use crate::store::{AnyEventStore, EventStore, InMemoryStore};
 use crate::task_graph::TaskGraph;
 
 type CancellationTargets = (Vec<TaskId>, Vec<RunId>, Vec<ApprovalId>);
@@ -1475,23 +1475,37 @@ impl ControlPlaneState {
 }
 
 /// Core deterministic control plane state engine.
-pub struct ControlPlane<C: Clock = SystemClock, S: EventStore = InMemoryStore> {
+pub struct ControlPlane<C: Clock = SystemClock, S: EventStore = AnyEventStore> {
     clock: C,
     store: S,
     state: ControlPlaneState,
     committed_events_buffer: Vec<EventEnvelope>,
 }
 
-impl Default for ControlPlane<SystemClock, InMemoryStore> {
+impl Default for ControlPlane<SystemClock, AnyEventStore> {
     fn default() -> Self {
-        Self::new(SystemClock, InMemoryStore::new())
+        Self::new(SystemClock, AnyEventStore::InMemory(InMemoryStore::new()))
+    }
+}
+
+impl ControlPlane<SystemClock, AnyEventStore> {
+    /// Creates a control plane using system clock and in-memory event store.
+    pub fn new_default() -> Self {
+        Self::default()
+    }
+
+    /// Opens or restores a durable SQLite-backed control plane.
+    pub fn open_sqlite(path: impl AsRef<std::path::Path>) -> Result<Self, ReplayError> {
+        let store =
+            crate::sqlite_store::SqliteEventStore::open(path).map_err(ReplayError::Store)?;
+        Self::restore_from_store(SystemClock, AnyEventStore::Sqlite(store))
     }
 }
 
 impl ControlPlane<SystemClock, InMemoryStore> {
-    /// Creates a control plane using system clock and in-memory event store.
-    pub fn new_default() -> Self {
-        Self::default()
+    /// Creates a control plane using system clock and explicit in-memory store.
+    pub fn new_in_memory() -> Self {
+        Self::new(SystemClock, InMemoryStore::new())
     }
 }
 
@@ -3820,6 +3834,29 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
         self.store.all_events().map_err(ControlPlaneError::Store)
     }
 
+    /// Returns the total event count from the store without loading all events into memory.
+    pub fn event_count(&self) -> Result<usize, ControlPlaneError> {
+        self.store.event_count().map_err(ControlPlaneError::Store)
+    }
+
+    /// Returns the most recent `limit` events across all studios in ascending chronological order.
+    pub fn events_tail(&self, limit: usize) -> Result<Vec<EventEnvelope>, ControlPlaneError> {
+        self.store
+            .events_tail(limit)
+            .map_err(ControlPlaneError::Store)
+    }
+
+    /// Returns a slice of events starting from chronological index `offset` (0-indexed) up to `limit`.
+    pub fn events_slice(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<EventEnvelope>, ControlPlaneError> {
+        self.store
+            .events_slice(offset, limit)
+            .map_err(ControlPlaneError::Store)
+    }
+
     /// Reconstructs a ControlPlane instance strictly by replaying an event sequence.
     /// Validates schema version, sequence numbers, event ID uniqueness, entity references,
     /// studio boundaries, and state transitions.
@@ -3885,5 +3922,193 @@ impl<C: Clock, S: EventStore> ControlPlane<C, S> {
             state,
             committed_events_buffer: Vec::new(),
         })
+    }
+
+    /// Restores a ControlPlane instance from an existing populated EventStore.
+    ///
+    /// Replays all committed events in rowid sequence order, validating schema version,
+    /// sequence continuity, event ID uniqueness, entity references, studio boundaries,
+    /// and state transitions.
+    ///
+    /// CRITICAL: Unlike `replay_events`, this method DOES NOT call `store.append_batch()`
+    /// because the events are already durably persisted in the store.
+    pub fn restore_from_store(clock: C, store: S) -> Result<Self, ReplayError> {
+        let events = store.all_events().map_err(ReplayError::Store)?;
+        let mut expected_sequences: HashMap<StudioId, u64> = HashMap::new();
+        let mut seen_event_ids: HashSet<EventId> = HashSet::new();
+        let mut state = ControlPlaneState::new();
+
+        for envelope in &events {
+            // 1. Verify schema version
+            if envelope.schema_version != CONTROL_PLANE_EVENT_SCHEMA_VERSION {
+                return Err(ReplayError::UnsupportedSchemaVersion {
+                    version: envelope.schema_version,
+                    supported: CONTROL_PLANE_EVENT_SCHEMA_VERSION,
+                });
+            }
+
+            // 2. Reject duplicate event ID
+            if !seen_event_ids.insert(envelope.event_id) {
+                return Err(ReplayError::DuplicateEventId {
+                    event_id: envelope.event_id,
+                });
+            }
+
+            // 3. Verify monotonic sequence without gaps or regressions per Studio
+            let studio_id = envelope.studio_id;
+            let expected = expected_sequences.get(&studio_id).copied().unwrap_or(1);
+
+            if envelope.sequence < expected {
+                return Err(ReplayError::Store(StoreError::SequenceRegression {
+                    studio_id,
+                    latest: expected - 1,
+                    attempted: envelope.sequence,
+                }));
+            }
+
+            if envelope.sequence > expected {
+                return Err(ReplayError::InvalidSequence {
+                    expected,
+                    actual: envelope.sequence,
+                });
+            }
+
+            expected_sequences.insert(studio_id, expected + 1);
+
+            // 4. Strict apply to state
+            state.apply_event(envelope)?;
+        }
+
+        Ok(Self {
+            clock,
+            store,
+            state,
+            committed_events_buffer: Vec::new(),
+        })
+    }
+
+    /// Reconciles interrupted tasks and runs after daemon restart.
+    ///
+    /// Any task left in `TaskState::Running` is transitioned to `TaskState::Failed`
+    /// with associated approvals cancelled.
+    /// Any run left in `RunState::Starting` or `RunState::Running` is transitioned to
+    /// `RunState::Failed` with a `RunOutcomeRecorded` event containing
+    /// classification "daemon_interrupted".
+    ///
+    /// Returns `(interrupted_tasks_count, interrupted_runs_count)`.
+    pub fn reconcile_interrupted_executions(
+        &mut self,
+    ) -> Result<(usize, usize), ControlPlaneError> {
+        // 1. Reconcile in-flight runs
+        let in_flight_runs: Vec<(RunId, StudioId, TaskId, AgentId, RunState)> = self
+            .state
+            .runs
+            .values()
+            .filter(|r| r.state == RunState::Starting || r.state == RunState::Running)
+            .map(|r| {
+                let studio_id = self
+                    .state
+                    .task_graph
+                    .get_task(r.task_id)
+                    .map(|t| t.studio_id)
+                    .unwrap_or_else(|| {
+                        self.state
+                            .studios
+                            .keys()
+                            .next()
+                            .copied()
+                            .unwrap_or_default()
+                    });
+                (r.id, studio_id, r.task_id, r.agent_id, r.state)
+            })
+            .collect();
+
+        let mut interrupted_runs_count = 0;
+        for (run_id, studio_id, task_id, agent_id, prev_state) in in_flight_runs {
+            let candidate_events = vec![
+                ControlPlaneEvent::RunStateChanged {
+                    run_id,
+                    previous_state: prev_state,
+                    new_state: RunState::Failed,
+                },
+                ControlPlaneEvent::RunOutcomeRecorded {
+                    run_id,
+                    task_id,
+                    agent_id,
+                    classification: "daemon_interrupted".to_string(),
+                    safe_error_summary: Some(
+                        "daemon_interrupted: Daemon restarted during active execution".to_string(),
+                    ),
+                },
+            ];
+            self.commit_transaction(studio_id, candidate_events)?;
+            interrupted_runs_count += 1;
+        }
+
+        // 2. Reconcile in-flight tasks
+        let in_flight_tasks: Vec<TaskId> = self
+            .state
+            .task_graph
+            .all_tasks()
+            .filter(|t| t.state == TaskState::Running)
+            .map(|t| t.id)
+            .collect();
+
+        let mut interrupted_tasks_count = 0;
+        for task_id in in_flight_tasks {
+            self.transition_task_state(task_id, TaskState::Failed)?;
+            interrupted_tasks_count += 1;
+        }
+
+        // 3. Auto-cancel any remaining dangling pending approvals
+        let dangling_approvals: Vec<(ApprovalId, StudioId)> = self
+            .state
+            .approvals
+            .values()
+            .filter(|a| a.state == ApprovalState::Pending)
+            .map(|a| (a.id, a.studio_id))
+            .collect();
+
+        for (approval_id, studio_id) in dangling_approvals {
+            let candidate_events = vec![ControlPlaneEvent::ApprovalResolved {
+                approval_id,
+                previous_state: ApprovalState::Pending,
+                new_state: ApprovalState::Cancelled,
+            }];
+            self.commit_transaction(studio_id, candidate_events)?;
+        }
+
+        Ok((interrupted_tasks_count, interrupted_runs_count))
+    }
+
+    /// Reconciles durable worktree records on startup.
+    /// Non-terminal worktrees whose root directory does not exist on disk are transitioned to `WorktreeState::Failed`.
+    /// Existing worktrees are counted as reconciled.
+    ///
+    /// Returns `(worktrees_reconciled, worktrees_missing)`.
+    pub fn reconcile_missing_worktrees(&mut self) -> Result<(usize, usize), ControlPlaneError> {
+        let active_worktrees: Vec<(WorktreeId, WorktreeState, std::path::PathBuf)> = self
+            .state
+            .worktrees
+            .values()
+            .filter(|wt| !wt.state.is_terminal())
+            .map(|wt| (wt.id, wt.state, wt.root.clone()))
+            .collect();
+
+        let mut reconciled = 0;
+        let mut missing = 0;
+
+        for (wt_id, state, root) in active_worktrees {
+            if !root.exists() {
+                if state.can_transition_to(WorktreeState::Failed) {
+                    self.transition_worktree_state(wt_id, WorktreeState::Failed)?;
+                    missing += 1;
+                }
+            } else {
+                reconciled += 1;
+            }
+        }
+
+        Ok((reconciled, missing))
     }
 }

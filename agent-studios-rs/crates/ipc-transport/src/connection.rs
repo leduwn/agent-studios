@@ -160,6 +160,7 @@ pub enum IpcCommand {
         #[serde(default)]
         limit: Option<usize>,
     },
+    GetRecoveryStatus,
     Shutdown,
 }
 
@@ -258,6 +259,9 @@ pub enum IpcResponse {
     },
     TaskDiff {
         diff: TaskDiffResponse,
+    },
+    RecoveryStatus {
+        status: agent_studios_ipc_protocol::RecoveryStatusReport,
     },
     ShutdownAcknowledged,
     Error {
@@ -519,15 +523,53 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         handle.abort();
                     }
 
+                    let normalized_from_sequence = from_sequence.map(|s| s.max(1));
                     let mut broadcast_rx = server_state.broadcast_tx.subscribe();
-                    let (backfill_result, max_buffered_seq) = {
+                    let (raw_backfill_result, max_buffered_seq) = {
                         let buffer = server_state.replay_buffer.lock().unwrap();
                         let max_seq = buffer.latest_sequence().unwrap_or(0);
-                        let events = match from_sequence {
+                        let events = match normalized_from_sequence {
                             Some(seq) => buffer.replay_from(seq, None),
                             None => Ok(Vec::new()),
                         };
                         (events, max_seq)
+                    };
+
+                    let backfill_result = match raw_backfill_result {
+                        Ok(events) => Ok(events),
+                        Err(
+                            agent_studios_ipc_protocol::ProtocolError::SequenceGapUnrecoverable {
+                                expected,
+                                ..
+                            },
+                        ) if expected >= 1 && expected <= max_buffered_seq => {
+                            let cp = server_state.control_plane.read().await;
+                            let offset = (expected - 1) as usize;
+                            let limit = (max_buffered_seq - expected + 1) as usize;
+                            match cp.events_slice(offset, limit) {
+                                Ok(envelopes) => {
+                                    let events: Vec<IpcEvent> = envelopes
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(idx, env)| {
+                                            crate::server::envelope_to_ipc_event(
+                                                expected + idx as u64,
+                                                env,
+                                            )
+                                        })
+                                        .collect();
+                                    Ok(events)
+                                }
+                                Err(e) => {
+                                    Err(agent_studios_ipc_protocol::ProtocolError::InvalidState(
+                                        format!(
+                                            "Failed to retrieve historical events from store: {e}"
+                                        ),
+                                    ))
+                                }
+                            }
+                        }
+                        Err(e) => Err(e),
                     };
 
                     match backfill_result {
@@ -540,11 +582,39 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                     .map_err(|_| TransportError::ConnectionClosed)?;
                             }
 
+                            // If historical store backfill ended before max_buffered_seq,
+                            // drain remaining events from replay_buffer
+                            if last_delivered_seq > 0 && last_delivered_seq < max_buffered_seq {
+                                let remaining_start = last_delivered_seq + 1;
+                                let remaining_events = {
+                                    let buf = server_state.replay_buffer.lock().unwrap();
+                                    buf.replay_from(remaining_start, None).ok()
+                                };
+                                if let Some(more_events) = remaining_events {
+                                    for ev in more_events {
+                                        last_delivered_seq = ev.sequence;
+                                        tx.send(IpcResponse::Event { event: ev })
+                                            .await
+                                            .map_err(|_| TransportError::ConnectionClosed)?;
+                                    }
+                                }
+                            }
+
                             let tx_stream = tx.clone();
                             let shutdown_tok = server_state.shutdown_token.clone();
                             let replay_buffer_arc = server_state.replay_buffer.clone();
+                            let control_plane_arc = server_state.control_plane.clone();
                             let handle = tokio::spawn(async move {
-                                let mut current_seq = last_delivered_seq.max(max_buffered_seq);
+                                let mut current_seq = match normalized_from_sequence {
+                                    Some(req_seq) => {
+                                        if last_delivered_seq > 0 {
+                                            last_delivered_seq
+                                        } else {
+                                            (req_seq.saturating_sub(1)).min(max_buffered_seq)
+                                        }
+                                    }
+                                    None => max_buffered_seq,
+                                };
                                 loop {
                                     tokio::select! {
                                         _ = shutdown_tok.cancelled() => break,
@@ -563,7 +633,31 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                                             let buf = replay_buffer_arc.lock().unwrap();
                                                             buf.replay_from(gap_start, Some(gap_count))
                                                         };
-                                                        match gap_res {
+                                                        let gap_resolved = match gap_res {
+                                                            Ok(gap_events) => Ok(gap_events),
+                                                            Err(agent_studios_ipc_protocol::ProtocolError::SequenceGapUnrecoverable { .. }) => {
+                                                                let cp = control_plane_arc.read().await;
+                                                                let offset = (gap_start.saturating_sub(1)) as usize;
+                                                                match cp.events_slice(offset, gap_count) {
+                                                                    Ok(envs) => {
+                                                                        let evs: Vec<IpcEvent> = envs
+                                                                            .iter()
+                                                                            .enumerate()
+                                                                            .map(|(idx, env)| {
+                                                                                crate::server::envelope_to_ipc_event(
+                                                                                    gap_start + idx as u64,
+                                                                                    env,
+                                                                                )
+                                                                            })
+                                                                            .collect();
+                                                                        Ok(evs)
+                                                                    }
+                                                                    Err(e) => Err(format!("Storage error: {e}")),
+                                                                }
+                                                            }
+                                                            Err(e) => Err(e.to_string()),
+                                                        };
+                                                        match gap_resolved {
                                                             Ok(gap_events) => {
                                                                 for gev in gap_events {
                                                                     if tx_stream.send(IpcResponse::Event { event: gev }).await.is_err() {
@@ -571,10 +665,10 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                                                     }
                                                                 }
                                                             }
-                                                            Err(e) => {
+                                                            Err(err_detail) => {
                                                                 let err_msg = format!(
                                                                     "Event gap detected: unrecoverable data loss between sequence {} and {}: {}",
-                                                                    gap_start, gap_end, e
+                                                                    gap_start, gap_end, err_detail
                                                                 );
                                                                 warn!("{}", err_msg);
                                                                 let _ = tx_stream.send(IpcResponse::Error { message: err_msg }).await;
@@ -593,7 +687,32 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                                         let buf = replay_buffer_arc.lock().unwrap();
                                                         buf.replay_from(gap_start, None)
                                                     };
-                                                    match recovery_res {
+                                                    let recovery_resolved = match recovery_res {
+                                                        Ok(recovered_events) if !recovered_events.is_empty() => Ok(recovered_events),
+                                                        Err(agent_studios_ipc_protocol::ProtocolError::SequenceGapUnrecoverable { .. }) => {
+                                                            let cp = control_plane_arc.read().await;
+                                                            let offset = (gap_start.saturating_sub(1)) as usize;
+                                                            let limit = (skipped as usize).max(1);
+                                                            match cp.events_slice(offset, limit) {
+                                                                Ok(envs) => {
+                                                                    let evs: Vec<IpcEvent> = envs
+                                                                        .iter()
+                                                                        .enumerate()
+                                                                        .map(|(idx, env)| {
+                                                                            crate::server::envelope_to_ipc_event(
+                                                                                gap_start + idx as u64,
+                                                                                env,
+                                                                            )
+                                                                        })
+                                                                        .collect();
+                                                                    Ok(evs)
+                                                                }
+                                                                Err(e) => Err(format!("Storage error: {e}")),
+                                                            }
+                                                        }
+                                                        other => other.map_err(|e| e.to_string()),
+                                                    };
+                                                    match recovery_resolved {
                                                         Ok(recovered_events) if !recovered_events.is_empty() => {
                                                             for rev in recovered_events {
                                                                 current_seq = rev.sequence;
@@ -603,10 +722,10 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                                             }
                                                         }
                                                         Ok(_) => {}
-                                                        Err(e) => {
+                                                        Err(err_detail) => {
                                                             let err_msg = format!(
                                                                 "Unrecoverable event loss: client lagged by {} events and replay buffer cannot satisfy gap from seq {}: {}",
-                                                                skipped, gap_start, e
+                                                                skipped, gap_start, err_detail
                                                             );
                                                             warn!("{}", err_msg);
                                                             let _ = tx_stream.send(IpcResponse::Error { message: err_msg }).await;
@@ -1748,6 +1867,15 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     })
                     .await
                     .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::GetRecoveryStatus => {
+                    let mut status = server_state.recovery_status.lock().unwrap().clone();
+                    if session.role != ClientRole::Admin {
+                        status.database_path = None;
+                    }
+                    tx.send(IpcResponse::RecoveryStatus { status })
+                        .await
+                        .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::Shutdown => {
                     if session.role == ClientRole::Admin {
