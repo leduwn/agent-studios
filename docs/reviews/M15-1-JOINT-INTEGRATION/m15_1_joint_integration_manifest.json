@@ -84,6 +84,12 @@
       "daemon_compilation": {
         "debug_agsd": "PASS",
         "release_agsd": "PASS"
+      },
+      "ci_verification_run_42094782523": {
+        "status": "COMPLETED_SUCCESS",
+        "ubuntu_conclusion": "success",
+        "windows_conclusion": "success",
+        "pr_33_mergeable_state": "clean"
       }
     },
     "cli": {
