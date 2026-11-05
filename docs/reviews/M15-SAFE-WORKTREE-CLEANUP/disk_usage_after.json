@@ -1,0 +1,107 @@
+{
+    "manifest_version":  "1.0.0",
+    "timestamp":  "2026-11-05T09:15:00Z",
+    "execution_phase":  "PHASE_B_DESTRUCTIVE_CLEANUP_COMPLETE",
+    "operator_approval_directive":  "APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339",
+    "drive":  "D:",
+    "initial_free_mb":  4268.52,
+    "initial_free_gb":  4.17,
+    "final_free_mb":  27634.42,
+    "final_free_gb":  26.99,
+    "actual_reclaimed_mb":  23365.9,
+    "actual_reclaimed_gb":  22.82,
+    "projected_reclaimed_mb":  24258.61,
+    "projected_reclaimed_gb":  23.69,
+    "variance_mb":  892.71,
+    "variance_reason":  "Git metadata delta, filesystem cluster allocation boundaries, and background Windows system log writes.",
+    "removed_worktrees_count":  7,
+    "remaining_worktrees_drive_d_count":  6,
+    "removed_candidates":  [
+                               {
+                                   "id":  1,
+                                   "name":  "agent-studios-m13",
+                                   "path":  "D:\\Projects\\agent-studios-m13",
+                                   "branch":  "feat/m13-ipc-02-control-plane",
+                                   "head_sha":  "ce0396c1f165760ea271110eaf9bfd6dc84a67a7",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  2,
+                                   "name":  "agent-studios-m15",
+                                   "path":  "D:\\Projects\\agent-studios-m15",
+                                   "branch":  "feat/m15-01-per-task-execution-contract",
+                                   "head_sha":  "a5dbbfc5ebada254727db9a788c0ee40e3035ea8",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  3,
+                                   "name":  "agent-studios-m15-02",
+                                   "path":  "D:\\Projects\\agent-studios-m15-02",
+                                   "branch":  "feat/m15-02-multi-runtime-registry",
+                                   "head_sha":  "b307b9a6e2bea51873d22e98127562b745eed4fb",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  4,
+                                   "name":  "agent-studios-m15-03",
+                                   "path":  "D:\\Projects\\agent-studios-m15-03",
+                                   "branch":  "feat/m15-03-artifact-diff-review",
+                                   "head_sha":  "cc1c3e8f398a5acfa24cf643cfcb2b043f6e163b",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  5,
+                                   "name":  "agent-studios-vscode-m14-02",
+                                   "path":  "D:\\Projects\\agent-studios-vscode-m14-02",
+                                   "branch":  "feat/m14-vscode-extension-host-hardening",
+                                   "head_sha":  "ed80b243c9e9fce911a86e023790131c6d3688c7",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  6,
+                                   "name":  "agent-studios-vscode-ipc-03",
+                                   "path":  "D:\\Projects\\agent-studios-vscode-ipc-03",
+                                   "branch":  "feat/m14-ipc-03-connected-client",
+                                   "head_sha":  "73b7298ca38cd0eaf2ce0e6ae169cd6919670550",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               },
+                               {
+                                   "id":  7,
+                                   "name":  "agent-studios-mission-control-integration",
+                                   "path":  "D:\\Projects\\agent-studios-mission-control-integration",
+                                   "branch":  "feat/m14-mission-control-connected-integration",
+                                   "head_sha":  "a13230ee93afd101f8b0f0c5b6b0e3d61013c9af",
+                                   "removal_method":  "git worktree remove",
+                                   "status":  "REMOVED_SUCCESS",
+                                   "exists_on_disk":  false,
+                                   "in_worktree_registry":  false
+                               }
+                           ],
+    "protected_worktrees_verified":  [
+                                         "D:\\Projects\\agent-studios",
+                                         "D:\\Projects\\agent-studios-ags-cli",
+                                         "D:\\Projects\\agent-studios-ide-ui",
+                                         "D:\\Projects\\agent-studios-m15-04",
+                                         "D:\\Projects\\agent-studios-mission-control",
+                                         "D:\\Projects\\agent-studios-unified-staging",
+                                         "D:\\Projects\\agent-studios-preservation\\provider-discovery-20261105T012118Z"
+                                     ]
+}
