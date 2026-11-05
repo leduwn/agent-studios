@@ -3,6 +3,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ProviderError;
+use crate::id::ProviderInstanceId;
 
 /// Storage backend for a secret reference.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -79,6 +80,22 @@ impl fmt::Display for SecretReference {
     }
 }
 
+/// Standardized locator format helper for a provider instance key.
+///
+/// Output format: `"agent-studios:provider:{instance_id}:{key_name}"`.
+pub fn locator_for_provider_key(instance_id: &ProviderInstanceId, key_name: &str) -> String {
+    format!("agent-studios:provider:{instance_id}:{key_name}")
+}
+
+/// Helper to create a SecretReference for a provider instance key.
+pub fn secret_ref_for_provider_key(
+    instance_id: &ProviderInstanceId,
+    key_name: &str,
+    backend: SecretBackend,
+) -> Result<SecretReference, ProviderError> {
+    SecretReference::new(backend, locator_for_provider_key(instance_id, key_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +120,18 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let de: SecretReference = serde_json::from_str(&json).unwrap();
         assert_eq!(s, de);
+    }
+
+    #[test]
+    fn test_locator_for_provider_key() {
+        let inst_id = ProviderInstanceId::new();
+        let locator = locator_for_provider_key(&inst_id, "api_key");
+        assert_eq!(locator, format!("agent-studios:provider:{inst_id}:api_key"));
+
+        let sec_ref =
+            secret_ref_for_provider_key(&inst_id, "api_key", SecretBackend::OsCredentialStore)
+                .unwrap();
+        assert_eq!(sec_ref.backend, SecretBackend::OsCredentialStore);
+        assert_eq!(sec_ref.locator, locator);
     }
 }
