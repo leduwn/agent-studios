@@ -199,6 +199,7 @@ impl Drop for ClaudeCodeProcess {
 pub async fn spawn_claude_process(
     config: ClaudeCodeProcessConfig,
 ) -> Result<(Arc<ClaudeCodeProcess>, ChildStdout), ClaudeCodeError> {
+    #[cfg(windows)]
     let requires_os_containment = config.sandbox_policy.level.requires_os_containment();
     let containment = ProcessContainment::new(config.sandbox_policy.clone())?;
 
