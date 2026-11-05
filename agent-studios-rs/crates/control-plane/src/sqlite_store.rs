@@ -444,6 +444,7 @@ impl EventStore for SqliteEventStore {
                 ControlPlaneEvent::CancellationRequested { .. } => "cancellation_requested",
                 ControlPlaneEvent::AgentRuntimeBound { .. } => "agent_runtime_bound",
                 ControlPlaneEvent::AgentSpawned { .. } => "agent_spawned",
+                ControlPlaneEvent::AssistantMessageChunk { .. } => "assistant_message_chunk",
                 ControlPlaneEvent::ToolStarted { .. } => "tool_started",
                 ControlPlaneEvent::ToolCompleted { .. } => "tool_completed",
                 ControlPlaneEvent::ToolFailed { .. } => "tool_failed",

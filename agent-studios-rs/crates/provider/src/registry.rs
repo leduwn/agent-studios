@@ -153,6 +153,14 @@ impl ProviderRegistry {
     pub fn list_provider_instances(&self) -> Vec<&ProviderInstance> {
         self.instances.values().collect()
     }
+
+    /// Returns all registered provider instances for a specific provider family in deterministic order.
+    pub fn get_instances_for_provider(&self, provider_id: &ProviderId) -> Vec<&ProviderInstance> {
+        self.instances
+            .values()
+            .filter(|inst| &inst.provider_id == provider_id)
+            .collect()
+    }
 }
 
 /// Single-owner registry managing ModelDescriptors scoped to ProviderInstances.
