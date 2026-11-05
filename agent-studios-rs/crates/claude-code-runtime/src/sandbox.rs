@@ -2,8 +2,11 @@ use agent_studios_external_runtime::WorkspaceAccessMode;
 use agent_studios_protocol::worktree::ExecutionWorkspace;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::sync::Arc;
-use tracing::{info, warn};
+#[cfg(windows)]
+use tracing::info;
+use tracing::warn;
 
 use crate::error::ClaudeCodeError;
 

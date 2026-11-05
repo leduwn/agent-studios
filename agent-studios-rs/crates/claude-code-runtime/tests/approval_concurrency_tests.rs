@@ -333,7 +333,11 @@ async fn test_child_stdin_write_failure_fails_closed_and_not_marked_delivered() 
         binary_path: dummy_bin,
         working_dir: temp_dir.path().to_path_buf(),
         session_id: uuid::Uuid::new_v4().to_string(),
-        sandbox_policy: SandboxPolicy::default(),
+        sandbox_policy: if cfg!(windows) {
+            SandboxPolicy::default()
+        } else {
+            SandboxPolicy::unconstrained()
+        },
         permission_mode: Some("manual".to_string()),
         max_budget_usd: None,
         model: None,
@@ -426,7 +430,11 @@ async fn test_two_phase_commit_stdin_write_failure_transitions_to_delivery_faile
         binary_path: dummy_bin,
         working_dir: temp_dir.path().to_path_buf(),
         session_id: uuid::Uuid::new_v4().to_string(),
-        sandbox_policy: SandboxPolicy::default(),
+        sandbox_policy: if cfg!(windows) {
+            SandboxPolicy::default()
+        } else {
+            SandboxPolicy::unconstrained()
+        },
         permission_mode: Some("manual".to_string()),
         max_budget_usd: None,
         model: None,
@@ -813,7 +821,11 @@ async fn test_watchdog_timeout_stdin_failure_terminates_process_fail_closed() {
         binary_path: dummy_bin,
         working_dir: temp_dir.path().to_path_buf(),
         session_id: uuid::Uuid::new_v4().to_string(),
-        sandbox_policy: SandboxPolicy::default(),
+        sandbox_policy: if cfg!(windows) {
+            SandboxPolicy::default()
+        } else {
+            SandboxPolicy::unconstrained()
+        },
         permission_mode: Some("manual".to_string()),
         max_budget_usd: None,
         model: None,

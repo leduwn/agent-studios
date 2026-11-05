@@ -1,0 +1,158 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentStudiosM15_1JointIntegrationManifest",
+  "version": "1.0.0",
+  "milestone": "M15.1",
+  "date": "2026-11-06",
+  "lead_role": "Principal Integration Engineer, Release Architect & Rust/TypeScript QA Lead",
+  "baseline_commit": "ec2058256a0001f869b968f4d787b7378e413eb8",
+  "baseline_branch": "integration/m15-unified-codebase",
+  "validation_branch": "integration/m15-1-joint-validation",
+  "validation_worktree": "D:\\Projects\\agent-studios-active\\m15-1-joint-validation",
+  "final_release_verdict": "M15_1_PREFLIGHT_ACCEPTED",
+  "pr_trio": {
+    "pr_31": {
+      "number": 31,
+      "title": "feat(backend): provider discovery engine, official ags CLI, and multi-protocol LLM catalog",
+      "branch": "feat/m15-1-backend-cli-consolidation",
+      "head_sha": "c98a8a357235c1a808781e9fdadcecb7a8510093",
+      "author": "Claude 1 (Principal Rust Architect)",
+      "status": "APPROVED_FOR_MERGE_STEP_2"
+    },
+    "pr_33": {
+      "number": 33,
+      "title": "fix(ci): resolve Ubuntu Clippy warnings, platform sandbox containment gates, and Windows path mismatches",
+      "branch": "fix/m15-unified-cross-platform-ci",
+      "head_sha": "b0696ace587de0e25007364a6bf8b131327de5a3",
+      "author": "Principal Integration Engineer & Release Architect",
+      "status": "APPROVED_FOR_MERGE_STEP_1"
+    },
+    "pr_34": {
+      "number": 34,
+      "title": "feat(ui): agent-first experience, shared session continuity, and daemon binary provenance",
+      "branch": "feat/m15-ui-06-agent-ide-continuity",
+      "head_sha": "f57bc20c746d30e70958c2c61d2a72cb070b91ce",
+      "author": "Claude 2 (Principal VS Code Extension Lead)",
+      "status": "APPROVED_FOR_MERGE_STEP_3"
+    }
+  },
+  "file_overlap_audit": {
+    "pr_31_files_count": 48,
+    "pr_33_files_count": 6,
+    "pr_34_files_count": 8,
+    "intersection_count": 0,
+    "has_file_overlap": false,
+    "merge_conflicts_count": 0
+  },
+  "verification_gates": {
+    "frontend": {
+      "compile": "PASS_ZERO_ERRORS",
+      "typecheck": "PASS_ZERO_ERRORS",
+      "lint": "PASS_ZERO_ERRORS",
+      "unit_tests": {
+        "passed": 685,
+        "failed": 0,
+        "total": 685
+      },
+      "real_daemon_e2e_tests": {
+        "passed": 84,
+        "failed": 0,
+        "total": 84
+      },
+      "extension_host_integration_tests": {
+        "passed": 25,
+        "failed": 0,
+        "total": 25
+      },
+      "total_tests": 794,
+      "pass_rate_percent": 100.0,
+      "vsix_packaging": {
+        "status": "PASS",
+        "size_kb": 260,
+        "files_count": 87
+      }
+    },
+    "backend": {
+      "cargo_fmt": "PASS_CLEAN",
+      "cargo_check": "PASS_ZERO_ERRORS",
+      "cargo_clippy": "PASS_ZERO_WARNINGS",
+      "workspace_tests": {
+        "windows": "PASS_100_PERCENT",
+        "linux": "PASS_100_PERCENT",
+        "fail_closed_sandbox_gates_verified": true
+      },
+      "daemon_compilation": {
+        "debug_agsd": "PASS",
+        "release_agsd": "PASS"
+      },
+      "ci_verification_run_42094782523": {
+        "status": "COMPLETED_SUCCESS",
+        "ubuntu_conclusion": "success",
+        "windows_conclusion": "success",
+        "pr_33_mergeable_state": "clean"
+      }
+    },
+    "cli": {
+      "ags_doctor_json": {
+        "status": "PASS",
+        "diagnostic_checks_passed": 8,
+        "critical_failures": 0,
+        "terminal_dimensions": [120, 30],
+        "unicode_nfc_clusters_verified": 69
+      },
+      "ags_provider_list_json": {
+        "status": "PASS",
+        "providers_discovered": 2
+      },
+      "ags_model_list_json": {
+        "status": "PASS",
+        "models_discovered": 1
+      },
+      "ags_preview": "PASS",
+      "ags_demo": "PASS"
+    }
+  },
+  "protocol_contracts": {
+    "ipc_transport": {
+      "windows": "\\\\.\\pipe\\agent-studios-default",
+      "unix": "/tmp/agent-studios.sock",
+      "framing": "u32_be_length_prefixed_json",
+      "max_frame_size_bytes": 16777216
+    },
+    "supported_provider_protocols": [
+      "anthropic_messages",
+      "openai_responses",
+      "ollama_native"
+    ],
+    "event_types_count": 30,
+    "ipc_commands_verified": [
+      "health",
+      "ping",
+      "subscribe",
+      "submit_goal",
+      "resolve_approval"
+    ]
+  },
+  "security_invariants": {
+    "zero_billable_spend_usd": 0.00,
+    "win32_job_object_containment": "ENFORCED_WITH_KILL_ON_CLOSE",
+    "linux_sandbox_fail_closed": "ENFORCED_WITH_UNSUPPORTED_PLATFORM",
+    "loopback_binding_only": "ENFORCED_127_0_0_1",
+    "two_phase_hmac_auth": "VERIFIED",
+    "role_separation": "OPERATOR_DENIED_SHUTDOWN_ADMIN_PERMITTED",
+    "webview_csp_and_prototype_pollution_guard": "VERIFIED"
+  },
+  "documentation_deliverables": [
+    "docs/reviews/M15-1-JOINT-INTEGRATION/01_JOINT_INTEGRATION_CHARTER.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/02_PR_TRIO_AUDIT_AND_DEPENDENCY_GRAPH.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/03_CI_REPAIR_GATE_EVIDENCE.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/04_BACKEND_FRONTEND_CONTRACT_COMPLIANCE.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/05_PROVIDER_DISCOVERY_AND_MODEL_CATALOG.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/06_CROSS_PLATFORM_VERIFICATION_MATRIX.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/07_REAL_FEATURE_ACCEPTANCE_EVIDENCE.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/08_SECURITY_AND_ISOLATION_AUDIT.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/09_INTEGRATION_RISK_REGISTER_AND_ROLLBACK.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/10_JOINT_ACCEPTANCE_VERDICT_AND_PR_HANDOFF.md",
+    "docs/reviews/M15-1-JOINT-INTEGRATION/m15_1_joint_integration_manifest.json"
+  ]
+}

@@ -78,6 +78,24 @@
         "icon": "$(dashboard)"
       },
       {
+        "command": "agent-studios.openInIde",
+        "title": "Agent Studios: Open in IDE Mode",
+        "category": "Agent Studios",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "agent-studios.switchToAgentMode",
+        "title": "Agent Studios: Switch to Agent Mode",
+        "category": "Agent Studios",
+        "icon": "$(hubot)"
+      },
+      {
+        "command": "agent-studios.continueSession",
+        "title": "Agent Studios: Continue Previous Session",
+        "category": "Agent Studios",
+        "icon": "$(history)"
+      },
+      {
         "command": "agent-studios.openAgents",
         "title": "Agent Studios: Open Agents Workbench",
         "category": "Agent Studios"
@@ -181,8 +199,13 @@
       "view/title": [
         {
           "view": "agent-studios.chat",
-          "command": "agent-studios.openMissionControl",
+          "command": "agent-studios.openInIde",
           "group": "navigation@1"
+        },
+        {
+          "view": "agent-studios.chat",
+          "command": "agent-studios.openMissionControl",
+          "group": "navigation@2"
         },
         {
           "view": "agent-studios.session",

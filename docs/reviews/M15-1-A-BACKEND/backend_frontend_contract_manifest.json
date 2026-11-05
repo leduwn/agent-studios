@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentStudiosBackendFrontendContractManifest",
+  "version": "1.0.0",
+  "milestone": "M15.1-A",
+  "date": "2026-11-06",
+  "author": "Claude 1 (Principal Rust Architect)",
+  "target_audience": "Claude 2 (Frontend Implementation Lead)",
+  "endpoints": {
+    "ipc": {
+      "windows": "\\\\.\\pipe\\agent-studios-default",
+      "unix": "/tmp/agent-studios.sock",
+      "framing": "u32_be_length_prefixed_json",
+      "max_frame_size_bytes": 16777216
+    },
+    "cli_binary": {
+      "name": "ags",
+      "path_relative": "target/debug/ags",
+      "supported_modes": ["embedded", "connected", "demo", "preview"]
+    }
+  },
+  "protocols": {
+    "supported_provider_protocols": [
+      "anthropic_messages",
+      "openai_responses",
+      "ollama_native"
+    ],
+    "ipc_protocol_version": 1,
+    "event_schema_version": 1
+  },
+  "cli_commands": [
+    {
+      "command": "ags doctor",
+      "flags": ["--json"],
+      "description": "System health and runtime environment diagnostics",
+      "checks": [
+        "Platform",
+        "Git Executable",
+        "Git Repository & Worktree",
+        "Terminal Geometry",
+        "Color & ANSI Capabilities",
+        "Unicode NFC & Vietnamese Tone Pipeline",
+        "Control Plane Engine",
+        "Daemon Service (agsd)"
+      ]
+    },
+    {
+      "command": "ags provider list",
+      "flags": ["--format table|json"],
+      "description": "Query configured provider instances"
+    },
+    {
+      "command": "ags model list",
+      "flags": ["--provider <id>", "--format table|json"],
+      "description": "Query registered model catalog"
+    },
+    {
+      "command": "ags --preview",
+      "description": "Launch offline interactive visual design previewer"
+    },
+    {
+      "command": "ags --demo",
+      "description": "Run in simulated demo mode without model credentials"
+    }
+  ],
+  "ipc_commands": [
+    {
+      "command": "ping",
+      "request": { "type": "ping", "payload": "string" },
+      "response": { "type": "pong", "payload": "string", "roundtrip_latency_ms": "integer" }
+    },
+    {
+      "command": "health",
+      "request": { "type": "health" },
+      "response": { "type": "health_response", "status": "string", "active_clients": "integer", "uptime_secs": "integer" }
+    },
+    {
+      "command": "subscribe",
+      "request": { "type": "subscribe", "since_sequence": "integer" },
+      "response_stream": { "type": "event", "event": "EventEnvelope" }
+    },
+    {
+      "command": "submit_goal",
+      "request": {
+        "type": "submit_goal",
+        "studio_id": "string",
+        "title": "string",
+        "description": "string",
+        "options": {
+          "provider": "string?",
+          "model": "string?",
+          "workspace_access_mode": "string?"
+        }
+      },
+      "response": { "type": "goal_submitted", "task_id": "string" }
+    },
+    {
+      "command": "resolve_approval",
+      "request": {
+        "type": "resolve_approval",
+        "approval_id": "string",
+        "decision": "approved|rejected",
+        "reason": "string?"
+      },
+      "response": { "type": "approval_resolved", "approval_id": "string", "state": "string" }
+    }
+  ],
+  "event_types": [
+    "studio_created",
+    "agent_registered",
+    "agent_state_changed",
+    "task_created",
+    "task_state_changed",
+    "task_dependency_added",
+    "task_dependency_removed",
+    "run_created",
+    "run_state_changed",
+    "approval_requested",
+    "approval_resolved",
+    "artifact_registered",
+    "cancellation_requested",
+    "agent_runtime_bound",
+    "agent_spawned",
+    "assistant_message_chunk",
+    "tool_started",
+    "tool_completed",
+    "tool_failed",
+    "budget_usage_updated",
+    "budget_exceeded",
+    "worktree_created",
+    "worktree_assigned",
+    "worktree_state_changed",
+    "worktree_change_captured",
+    "worktree_released",
+    "reconciliation_created",
+    "reconciliation_state_changed",
+    "reconciliation_conflict_detected",
+    "reconciliation_applied",
+    "reconciliation_failed"
+  ],
+  "verification": {
+    "total_tests_passed": 227,
+    "provider_tests": 96,
+    "control_plane_tests": 63,
+    "cli_client_tests": 24,
+    "tui_tests": 27,
+    "cli_tests": 6,
+    "protocol_tests": 11,
+    "failures": 0,
+    "regressions": 0
+  }
+}

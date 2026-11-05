@@ -1,6 +1,6 @@
 #[cfg(windows)]
-use agent_studios_opencode_runtime::JobObjectGuard;
-use agent_studios_opencode_runtime::{ProcessContainment, SandboxLevel, SandboxPolicy};
+use agent_studios_opencode_runtime::{JobObjectGuard, ProcessContainment};
+use agent_studios_opencode_runtime::{SandboxLevel, SandboxPolicy};
 
 #[test]
 fn test_sandbox_policy_defaults() {
