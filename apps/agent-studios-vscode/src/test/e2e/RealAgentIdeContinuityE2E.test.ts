@@ -32,35 +32,7 @@ import {
   registeredCommands,
   resetMockState,
 } from '../unit/vscodeMock';
-
-function resolveAgsdBinaryPath(): string {
-  const isWindows = process.platform === 'win32';
-  const exeSuffix = isWindows ? '.exe' : '';
-
-  const candidatePaths = [
-    process.env.AGSD_BIN_PATH,
-    isWindows ? 'D:\\Projects\\agent-studios\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    isWindows ? 'D:\\Projects\\agent-studios-m15-04\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    isWindows ? 'D:\\Projects\\agent-studios-m15-03\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    isWindows ? 'D:\\Projects\\agent-studios-m15-02\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    isWindows ? 'D:\\Projects\\agent-studios-m15\\agent-studios-rs\\target\\debug\\agsd.exe' : undefined,
-    path.resolve(__dirname, '../../../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
-    path.resolve(__dirname, '../../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
-    path.resolve(__dirname, '../../../../agent-studios-rs/target/debug/agsd' + exeSuffix),
-    path.resolve(process.cwd(), '../../agent-studios-rs/target/debug/agsd' + exeSuffix),
-  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
-
-  for (const candidate of candidatePaths) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  throw new Error(
-    `[RealAgentIdeContinuityE2E] Real Rust daemon binary (agsd) not found. Checked locations:\n` +
-      candidatePaths.map((p) => `  - ${p}`).join('\n')
-  );
-}
+import { resolveAgsdBinaryPath } from './AgsdBinaryResolver';
 
 describe('Tier 3: Real Daemon Execution UX & Mode Continuity Acceptance E2E (M15 UI-06)', function () {
   this.timeout(30000);

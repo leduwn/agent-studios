@@ -37,6 +37,9 @@ describe('Extension Host: Activation & Commands Integration Tests', () => {
       'agent-studios.refactorSelection',
       'agent-studios.generateTests',
       'agent-studios.openMissionControl',
+      'agent-studios.openInIde',
+      'agent-studios.switchToAgentMode',
+      'agent-studios.continueSession',
     ];
 
     for (const cmd of requiredCommands) {
