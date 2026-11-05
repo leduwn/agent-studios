@@ -584,6 +584,7 @@ fn test_process_exit_status_wrapper() {
         let status_0 = std::process::ExitStatus::from_raw(0);
         let (state, event) = classify_exit_status(Some(status_0), "");
         assert_eq!(state, RuntimeLifecycleState::Completed);
+        assert_eq!(event, RuntimeEventKind::Completed { summary: None });
 
         let status_sigint = std::process::ExitStatus::from_raw(2); // SIGINT
         let (state_sig, _) = classify_exit_status(Some(status_sigint), "");
