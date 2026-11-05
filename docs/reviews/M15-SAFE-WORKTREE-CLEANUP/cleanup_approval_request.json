@@ -1,0 +1,31 @@
+{
+  "request_version": "1.0.0",
+  "timestamp": "2026-11-05T08:30:00Z",
+  "audit_phase": "PHASE_A_NON_DESTRUCTIVE_AUDIT",
+  "audit_status": "AWAITING_OPERATOR_APPROVAL",
+  "manifest_sha256": "9e89e60e0a7b96640bb6a9e8f754559f2974f891e117af9096f568453832eba5",
+  "manifest_relative_path": "docs/reviews/M15-SAFE-WORKTREE-CLEANUP/cleanup_candidate_manifest.json",
+  "canonical_repository": "D:\\Projects\\agent-studios",
+  "canonical_head": "224f0bf486021afcf3d0773d4fc5fd6c86578411",
+  "total_recoverable_disk_gb": 23.69,
+  "approved_candidate_paths": [
+    "D:\\Projects\\agent-studios-m13",
+    "D:\\Projects\\agent-studios-m15",
+    "D:\\Projects\\agent-studios-m15-02",
+    "D:\\Projects\\agent-studios-m15-03",
+    "D:\\Projects\\agent-studios-vscode-m14-02",
+    "D:\\Projects\agent-studios-vscode-ipc-03",
+    "D:\\Projects\\agent-studios-mission-control-integration"
+  ],
+  "expected_heads": {
+    "agent-studios-m13": "ce0396c1f1",
+    "agent-studios-m15": "a5dbbfc5eb",
+    "agent-studios-m15-02": "b307b9a6e2",
+    "agent-studios-m15-03": "cc1c3e8f39",
+    "agent-studios-vscode-m14-02": "ed80b243c9",
+    "agent-studios-vscode-ipc-03": "73b7298ca3",
+    "agent-studios-mission-control-integration": "a13230ee93"
+  },
+  "required_operator_approval_message": "APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 9e89e60e0a7b96640bb6a9e8f754559f2974f891e117af9096f568453832eba5",
+  "phase_b_execution_guard": "STRICT_HUMAN_APPROVAL_REQUIRED_BEFORE_MUTATION"
+}
