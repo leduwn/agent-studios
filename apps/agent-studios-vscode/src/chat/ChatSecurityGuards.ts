@@ -33,6 +33,9 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'enablePreviewMode',
   'connectDaemon',
   'dismissOnboarding',
+  'openInIde',
+  'openMissionControl',
+  'continueSession',
 ] as const);
 
 export type AllowedWebviewCommand = typeof ALLOWED_WEBVIEW_COMMANDS extends Set<infer T> ? T : never;
@@ -271,10 +274,16 @@ export class ChatSecurityGuards {
         return { valid: true };
       }
 
-      case 'switchSession': {
+      case 'switchSession':
+      case 'continueSession': {
         if (record.sessionId !== undefined && (typeof record.sessionId !== 'string' || record.sessionId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
-          return { valid: false, error: "Command 'switchSession' requires a valid string 'sessionId'." };
+          return { valid: false, error: `Command '${command}' requires a valid string 'sessionId'.` };
         }
+        return { valid: true };
+      }
+
+      case 'openInIde':
+      case 'openMissionControl': {
         return { valid: true };
       }
 

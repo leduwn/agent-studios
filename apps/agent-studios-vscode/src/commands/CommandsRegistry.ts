@@ -118,6 +118,50 @@ export function registerAllCommands(
     })
   );
 
+  // 1b. agent-studios.openInIde: transitions from Agent-first view to IDE editor / explorer while preserving shared session
+  disposables.push(
+    vscode.commands.registerCommand('agent-studios.openInIde', async () => {
+      await vscode.commands.executeCommand('workbench.view.explorer');
+      if (vscode.window.activeTextEditor) {
+        await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
+      }
+    })
+  );
+
+  // 1c. agent-studios.switchToAgentMode: transitions from IDE workbench to Agent Mode conversational workspace
+  disposables.push(
+    vscode.commands.registerCommand('agent-studios.switchToAgentMode', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.agent-studios-activitybar');
+      await vscode.commands.executeCommand('agent-studios.chat.focus');
+    })
+  );
+
+  // 1d. agent-studios.continueSession: continues/restores recent or targeted session into shared projection
+  disposables.push(
+    vscode.commands.registerCommand('agent-studios.continueSession', async (targetSessionId?: string) => {
+      try {
+        if (targetSessionId) {
+          const session = await bridgeManager.bridge.switchSession(targetSessionId);
+          bridgeManager.stateProjection.switchSession(session);
+          return session;
+        }
+        const sessions = await bridgeManager.bridge.listSessions().catch(() => []);
+        if (sessions && sessions.length > 0) {
+          const sorted = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+          const session = await bridgeManager.bridge.switchSession(sorted[0].id);
+          bridgeManager.stateProjection.switchSession(session);
+          return session;
+        }
+        return null;
+      } catch (err: unknown) {
+        vscode.window.showErrorMessage(
+          `Failed to continue session: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return null;
+      }
+    })
+  );
+
   // 2. agent-studios.openSession: opens session detail webview
   disposables.push(
     vscode.commands.registerCommand('agent-studios.openSession', async () => {

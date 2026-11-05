@@ -486,9 +486,45 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         await vscode.commands.executeCommand('agent-studios.connectDaemon');
         break;
 
+      case 'openInIde':
+        await vscode.commands.executeCommand('agent-studios.openInIde');
+        break;
+
+      case 'openMissionControl':
+        await vscode.commands.executeCommand('agent-studios.openMissionControl');
+        break;
+
+      case 'continueSession':
+        await this._handleContinueSession(message.sessionId);
+        break;
+
       case 'dismissOnboarding':
         this._hasSeenOnboarding = true;
         break;
+    }
+  }
+
+  private async _handleContinueSession(targetSessionId?: string): Promise<void> {
+    try {
+      if (targetSessionId) {
+        await this._handleSwitchSession(targetSessionId);
+        return;
+      }
+      const sessions = await this.bridge.listSessions().catch(() => []);
+      if (sessions && sessions.length > 0) {
+        // Find most recent session
+        const sorted = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        await this._handleSwitchSession(sorted[0].id);
+      } else {
+        const current = await this.bridge.getCurrentSession().catch(() => null);
+        if (current) {
+          await this._handleSwitchSession(current.id);
+        }
+      }
+    } catch (err: unknown) {
+      await vscode.window.showErrorMessage(
+        `Failed to continue session: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
   }
 

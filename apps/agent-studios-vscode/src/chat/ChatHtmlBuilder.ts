@@ -532,6 +532,255 @@ export class ChatHtmlBuilder {
       gap: 8px;
       margin-top: 6px;
     }
+
+    /* Agent-First Welcome Surface */
+    .agent-welcome-surface {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 16px 8px 24px 8px;
+      width: 100%;
+      max-width: 540px;
+      margin: 0 auto;
+      box-sizing: border-box;
+    }
+
+    .welcome-hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      gap: 4px;
+      padding: 8px 0;
+    }
+
+    .welcome-icon-box {
+      font-size: 28px;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .welcome-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--fg-primary);
+      margin: 0;
+      letter-spacing: -0.3px;
+    }
+
+    .welcome-subtitle {
+      font-size: 12px;
+      color: var(--fg-subtle);
+      margin: 0;
+      line-height: 1.4;
+    }
+
+    .welcome-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .welcome-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .welcome-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .welcome-card-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--fg-subtle);
+    }
+
+    .status-pill {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 2px 6px;
+      border-radius: 10px;
+      letter-spacing: 0.4px;
+      background: rgba(128, 128, 128, 0.2);
+      color: var(--fg-subtle);
+    }
+
+    .status-pill--active {
+      background: rgba(152, 195, 121, 0.2);
+      color: var(--status-green);
+    }
+
+    .status-pill--warn {
+      background: rgba(229, 192, 123, 0.2);
+      color: var(--status-yellow);
+    }
+
+    .welcome-card-body {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .welcome-detail-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .detail-label {
+      color: var(--fg-subtle);
+    }
+
+    .detail-val {
+      font-weight: 500;
+      color: var(--fg-primary);
+      text-overflow: ellipsis;
+      overflow: hidden;
+      white-space: nowrap;
+      max-width: 220px;
+    }
+
+    .detail-code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 2px 5px;
+      border-radius: 3px;
+      color: var(--fg-primary);
+    }
+
+    .welcome-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+
+    .welcome-notice {
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--fg-subtle);
+      background: rgba(229, 192, 123, 0.1);
+      border-left: 2px solid var(--status-yellow);
+      padding: 4px 8px;
+      border-radius: 0 3px 3px 0;
+      margin-top: 2px;
+    }
+
+    .welcome-starters-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .starters-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--fg-subtle);
+    }
+
+    .starters-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .starter-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: var(--fg-primary);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      text-align: left;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+
+    .starter-chip:hover {
+      background: var(--border-subtle);
+      border-color: var(--fg-subtle);
+    }
+
+    .starter-icon {
+      color: var(--fg-subtle);
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+
+    .starter-text {
+      flex: 1;
+      line-height: 1.3;
+    }
+
+    /* 14 Conversation UX States Badges */
+    .status-badge.status-connecting,
+    .status-badge.status-reconnecting {
+      background-color: rgba(229, 192, 123, 0.2);
+      color: var(--status-yellow);
+    }
+    .status-badge.status-connected {
+      background-color: rgba(152, 195, 121, 0.2);
+      color: var(--status-green);
+    }
+    .status-badge.status-degraded {
+      background-color: rgba(229, 192, 123, 0.25);
+      color: var(--status-yellow);
+    }
+    .status-badge.status-offline {
+      background-color: rgba(224, 108, 117, 0.2);
+      color: var(--status-red);
+    }
+    .status-badge.status-session_restored {
+      background-color: rgba(97, 175, 239, 0.2);
+      color: var(--status-blue);
+    }
+    .status-badge.status-task_pending {
+      background-color: rgba(229, 192, 123, 0.2);
+      color: var(--status-yellow);
+    }
+    .status-badge.status-awaiting_approval {
+      background-color: rgba(229, 192, 123, 0.3);
+      color: var(--status-yellow);
+      border: 1px solid var(--status-yellow);
+    }
+    .status-badge.status-interrupted {
+      background-color: rgba(224, 108, 117, 0.25);
+      color: var(--status-red);
+    }
+    .status-badge.status-completed {
+      background-color: rgba(152, 195, 121, 0.2);
+      color: var(--status-green);
+    }
+    .status-badge.status-verified_artifact {
+      background-color: rgba(152, 195, 121, 0.25);
+      color: var(--status-green);
+    }
+    .status-badge.status-unverified_artifact {
+      background-color: rgba(229, 192, 123, 0.2);
+      color: var(--status-yellow);
+    }
   </style>
 </head>
 <body>
@@ -567,7 +816,7 @@ export class ChatHtmlBuilder {
 
     <!-- Conversation Stream Container -->
     <main id="conversationContainer" class="chat-messages" role="log" aria-live="polite">
-      ${messages.length === 0 ? ChatHtmlBuilder.renderEmptyState() : ''}
+      ${messages.length === 0 ? ChatHtmlBuilder.renderEmptyState(initialState) : ''}
     </main>
 
     <!-- Sticky Bottom Composer -->
@@ -643,7 +892,10 @@ export class ChatHtmlBuilder {
         <div class="streaming-console-box">
           <div class="streaming-console-title">
             <span>Streaming Console</span>
-            <button id="clearStreamBtn" class="btn-xs" style="background: none; border: none; color: var(--fg-subtle); cursor: pointer;" title="Clear streaming console">Clear</button>
+            <div style="display: flex; gap: 6px; align-items: center;">
+              <button type="button" class="btn-xs" style="background: none; border: 1px solid var(--border-subtle); color: var(--fg-subtle); cursor: pointer; border-radius: 3px; padding: 1px 6px; font-size: 10px;" data-action="open-mission-control" title="Inspect full DAG, fleet, and diagnostics in Mission Control">Mission Control →</button>
+              <button id="clearStreamBtn" class="btn-xs" style="background: none; border: none; color: var(--fg-subtle); cursor: pointer;" title="Clear streaming console">Clear</button>
+            </div>
           </div>
           <pre id="streamingConsoleOutput" class="streaming-console-output">${escapeHtml(executionState?.streamOutput || '')}</pre>
         </div>
@@ -976,8 +1228,10 @@ export class ChatHtmlBuilder {
         state.executionState = execState;
 
         if (executionStreamingPane) {
-          if (execState.status !== 'idle') {
+          if (execState.status && execState.status !== 'idle') {
             executionStreamingPane.style.display = 'flex';
+          } else {
+            executionStreamingPane.style.display = 'none';
           }
         }
 
@@ -1210,7 +1464,7 @@ export class ChatHtmlBuilder {
         }
       });
 
-      // Card action clicks delegation (approve, deny, open-diff, open-task-graph)
+      // Card and welcome surface action clicks delegation
       conversationContainer.addEventListener('click', function(e) {
         var approveBtn = e.target.closest('[data-action="approve"]');
         if (approveBtn) {
@@ -1241,7 +1495,46 @@ export class ChatHtmlBuilder {
           vscode.postMessage({ command: 'openTaskGraph' });
           return;
         }
+
+        var openIdeBtn = e.target.closest('[data-action="open-in-ide"]');
+        if (openIdeBtn) {
+          vscode.postMessage({ command: 'openInIde' });
+          return;
+        }
+
+        var openMcBtn = e.target.closest('[data-action="open-mission-control"]');
+        if (openMcBtn) {
+          vscode.postMessage({ command: 'openMissionControl' });
+          return;
+        }
+
+        var contSessBtn = e.target.closest('[data-action="continue-session"]');
+        if (contSessBtn) {
+          var sid = contSessBtn.getAttribute('data-session-id') || '';
+          vscode.postMessage({ command: 'continueSession', sessionId: sid });
+          return;
+        }
+
+        var promptSugBtn = e.target.closest('[data-action="prompt-suggestion"]');
+        if (promptSugBtn) {
+          var sugText = promptSugBtn.getAttribute('data-prompt') || '';
+          if (composerInput) {
+            composerInput.value = sugText;
+            autoGrowTextarea();
+            composerInput.focus();
+          }
+          return;
+        }
       });
+
+      if (executionStreamingPane) {
+        executionStreamingPane.addEventListener('click', function(e) {
+          var openMcBtn = e.target.closest('[data-action="open-mission-control"]');
+          if (openMcBtn) {
+            vscode.postMessage({ command: 'openMissionControl' });
+          }
+        });
+      }
 
       // Incoming message listener from VS Code Extension Host
       window.addEventListener('message', function(event) {
@@ -1482,13 +1775,115 @@ export class ChatHtmlBuilder {
 </html>`;
   }
 
-  public static renderEmptyState(): string {
+  public static renderEmptyState(initialState?: ChatHtmlInitialState): string {
+    const workspacePath = initialState?.workspacePath || '';
+    const workspaceName = workspacePath ? workspacePath.split(/[\\/]/).filter(Boolean).pop() || workspacePath : 'No workspace open';
+    const connectionState = initialState?.connectionState || 'disconnected';
+    const isConnected = connectionState === 'connected';
+    const isPreview = Boolean(initialState?.isPreview);
+    const session = initialState?.session;
+    const sessions = initialState?.sessions || [];
+    const firstSessionId = session?.id || (sessions.length > 0 ? sessions[0].id : undefined);
+
+    const goalStarters = [
+      'Audit repository architecture and verify dependency graph',
+      'Diagnose failing integration tests and formulate surgical fix',
+      'Explore git branch changes and summarize active worktree diff',
+      'Prepare release verification report and quality checklist',
+    ];
+
+    const startersHtml = goalStarters.map(starter => `
+      <button type="button" class="starter-chip" data-action="prompt-suggestion" data-prompt="${escapeHtml(starter)}" aria-label="${escapeHtml(starter)}">
+        <span class="starter-icon" aria-hidden="true">→</span>
+        <span class="starter-text">${escapeHtml(starter)}</span>
+      </button>
+    `.trim()).join('');
+
+    const recentSessionsHtml = firstSessionId ? `
+      <div class="welcome-card welcome-sessions-card">
+        <div class="welcome-card-header">
+          <span class="welcome-card-title">Session Continuity</span>
+          <span class="status-pill status-pill--active">Saved</span>
+        </div>
+        <div class="welcome-card-body">
+          <div class="welcome-detail-row">
+            <span class="detail-label">Active Session:</span>
+            <code class="detail-code" title="${escapeHtml(firstSessionId)}">${escapeHtml(firstSessionId.substring(0, 16))}...</code>
+          </div>
+          <div class="welcome-actions">
+            <button type="button" class="btn-primary btn-xs" data-action="continue-session" data-session-id="${escapeHtml(firstSessionId)}" title="Restore session context and history">
+              Restore Session
+            </button>
+          </div>
+        </div>
+      </div>
+    `.trim() : '';
+
     return `
-      <div class="chat-empty-state">
-        <span style="font-size: 28px; line-height: 1;">⚡</span>
-        <h3>Agent Studios Assistant</h3>
-        <p>Ask questions, explore code, propose plans, or delegate multi-agent tasks.</p>
-      </div>`.trim();
+      <div class="agent-welcome-surface" role="region" aria-label="Agent Studios Welcome">
+        <div class="welcome-hero">
+          <div class="welcome-icon-box" aria-hidden="true">⚡</div>
+          <h2 class="welcome-title">Agent Studios</h2>
+          <p class="welcome-subtitle">Agent-First AI Engineering Workbench ${isPreview ? '<span class="preview-tag">[Preview Fixture]</span>' : ''}</p>
+        </div>
+
+        <div class="welcome-grid">
+          <!-- Active Workspace Card -->
+          <div class="welcome-card">
+            <div class="welcome-card-header">
+              <span class="welcome-card-title">Active Workspace</span>
+              <span class="status-pill ${workspacePath ? 'status-pill--active' : 'status-pill--warn'}">
+                ${workspacePath ? 'Bound' : 'None'}
+              </span>
+            </div>
+            <div class="welcome-card-body">
+              <div class="welcome-detail-row">
+                <span class="detail-label">Location:</span>
+                <span class="detail-val" title="${escapeHtml(workspacePath)}">${escapeHtml(workspaceName)}</span>
+              </div>
+              <div class="welcome-actions">
+                <button type="button" class="btn-secondary btn-xs" data-action="open-in-ide" title="Open workspace in Code-OSS editor workbench">
+                  Open in IDE Mode
+                </button>
+                <button type="button" class="btn-secondary btn-xs" data-action="open-mission-control" title="Inspect execution DAG and multi-agent fleet in Mission Control">
+                  Mission Control
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Daemon & Runtime Status Card -->
+          <div class="welcome-card">
+            <div class="welcome-card-header">
+              <span class="welcome-card-title">Daemon & Runtime</span>
+              <span class="status-pill ${isConnected ? 'status-pill--active' : 'status-pill--warn'}">
+                ${escapeHtml(connectionState)}
+              </span>
+            </div>
+            <div class="welcome-card-body">
+              <div class="welcome-detail-row">
+                <span class="detail-label">Runtime Engine:</span>
+                <span class="detail-val">${escapeHtml(initialState?.selectedRuntime || 'Native Daemon (agsd)')}</span>
+              </div>
+              <div class="welcome-notice" title="Provider discovery contract lands in backend M15.1">
+                <strong>Model Catalog:</strong> Dynamic Provider Discovery pending M15.1. Static adapters: Claude Code, Internal Codex, Codex.
+              </div>
+            </div>
+          </div>
+
+          <!-- Session Continuity Card (if session exists) -->
+          ${recentSessionsHtml}
+        </div>
+
+        <!-- Goal Formulation Starters -->
+        <div class="welcome-starters-section">
+          <div class="starters-label">Goal Formulation Starters</div>
+          <div class="starters-grid">
+            ${startersHtml}
+          </div>
+        </div>
+      </div>
+    `.trim();
   }
 
   public static renderMetricsHtml(metrics?: ExecutionMetrics): string {
