@@ -1,12 +1,14 @@
 /**
  * Agent Studios — AgsdBinaryResolver Unit Tests
- * Milestone M15 UI-06: Release Hardening & Test Provenance
+ * Milestone M15 UI-06: Release Hardening & CI Binary Provenance Gate
  */
 
 import * as assert from 'assert';
 import * as path from 'path';
 import {
   isStaleHistoricalPath,
+  isSubpathOrEqual,
+  normalizePathForComparison,
   resolveAgsdBinaryPath,
   STALE_WORKTREE_PATTERNS,
 } from '../e2e/AgsdBinaryResolver';
@@ -51,15 +53,34 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
     });
   });
 
-  describe('Explicit AGSD_BIN_PATH Policy', () => {
-    it('returns valid AGSD_BIN_PATH when pointing to existing binary', () => {
-      const fakeBinary = path.resolve('/valid/workspace/agent-studios-rs/target/debug/agsd.exe');
-      const resolved = resolveAgsdBinaryPath({
-        env: { AGSD_BIN_PATH: fakeBinary },
-        existsSync: (p) => path.resolve(p) === fakeBinary,
-      });
+  describe('Path Normalization and Subpath Comparison', () => {
+    it('handles Windows path normalization and drive-letter case correctly', () => {
+      const p1 = 'D:\\Projects\\Agent-Studios\\agent-studios-rs\\target\\debug\\agsd.exe';
+      const p2 = 'd:/projects/agent-studios/agent-studios-rs/target/debug/agsd.exe';
+      assert.strictEqual(
+        normalizePathForComparison(p1, true),
+        normalizePathForComparison(p2, true)
+      );
+    });
 
-      assert.strictEqual(resolved, fakeBinary);
+    it('verifies subpath containment on Windows regardless of separator or casing', () => {
+      const workspace = 'd:\\projects\\agent-studios';
+      const targetBinary = 'D:/Projects/Agent-Studios/agent-studios-rs/target/debug/agsd.exe';
+      assert.strictEqual(isSubpathOrEqual(targetBinary, workspace, true), true);
+
+      const outsideBinary = 'D:/OtherProjects/agent-studios-rs/target/debug/agsd.exe';
+      assert.strictEqual(isSubpathOrEqual(outsideBinary, workspace, true), false);
+    });
+  });
+
+  describe('Local Development Provenance Policy (CI=false)', () => {
+    it('permits local developer explicit override pointing to valid external binary', () => {
+      const externalBinary = path.resolve('/custom/standalone/agsd.exe');
+      const resolved = resolveAgsdBinaryPath({
+        env: { CI: 'false', AGSD_BIN_PATH: externalBinary },
+        existsSync: (p) => path.resolve(p) === externalBinary,
+      });
+      assert.strictEqual(resolved, externalBinary);
     });
 
     it('rejects explicit AGSD_BIN_PATH if it targets a stale historical worktree', () => {
@@ -67,7 +88,7 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
       assert.throws(
         () => {
           resolveAgsdBinaryPath({
-            env: { AGSD_BIN_PATH: staleBinary },
+            env: { CI: 'false', AGSD_BIN_PATH: staleBinary },
             existsSync: () => true,
           });
         },
@@ -82,7 +103,7 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
       assert.throws(
         () => {
           resolveAgsdBinaryPath({
-            env: { AGSD_BIN_PATH: missingBinary },
+            env: { CI: 'false', AGSD_BIN_PATH: missingBinary },
             existsSync: () => false,
           });
         },
@@ -91,28 +112,125 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
         }
       );
     });
+
+    it('fails clearly with cargo build instructions when no binary is found locally', () => {
+      assert.throws(
+        () => {
+          resolveAgsdBinaryPath({
+            env: { CI: 'false' },
+            cwd: '/empty/mock/repo',
+            existsSync: () => false,
+          });
+        },
+        (err: Error) => {
+          return (
+            err.message.includes('Real Rust daemon binary (agsd) not found') &&
+            err.message.includes('cargo build --bin agsd -p agent-studios-ipc-transport')
+          );
+        }
+      );
+    });
   });
 
-  describe('CI Provenance Enforcement Policy', () => {
-    it('strictly requires binary from checked-out workspace in CI environment', () => {
-      const ciWorkspace = path.resolve('/home/runner/work/agent-studios/agent-studios');
-      const expectedBinary = path.join(ciWorkspace, 'agent-studios-rs', 'target', 'debug', 'agsd');
+  describe('Strict CI Provenance Enforcement Policy (CI=true)', () => {
+    const ciWorkspace = path.resolve('/home/runner/work/agent-studios/agent-studios');
 
+    it('accepts explicit AGSD_BIN_PATH in CI if within current checkout build target', () => {
+      const validCiBinary = path.join(ciWorkspace, 'agent-studios-rs', 'target', 'debug', 'agsd');
+      const resolved = resolveAgsdBinaryPath({
+        env: {
+          CI: 'true',
+          GITHUB_WORKSPACE: ciWorkspace,
+          AGSD_BIN_PATH: validCiBinary,
+        },
+        platform: 'linux',
+        existsSync: (p) => path.resolve(p) === validCiBinary,
+      });
+
+      assert.strictEqual(resolved, validCiBinary);
+    });
+
+    it('rejects explicit AGSD_BIN_PATH in CI if outside current checked-out repository root', () => {
+      const externalBinary = path.resolve('/home/runner/external-tools/agsd');
+      assert.throws(
+        () => {
+          resolveAgsdBinaryPath({
+            env: {
+              CI: 'true',
+              GITHUB_WORKSPACE: ciWorkspace,
+              AGSD_BIN_PATH: externalBinary,
+            },
+            platform: 'linux',
+            existsSync: () => true,
+          });
+        },
+        (err: Error) => {
+          return (
+            err.message.includes('Strict CI provenance error') &&
+            err.message.includes('outside the checked-out repository root')
+          );
+        }
+      );
+    });
+
+    it('rejects explicit AGSD_BIN_PATH in CI if inside checkout but outside compiled target directories', () => {
+      const maliciousScript = path.join(ciWorkspace, 'scripts', 'fake-agsd');
+      assert.throws(
+        () => {
+          resolveAgsdBinaryPath({
+            env: {
+              CI: 'true',
+              GITHUB_WORKSPACE: ciWorkspace,
+              AGSD_BIN_PATH: maliciousScript,
+            },
+            platform: 'linux',
+            existsSync: () => true,
+          });
+        },
+        (err: Error) => {
+          return (
+            err.message.includes('Strict CI provenance error') &&
+            err.message.includes('not located in an expected compiled daemon target directory')
+          );
+        }
+      );
+    });
+
+    it('rejects explicit AGSD_BIN_PATH in CI if it targets a stale historical worktree', () => {
+      const staleCiBinary = '/home/runner/worktrees/agent-studios-m15-04/agent-studios-rs/target/debug/agsd';
+      assert.throws(
+        () => {
+          resolveAgsdBinaryPath({
+            env: {
+              CI: 'true',
+              GITHUB_WORKSPACE: ciWorkspace,
+              AGSD_BIN_PATH: staleCiBinary,
+            },
+            platform: 'linux',
+            existsSync: () => true,
+          });
+        },
+        (err: Error) => {
+          return err.message.includes('points to stale historical worktree');
+        }
+      );
+    });
+
+    it('resolves valid default binary from current checkout in CI when AGSD_BIN_PATH is unset', () => {
+      const defaultBinary = path.join(ciWorkspace, 'agent-studios-rs', 'target', 'debug', 'agsd');
       const resolved = resolveAgsdBinaryPath({
         env: {
           CI: 'true',
           GITHUB_WORKSPACE: ciWorkspace,
         },
         platform: 'linux',
-        existsSync: (p) => path.resolve(p) === expectedBinary,
+        existsSync: (p) => path.resolve(p) === defaultBinary,
       });
 
-      assert.strictEqual(resolved, expectedBinary);
+      assert.strictEqual(resolved, defaultBinary);
     });
 
-    it('fails clearly in CI if binary is missing from checked-out commit', () => {
-      const ciWorkspace = path.resolve('/home/runner/work/agent-studios/agent-studios');
-
+    it('fails clearly in CI if binary is missing from current checkout and never falls back silently', () => {
       assert.throws(
         () => {
           resolveAgsdBinaryPath({
@@ -128,26 +246,6 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
           return (
             err.message.includes('CI provenance error') &&
             err.message.includes('cargo build --bin agsd')
-          );
-        }
-      );
-    });
-  });
-
-  describe('Local Development Provenance Policy', () => {
-    it('fails clearly with cargo build instructions when no binary is found', () => {
-      assert.throws(
-        () => {
-          resolveAgsdBinaryPath({
-            env: {},
-            cwd: '/empty/mock/repo',
-            existsSync: () => false,
-          });
-        },
-        (err: Error) => {
-          return (
-            err.message.includes('Real Rust daemon binary (agsd) not found') &&
-            err.message.includes('cargo build --bin agsd -p agent-studios-ipc-transport')
           );
         }
       );
