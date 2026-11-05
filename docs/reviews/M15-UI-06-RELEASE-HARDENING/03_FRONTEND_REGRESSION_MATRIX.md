@@ -5,7 +5,7 @@
 **Branch:** `feat/m15-ui-06-agent-ide-continuity`  
 **Target Base:** `integration/m15-unified-codebase`  
 **Baseline Test Count:** 755 tests  
-**Current Test Count:** 788 tests (679 unit + 84 real daemon E2E + 25 extension host integration)  
+**Current Test Count:** 794 tests (685 unit + 84 real daemon E2E + 25 extension host integration)  
 **Status:** 100% PASSING  
 **Date:** 2026-11-06  
 
@@ -20,10 +20,11 @@ Every frontend verification gate has been executed in the active worktree (`D:\P
 | `npm run compile` | TypeScript compiler (`tsc -p ./`) | **PASS (0 errors)** | Clean transpilation to `out/` |
 | `npm run typecheck` | Strict typechecker (`tsc --noEmit`) | **PASS (0 errors)** | Zero type violations |
 | `npm run lint` | ESLint TypeScript ruleset | **PASS (0 errors)** | 0 errors, 336 naming warnings |
-| `npm run test:unit` | Unit test suite (Mocha) | **PASS (679/679)** | In-memory mocks, bridge, state projection |
+| `npm run test:unit` | Unit test suite (Mocha) | **PASS (685/685)** | In-memory mocks, bridge, state projection, 13 binary resolver tests |
 | `npm run test:e2e` | Real compiled daemon suite (agsd) | **PASS (84/84)** | Real PID, Named Pipe / UDS, SQLite WAL |
 | `npm run test:integration` | Real VS Code Host (@vscode/test) | **PASS (25/25)** | Activation, command registry, mode continuity |
-| **Total Automated** | **Full Frontend Verification Suite** | **788 / 788 (100%)**| Zero test failures |
+| `npm run package` | VSIX extension packaging (vsce) | **PASS (0 errors)** | 87 files packaged (260 KB) |
+| **Total Automated** | **Full Frontend Verification Suite** | **794 / 794 (100%)**| Zero test failures |
 
 ---
 
@@ -73,9 +74,9 @@ Every frontend verification gate has been executed in the active worktree (`D:\P
 - **Component:** `AgsdBinaryResolver.ts`
 - **Guarantees:**
   - Strictly rejects obsolete historical worktrees (`m15-04`, `m15-03`, `m15-02`, `m15`).
-  - Requires checked-out workspace binary under CI.
+  - Requires checked-out workspace build output under CI mode.
   - Provides actionable `cargo build` remediation instructions.
 - **Verification:**
-  - `AgsdBinaryResolver.test.ts` (7 unit tests).
+  - `AgsdBinaryResolver.test.ts` (13 unit tests).
   - `RealAgentIdeContinuityE2E.test.ts` (6 real process E2E tests).
   - `CrashRecoveryE2E.test.ts` (SIGKILL recovery, SQLite WAL replay backfill).

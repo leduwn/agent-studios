@@ -19,83 +19,62 @@ Prior to Milestone M15 UI-06 hardening, `RealAgentIdeContinuityE2E.test.ts` util
 
 Falling back to binaries in older, unmerged, or superseded worktrees created unacceptable risks:
 1. Tests could pass against stale binary protocols while failing against the checked-out commit.
-2. In Continuous Integration (CI), tests could search non-existent developer directories or mask missing compilation artifacts.
-3. Test provenance lacked deterministic traceability to the checked-out GitHub SHA.
+2. In Continuous Integration (CI), an explicit `AGSD_BIN_PATH` fast-path evaluated before CI checks could accept an external binary outside the checked-out workspace.
+3. Binary existence alone does not equate to proof of matching the source commit.
 
-### 2. Strict Provenance Resolution Architecture
+### 2. Strict Provenance Resolution Architecture & Threat Model
 
-To eliminate historical fallbacks and establish verifiable provenance, `AgsdBinaryResolver.ts` was introduced with a multi-layered policy:
+To eliminate historical fallbacks and establish verifiable provenance, `AgsdBinaryResolver.ts` enforces an unambiguous hierarchy:
 
 ```
                           resolveAgsdBinaryPath()
                                      │
            ┌─────────────────────────┴────────────────────────┐
            ▼                                                  ▼
-   [AGSD_BIN_PATH Set?]                               [CI Environment?]
-     │            │                                     │            │
-    Yes           No                                   Yes           No
-     │            │                                     │            │
-     ▼            └───────────────┐                     ▼            ▼
-[Stale Check]                     │              [Checked-out Root] [Local Search]
-     │                            │                     │            │
-Pass │ Fail                       │                Pass │ Fail  Pass │ Fail
-     ▼  └─────────► Error         │                     ▼   └─►Error ▼   └─►Error
-  Return             (Reject      │                  Return        Return
-  Explicit           Historical)  │                  Target        Target
-                                  │                  Binary        Binary
-                                  ▼
-                         [Local Workspace]
+     [CI Mode Active?]                              [Local Dev Mode (CI=false)]
+    (CI=true / GITHUB_ACTIONS)                                │
+           │                                                  │
+     ┌─────┴─────────────────┐                          ┌─────┴────────────────┐
+     ▼                       ▼                          ▼                      ▼
+[Explicit AGSD_BIN_PATH]  [Default CI Search]     [Explicit AGSD_BIN_PATH]  [Local Search]
+     │                       │                          │                      │
+ 1. Stale Check?        1. Checked-out Root        1. Stale Check?         1. Current Worktree
+    -> Reject               target/debug or            -> Reject               target/debug or
+ 2. Exists on Disk?         target/release         2. Exists on Disk?          target/release
+    -> Reject           2. Stale Check?                -> Reject           2. Main Repo Root
+ 3. Inside Checkout Root?   -> Reject              3. Return Explicit Path 3. Canonical Root
+    -> Reject           3. Missing?                                        4. Missing?
+ 4. Inside Target Dir?      -> Throw with build                               -> Throw with cargo
+    -> Reject                  instructions                                      instructions
+ 5. Return Path
 ```
 
-#### Rule 1: Explicit `AGSD_BIN_PATH` Priority with Stale Rejection
-When `AGSD_BIN_PATH` is specified, it takes immediate precedence, but is subjected to strict pattern matching:
-```typescript
-export const STALE_WORKTREE_PATTERNS: readonly RegExp[] = [
-  /[\\/]agent-studios-m15-04[\\/]/i,
-  /[\\/]agent-studios-m15-03[\\/]/i,
-  /[\\/]agent-studios-m15-02[\\/]/i,
-  /[\\/]agent-studios-m15[\\/]/i,
-];
-```
-Any target matching historical worktrees is proactively rejected with an actionable error. Non-existent files throw immediately.
-
-#### Rule 2: CI Provenance Enforcement
-When running under `CI=true` or `GITHUB_ACTIONS=true`:
-- The resolver strictly requires the binary to reside within the checked-out repository root (`GITHUB_WORKSPACE` or current workspace root).
-- Historical directories and external project folders are prohibited.
-- If missing, the runner fails fast with:
-  ```
-  [AgsdBinaryResolver] CI provenance error: agsd daemon binary for checked-out commit was not found in workspace...
-  Ensure cargo build --bin agsd was executed prior to running E2E test suites.
-  ```
-
-#### Rule 3: Local Workspace Discovery & Remediation
-In local development, the resolver inspects:
-1. `<current-worktree>/agent-studios-rs/target/debug/agsd` (or `.exe`)
-2. `<current-worktree>/agent-studios-rs/target/release/agsd` (or `.exe`)
-3. `<main-repo-root>/agent-studios-rs/target/debug/agsd` (or `.exe`)
-4. Canonical root fallback (`D:\Projects\agent-studios`)
-
-If no binary exists, it fails with exact compilation instructions:
-```bash
-cd agent-studios-rs && cargo build --bin agsd -p agent-studios-ipc-transport
-```
+#### Provenance Boundary Specification
+1. **Path Validation Guarantees:** Proves that the resolved `agsd` binary resides strictly within the designated compiled output directory (`target/debug` or `target/release`) of the authorized repository checkout, preventing execution of stale historical worktrees or untrusted external binaries.
+2. **Build Provenance Requirement:** Path validation DOES NOT, by itself, cryptographically prove that the binary was compiled from the exact source commit currently checked out. Complete source-to-binary build provenance requires the CI workflow to execute `cargo build --bin agsd` from the checked-out commit within the same isolated, immutable runner workspace before invoking tests.
+3. **No Silent Fallbacks:** Any verification failure immediately throws an actionable error and halts execution. The resolver never falls back silently to alternative worktrees.
 
 ---
 
 ### 3. Unit Test Verification Matrix
 
-A dedicated test suite, `AgsdBinaryResolver.test.ts`, was created and executes in the fast unit runner (7/7 tests passing):
+A dedicated test suite, `AgsdBinaryResolver.test.ts`, executes in the fast unit runner (13/13 tests passing):
 
 | Test Case | Scenario / Condition | Expected Behavior | Verification Status |
 | :--- | :--- | :--- | :--- |
 | **P-01** | Obsolete worktree paths (`m15-04`, `m15-03`, `m15-02`, `m15`) | Flagged as `isStaleHistoricalPath === true` | **PASS** |
 | **P-02** | Current worktree (`m15-ui-06`) & unified root | Flagged as `isStaleHistoricalPath === false` | **PASS** |
-| **P-03** | Valid `AGSD_BIN_PATH` | Returns verified path | **PASS** |
-| **P-04** | Stale `AGSD_BIN_PATH` targeting old worktree | Throws error rejecting stale path | **PASS** |
-| **P-05** | Missing `AGSD_BIN_PATH` file | Throws disk existence error | **PASS** |
-| **P-06** | CI environment with valid checkout binary | Resolves checked-out binary | **PASS** |
-| **P-07** | CI environment with missing binary | Throws CI provenance error with build instructions | **PASS** |
+| **P-03** | Windows path normalization & drive-letter case | Lowercased & normalized comparison matches | **PASS** |
+| **P-04** | Subpath containment check on Windows | Validates child inside root; rejects outside | **PASS** |
+| **P-05** | Local dev override with valid external binary | Permits explicit path override | **PASS** |
+| **P-06** | Local dev override with stale historical path | Throws error rejecting stale path | **PASS** |
+| **P-07** | Local dev override with non-existent file | Throws disk existence error | **PASS** |
+| **P-08** | Local dev mode with missing binary | Throws error with cargo build instructions | **PASS** |
+| **P-09** | CI mode with explicit path inside checkout target | Accepts valid checked-out binary | **PASS** |
+| **P-10** | CI mode with explicit path outside checkout root | Throws strict CI provenance error | **PASS** |
+| **P-11** | CI mode with explicit path outside target dir | Throws strict CI provenance error | **PASS** |
+| **P-12** | CI mode with explicit path targeting stale worktree | Throws error rejecting stale path | **PASS** |
+| **P-13** | CI mode default candidate resolution & missing error | Resolves checked-out binary; fails if missing | **PASS** |
 
 ---
 
