@@ -33,6 +33,48 @@ fn test_sandbox_strict_fails_closed_on_windows() {
 }
 
 #[test]
+#[cfg(not(windows))]
+fn test_sandbox_strict_and_standard_fail_closed_on_unix() {
+    let strict_policy = SandboxPolicy::strict();
+    let strict_res = ProcessContainment::new(strict_policy);
+    assert!(
+        strict_res.is_err(),
+        "Strict sandbox must fail closed on non-Windows platforms"
+    );
+    match strict_res.err().unwrap() {
+        ClaudeCodeError::UnsupportedPlatform(msg) => {
+            assert!(
+                msg.contains("Strict") && msg.contains("unavailable"),
+                "Expected UnsupportedPlatform explaining unavailable containment: {msg}"
+            );
+        }
+        other => panic!(
+            "Expected ClaudeCodeError::UnsupportedPlatform, got {:?}",
+            other
+        ),
+    }
+
+    let standard_policy = SandboxPolicy::standard();
+    let standard_res = ProcessContainment::new(standard_policy);
+    assert!(
+        standard_res.is_err(),
+        "Standard sandbox must fail closed on non-Windows platforms"
+    );
+    match standard_res.err().unwrap() {
+        ClaudeCodeError::UnsupportedPlatform(msg) => {
+            assert!(
+                msg.contains("Standard") && msg.contains("unavailable"),
+                "Expected UnsupportedPlatform explaining unavailable containment: {msg}"
+            );
+        }
+        other => panic!(
+            "Expected ClaudeCodeError::UnsupportedPlatform, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 #[cfg(windows)]
 fn test_sandbox_standard_creates_win32_job_object_with_kill_on_close() {
     let policy = SandboxPolicy::standard();

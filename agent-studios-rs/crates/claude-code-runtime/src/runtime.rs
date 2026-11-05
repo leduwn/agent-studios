@@ -747,12 +747,8 @@ pub fn classify_exit_status(
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        if let Some(ref s) = status {
-            if let Some(sig) = s.signal() {
-                if sig == 2 || sig == 15 {
-                    return (RuntimeLifecycleState::Stopped, RuntimeEventKind::Stopped);
-                }
-            }
+        if let Some(2 | 15) = status.and_then(|s| s.signal()) {
+            return (RuntimeLifecycleState::Stopped, RuntimeEventKind::Stopped);
         }
     }
     classify_exit_code(status.and_then(|s| s.code()), stderr)

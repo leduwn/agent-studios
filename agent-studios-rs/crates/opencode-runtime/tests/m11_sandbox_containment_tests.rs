@@ -41,6 +41,36 @@ fn test_strict_fails_closed_without_filesystem_isolation() {
 }
 
 #[test]
+fn test_standard_fails_closed_on_non_windows_without_job_objects() {
+    let standard_policy = SandboxPolicy::standard();
+    assert_eq!(standard_policy.level, SandboxLevel::Standard);
+
+    let containment_res = ProcessContainment::new(standard_policy);
+    #[cfg(windows)]
+    assert!(
+        containment_res.is_ok(),
+        "SandboxLevel::Standard must initialize successfully on Windows"
+    );
+
+    #[cfg(not(windows))]
+    {
+        assert!(
+            containment_res.is_err(),
+            "SandboxLevel::Standard must fail closed on non-Windows"
+        );
+        match containment_res.err().unwrap() {
+            OpenCodeError::UnsupportedPlatform(msg) => {
+                assert!(
+                    msg.contains("OS-level containment") || msg.contains("Failing closed"),
+                    "Expected unsupported platform failure message, got: {msg}"
+                );
+            }
+            other => panic!("Expected UnsupportedPlatform, got: {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_unconstrained_sandbox_policy() {
     let unconstrained = SandboxPolicy::unconstrained();
     assert_eq!(unconstrained.level, SandboxLevel::None);
@@ -177,7 +207,12 @@ async fn test_spawn_invalid_binary_fails_immediately() {
         "non_existent_opencode_binary_xyz_123.exe",
         std::env::temp_dir(),
     )
-    .with_startup_timeout(Duration::from_millis(500));
+    .with_startup_timeout(Duration::from_millis(500))
+    .with_sandbox_policy(if cfg!(windows) {
+        SandboxPolicy::default()
+    } else {
+        SandboxPolicy::unconstrained()
+    });
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;
@@ -206,7 +241,12 @@ async fn test_early_child_crash_detected_without_hanging() {
     let binary = "false";
 
     let config = OpenCodeServerConfig::new(binary, std::env::temp_dir())
-        .with_startup_timeout(Duration::from_secs(5));
+        .with_startup_timeout(Duration::from_secs(5))
+        .with_sandbox_policy(if cfg!(windows) {
+            SandboxPolicy::default()
+        } else {
+            SandboxPolicy::unconstrained()
+        });
 
     let start = std::time::Instant::now();
     let res = spawn_opencode_server(config).await;
