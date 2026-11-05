@@ -168,6 +168,7 @@ impl CoordinatorPlanValidator {
                 dependency_keys: planned.depends_on.clone(),
                 dependency_task_ids: Vec::new(),
                 dependency_output_policy: planned.dependency_output_policy,
+                execution: None,
             });
         }
 

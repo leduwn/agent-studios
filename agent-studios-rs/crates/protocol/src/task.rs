@@ -130,6 +130,8 @@ pub struct TaskRecord {
     pub retry_count: u32,
     #[serde(default)]
     pub dependency_output_policy: DependencyOutputPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<TaskExecutionSpec>,
 }
 
 impl TaskRecord {
@@ -162,11 +164,81 @@ impl TaskRecord {
             updated_at: created_at,
             retry_count: 0,
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         }
     }
 
     pub fn with_dependency_output_policy(mut self, policy: DependencyOutputPolicy) -> Self {
         self.dependency_output_policy = policy;
+        self
+    }
+
+    pub fn with_execution(mut self, execution: TaskExecutionSpec) -> Self {
+        self.execution = Some(execution);
+        self
+    }
+}
+
+/// Version-aware execution specification for per-task routing (M15).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TaskExecutionSpec {
+    /// Explicit initial prompt for the runtime. Overrides synthesis from title + description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
+
+    /// Target repository path or authorized workspace identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_path: Option<String>,
+
+    /// Target runtime instance identifier (e.g. "opencode-local-01").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_instance_id: Option<String>,
+
+    /// Target runtime implementation preference (e.g. "opencode", "claude_code").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_preference: Option<String>,
+
+    /// Target provider instance identifier (e.g. "prov-openai-01").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_instance_id: Option<String>,
+
+    /// Target model identifier (e.g. "gpt-4o-mini").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+impl TaskExecutionSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_initial_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.initial_prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn with_repository_path(mut self, path: impl Into<String>) -> Self {
+        self.repository_path = Some(path.into());
+        self
+    }
+
+    pub fn with_runtime_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        self.runtime_instance_id = Some(instance_id.into());
+        self
+    }
+
+    pub fn with_runtime_preference(mut self, pref: impl Into<String>) -> Self {
+        self.runtime_preference = Some(pref.into());
+        self
+    }
+
+    pub fn with_provider_instance_id(mut self, prov_id: impl Into<String>) -> Self {
+        self.provider_instance_id = Some(prov_id.into());
+        self
+    }
+
+    pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
+        self.model_id = Some(model_id.into());
         self
     }
 }
@@ -186,4 +258,13 @@ pub struct BatchTaskSpec {
     pub dependency_task_ids: Vec<TaskId>,
     #[serde(default)]
     pub dependency_output_policy: DependencyOutputPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<TaskExecutionSpec>,
+}
+
+impl BatchTaskSpec {
+    pub fn with_execution(mut self, execution: TaskExecutionSpec) -> Self {
+        self.execution = Some(execution);
+        self
+    }
 }

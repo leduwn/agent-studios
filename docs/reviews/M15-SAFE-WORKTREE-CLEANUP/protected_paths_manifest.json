@@ -1,0 +1,68 @@
+{
+    "manifest_version":  "1.1.0",
+    "timestamp":  "2026-11-05T08:50:00Z",
+    "audit_phase":  "PHASE_A_NON_DESTRUCTIVE_AUDIT",
+    "canonical_repository":  "D:\\Projects\\agent-studios",
+    "unified_branch":  "integration/m15-unified-codebase",
+    "canonical_head":  "583b2ff29dcae508c3ef03c777fa67e73859c718",
+    "protected_directories":  [
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios",
+                                      "classification":  "CANONICAL_MONOREPO_ROOT",
+                                      "branch":  "integration/m15-unified-codebase",
+                                      "head_sha":  "583b2ff29dcae508c3ef03c777fa67e73859c718",
+                                      "protection_rule":  "NEVER_DELETE_PERMANENT_ROOT",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-unified-staging",
+                                      "classification":  "UNIFIED_STAGING_WORKTREE",
+                                      "branch":  "detached at 843be62033",
+                                      "head_sha":  "843be620336de461b77708543dee5edd55e6f34e",
+                                      "protection_rule":  "NEVER_DELETE_PHASE_A",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-m15-04",
+                                      "classification":  "AUTHORITATIVE_BACKEND_WORKTREE",
+                                      "branch":  "feat/m15-04-durable-state-recovery",
+                                      "head_sha":  "cf1e6c0f98d568ed0b4c9da9ecf80c6d3eea456d",
+                                      "protection_rule":  "NEVER_DELETE_HOLD_PR30",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-ide-ui",
+                                      "classification":  "AUTHORITATIVE_FRONTEND_WORKTREE",
+                                      "branch":  "feat/m15-real-agent-execution-ui",
+                                      "head_sha":  "3de7c85a966d1b46a293235b11170219d53cc7f3",
+                                      "protection_rule":  "NEVER_DELETE_HOLD_PR27",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-mission-control",
+                                      "classification":  "MISSION_CONTROL_HOLD_WORKTREE",
+                                      "branch":  "feat/m14-mission-control-workbench",
+                                      "head_sha":  "3ee485cacdbf93285741b0b7538be2cb932e6750",
+                                      "protection_rule":  "NEVER_DELETE_DIVERGENT_HISTORY",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-ags-cli",
+                                      "classification":  "INDEPENDENT_CLI_TUI_WORKTREE",
+                                      "branch":  "feat/provider-management-v1",
+                                      "head_sha":  "a98129ef7e6f8ca3e309cbdd4e55e5108ca7dc62",
+                                      "protection_rule":  "NEVER_DELETE_INDEPENDENT_WORK",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  },
+                                  {
+                                      "path":  "D:\\Projects\\agent-studios-preservation",
+                                      "classification":  "EXTERNAL_PRESERVATION_DIRECTORY",
+                                      "branch":  "feat/provider-discovery-v1.2-wip (commit 96dfb4946e)",
+                                      "head_sha":  "96dfb4946ef77a06bb075bd8e22d3641c3ecfe88",
+                                      "protection_rule":  "NEVER_DELETE_CRYPTOGRAPHIC_BACKUP",
+                                      "status":  "VERIFIED_ACTIVE"
+                                  }
+                              ],
+    "audited_baseline_head":  "224f0bf486021afcf3d0773d4fc5fd6c86578411",
+    "documentation_head":  "583b2ff29dcae508c3ef03c777fa67e73859c718"
+}

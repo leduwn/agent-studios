@@ -1,0 +1,114 @@
+{
+    "manifest_version":  "1.1.0",
+    "timestamp":  "2026-11-05T08:50:00Z",
+    "git_common_dir":  "D:\\Projects\\agent-studios\\.git",
+    "canonical_root":  "D:\\Projects\\agent-studios",
+    "worktrees_on_drive_d":  [
+                                 {
+                                     "path":  "D:/Projects/agent-studios",
+                                     "head_sha":  "583b2ff29dcae508c3ef03c777fa67e73859c718",
+                                     "short_head":  "583b2ff29d",
+                                     "branch":  "refs/heads/integration/m15-unified-codebase",
+                                     "classification":  "CANONICAL_MONOREPO_ROOT",
+                                     "status":  "PROTECTED_PERMANENT"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-unified-staging",
+                                     "head_sha":  "843be620336de461b77708543dee5edd55e6f34e",
+                                     "short_head":  "843be62033",
+                                     "branch":  "detached",
+                                     "classification":  "UNIFIED_STAGING_WORKTREE",
+                                     "status":  "PROTECTED_HOLD"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-m15-04",
+                                     "head_sha":  "cf1e6c0f98d568ed0b4c9da9ecf80c6d3eea456d",
+                                     "short_head":  "cf1e6c0f98",
+                                     "branch":  "refs/heads/feat/m15-04-durable-state-recovery",
+                                     "classification":  "AUTHORITATIVE_BACKEND_WORKTREE",
+                                     "status":  "PROTECTED_HOLD"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-ide-ui",
+                                     "head_sha":  "3de7c85a966d1b46a293235b11170219d53cc7f3",
+                                     "short_head":  "3de7c85a96",
+                                     "branch":  "refs/heads/feat/m15-real-agent-execution-ui",
+                                     "classification":  "AUTHORITATIVE_FRONTEND_WORKTREE",
+                                     "status":  "PROTECTED_HOLD"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-mission-control",
+                                     "head_sha":  "3ee485cacdbf93285741b0b7538be2cb932e6750",
+                                     "short_head":  "3ee485cacd",
+                                     "branch":  "refs/heads/feat/m14-mission-control-workbench",
+                                     "classification":  "MISSION_CONTROL_HOLD_WORKTREE",
+                                     "status":  "PROTECTED_HOLD"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-ags-cli",
+                                     "head_sha":  "a98129ef7e6f8ca3e309cbdd4e55e5108ca7dc62",
+                                     "short_head":  "a98129ef7e",
+                                     "branch":  "refs/heads/feat/provider-management-v1",
+                                     "classification":  "INDEPENDENT_CLI_TUI_WORKTREE",
+                                     "status":  "PROTECTED_INDEPENDENT"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-m13",
+                                     "head_sha":  "ce0396c1f165760fa007e9d727b9175fc1c8e100",
+                                     "short_head":  "ce0396c1f1",
+                                     "branch":  "refs/heads/feat/m13-ipc-02-control-plane",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-m15",
+                                     "head_sha":  "a5dbbfc5ebada25c2dd582e26955a16ff2581691",
+                                     "short_head":  "a5dbbfc5eb",
+                                     "branch":  "refs/heads/feat/m15-01-per-task-execution-contract",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-m15-02",
+                                     "head_sha":  "b307b9a6e2bea510526084fe43e74be8d32b8455",
+                                     "short_head":  "b307b9a6e2",
+                                     "branch":  "refs/heads/feat/m15-02-multi-runtime-registry",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-m15-03",
+                                     "head_sha":  "cc1c3e8f398a5ac4353c7a36c927fec63be9135d",
+                                     "short_head":  "cc1c3e8f39",
+                                     "branch":  "refs/heads/feat/m15-03-artifact-diff-review",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-vscode-m14-02",
+                                     "head_sha":  "ed80b243c9e9fcecf7f329971bc9d64a2c918231",
+                                     "short_head":  "ed80b243c9",
+                                     "branch":  "refs/heads/feat/m14-vscode-extension-host-hardening",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-vscode-ipc-03",
+                                     "head_sha":  "73b7298ca38cd0e386ce0552b47ea1e3fe11ad57",
+                                     "short_head":  "73b7298ca3",
+                                     "branch":  "refs/heads/feat/m14-ipc-03-connected-client",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 },
+                                 {
+                                     "path":  "D:/Projects/agent-studios-mission-control-integration",
+                                     "head_sha":  "a13230ee93afd10787e9cf2ef7ebdb3e33bce36c",
+                                     "short_head":  "a13230ee93",
+                                     "branch":  "refs/heads/feat/m14-mission-control-connected-integration",
+                                     "classification":  "APPROVED_CLEANUP_CANDIDATE",
+                                     "status":  "AWAITING_OPERATOR_APPROVAL"
+                                 }
+                             ],
+    "audited_baseline_head":  "224f0bf486021afcf3d0773d4fc5fd6c86578411",
+    "documentation_head":  "583b2ff29dcae508c3ef03c777fa67e73859c718"
+}

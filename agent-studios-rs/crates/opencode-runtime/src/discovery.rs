@@ -98,13 +98,21 @@ pub async fn discover_opencode_binary(
     }
 }
 
-fn resolve_binary_path(config: &OpenCodeDiscoveryConfig) -> Option<PathBuf> {
+pub(crate) fn resolve_binary_path(config: &OpenCodeDiscoveryConfig) -> Option<PathBuf> {
     if let Some(path) = config.custom_binary_path.as_ref().filter(|p| p.is_file()) {
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
         return Some(canonical);
     }
 
     if let Ok(env_path) = std::env::var("OPENCODE_BIN") {
+        let p = PathBuf::from(env_path);
+        if p.is_file() {
+            let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            return Some(canonical);
+        }
+    }
+
+    if let Ok(env_path) = std::env::var("AGENT_STUDIOS_OPENCODE_PATH") {
         let p = PathBuf::from(env_path);
         if p.is_file() {
             let canonical = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());

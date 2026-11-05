@@ -1,0 +1,94 @@
+name: Agent Studios M13 IPC CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'agent-studios-rs/**'
+      - '.github/workflows/agent-studios-m13-ipc-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'agent-studios-rs/**'
+      - '.github/workflows/agent-studios-m13-ipc-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_MIN_STACK: "8388608"
+
+jobs:
+  ipc-quality-gate:
+    name: M13 IPC Quality Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: agent-studios-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "agent-studios-rs -> target"
+
+      - name: Check Formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo fmt -p agent-studios-control-plane -- --check
+          cargo fmt -p agent-studios-protocol -- --check
+          cargo fmt -p agent-studios-workspace -- --check
+          cargo fmt -p agent-studios-external-runtime -- --check
+          cargo fmt -p agent-studios-ipc-protocol -- --check
+          cargo fmt -p agent-studios-ipc-transport -- --check
+
+      - name: Cargo Check (all targets)
+        run: |
+          cargo check -p agent-studios-control-plane --all-targets
+          cargo check -p agent-studios-protocol --all-targets
+          cargo check -p agent-studios-workspace --all-targets
+          cargo check -p agent-studios-external-runtime --all-targets
+          cargo check -p agent-studios-ipc-protocol --all-targets
+          cargo check -p agent-studios-ipc-transport --all-targets
+
+      - name: Cargo Clippy
+        run: |
+          cargo clippy -p agent-studios-control-plane --all-targets -- -D warnings
+          cargo clippy -p agent-studios-protocol --all-targets -- -D warnings
+          cargo clippy -p agent-studios-workspace --all-targets -- -D warnings
+          cargo clippy -p agent-studios-external-runtime --all-targets -- -D warnings
+          cargo clippy -p agent-studios-ipc-protocol --all-targets -- -D warnings
+          cargo clippy -p agent-studios-ipc-transport --all-targets -- -D warnings
+
+      - name: Cargo Test
+        run: |
+          cargo test -p agent-studios-control-plane
+          cargo test -p agent-studios-protocol
+          cargo test -p agent-studios-workspace
+          cargo test -p agent-studios-external-runtime
+          cargo test -p agent-studios-ipc-protocol
+          cargo test -p agent-studios-ipc-transport

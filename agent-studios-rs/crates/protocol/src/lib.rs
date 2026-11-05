@@ -13,7 +13,9 @@ pub mod worktree;
 
 pub use agent::{AgentDescriptor, AgentKind, AgentState};
 pub use approval::{ApprovalKind, ApprovalRequest, ApprovalState};
-pub use artifact::{ArtifactFamilyKey, ArtifactKind, ArtifactRecord};
+pub use artifact::{
+    ArtifactFamilyKey, ArtifactKind, ArtifactRecord, DiffSummary, TaskDiffResponse,
+};
 pub use cancellation::{CancellationScope, CancellationSummary};
 pub use error::{IdParseError, TransitionError};
 pub use event::{ControlPlaneEvent, EventEnvelope};

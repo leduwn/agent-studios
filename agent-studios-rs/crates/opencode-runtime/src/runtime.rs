@@ -180,16 +180,8 @@ impl AgentRuntime for OpenCodeRuntime {
                 .map_err(RuntimeError::from)?;
             (client, None)
         } else {
-            // Resolve binary
-            let binary_path = self
-                .discovery_config
-                .custom_binary_path
-                .clone()
-                .or_else(|| {
-                    std::env::var("OPENCODE_BIN")
-                        .ok()
-                        .map(std::path::PathBuf::from)
-                })
+            // Resolve binary using unified discovery logic with sanitization and validation
+            let binary_path = crate::discovery::resolve_binary_path(&self.discovery_config)
                 .unwrap_or_else(|| std::path::PathBuf::from("opencode"));
 
             let mut server_cfg = OpenCodeServerConfig::new(binary_path, &context.working_directory);

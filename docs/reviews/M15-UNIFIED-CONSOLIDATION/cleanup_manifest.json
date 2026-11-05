@@ -1,0 +1,251 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "generated_at": "2026-11-04T05:30:00Z",
+  "milestone": "M15-CONSOLIDATION",
+  "operator_approval_required": true,
+  "safety_gate_status": "LOCKED",
+  "execution_mode": "DRY_RUN_ONLY",
+  "total_directories_scanned": 12,
+  "canonical_worktree": "D:\\Projects\\agent-studios",
+  "integration_staging_worktree": "D:\\Projects\\agent-studios-unified-staging",
+  "worktrees": [
+    {
+      "path": "D:\\Projects\\agent-studios",
+      "classification": "CANONICAL_CANDIDATE",
+      "branch": "feat/m12-claude-code-runtime",
+      "commit": "3207b7462f9e3055ceee6996c4bfc914cf26fae7",
+      "disk_size_bytes": 1056382976,
+      "disk_size_human": "1.01 GB",
+      "git_status": "DIRTY_TRACKED_AND_UNTRACKED",
+      "untracked_files_count": 6,
+      "untracked_files": [
+        "01_LOCAL_DIRECTORY_INVENTORY.md",
+        "09_SAFE_WORKTREE_CLEANUP_PLAN.md",
+        "AGENTS.md",
+        "inventory_manifest.json",
+        "crates/provider/src/discovery.rs",
+        "crates/provider/tests/discovery_tests.rs"
+      ],
+      "active_processes": ["node.exe", "claude.exe"],
+      "safe_to_delete": false,
+      "risk_level": "CRITICAL_DO_NOT_DELETE",
+      "recommended_action": "RETAIN_AS_CANONICAL_ROOT",
+      "notes": "Main repository root holding .git object database, uncommitted provider changes, and session history."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-unified-staging",
+      "classification": "ACTIVE_WORKTREE",
+      "branch": "integration/m15-unified-codebase",
+      "commit": "PENDING_COMMIT",
+      "disk_size_bytes": 320984128,
+      "disk_size_human": "306 MB",
+      "git_status": "STAGING_WORKSPACE",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "CRITICAL_DO_NOT_DELETE",
+      "recommended_action": "RETAIN_ACTIVE_INTEGRATION_TARGET",
+      "notes": "Staging worktree holding the consolidated codebase and M15 audit documentation."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-m15-04",
+      "classification": "ACTIVE_WORKTREE",
+      "branch": "feat/m15-04-durable-state-recovery",
+      "commit": "cf1e6c0f98d568ed0b4c9da9ecf80c6d3eea456d",
+      "disk_size_bytes": 4983271424,
+      "disk_size_human": "4.64 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW_AFTER_PR_MERGE",
+      "recommended_action": "ARCHIVE_AFTER_OPERATOR_SIGN_OFF",
+      "prerequisites": [
+        "Operator approval of M15 consolidation",
+        "PR #30 merged or subsumed by integration branch PR"
+      ],
+      "notes": "Authoritative backend tip for M15-04 durable state and crash recovery."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-ide-ui",
+      "classification": "ACTIVE_WORKTREE",
+      "branch": "feat/m15-real-agent-execution-ui",
+      "commit": "3de7c85a966d1b46a293235b11170219d53cc7f3",
+      "disk_size_bytes": 483291136,
+      "disk_size_human": "461 MB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW_AFTER_PR_MERGE",
+      "recommended_action": "ARCHIVE_AFTER_OPERATOR_SIGN_OFF",
+      "prerequisites": [
+        "Operator approval of M15 consolidation",
+        "PR #27 merged or subsumed by integration branch PR"
+      ],
+      "notes": "Authoritative frontend tip for M15 real agent execution UI and connected client."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-m15-03",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m15-03-artifact-diff-review",
+      "commit": "cc1c3e8f39ae625419163c473ae671f654b9d0dc",
+      "disk_size_bytes": 4829184000,
+      "disk_size_human": "4.50 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that cc1c3e8f is an ancestor of cf1e6c0f"
+      ],
+      "notes": "Fully subsumed by M15-04."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-m15-02",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m15-02-multi-runtime-registry",
+      "commit": "b307b9a6e27b40106a72bbf6a642876615b14e05",
+      "disk_size_bytes": 4812390400,
+      "disk_size_human": "4.48 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that b307b9a6 is an ancestor of cf1e6c0f"
+      ],
+      "notes": "Fully subsumed by M15-03 and M15-04."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-m15",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m15-01-per-task-execution-contract",
+      "commit": "a5dbbfc5eb457310ba0bbd0c9f80210fbe047ee2",
+      "disk_size_bytes": 4801126400,
+      "disk_size_human": "4.47 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that a5dbbfc5 is an ancestor of cf1e6c0f"
+      ],
+      "notes": "Fully subsumed by downstream M15 commits."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-m13",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m13-ipc-02-control-plane",
+      "commit": "ce0396c1f1ec4f74d08b3baea17696c21e67e3fc",
+      "disk_size_bytes": 4789248000,
+      "disk_size_human": "4.46 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that ce0396c1 is an ancestor of cf1e6c0f"
+      ],
+      "notes": "Fully subsumed by M15 backend worktrees."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-mission-control",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m14-mission-control-workbench",
+      "commit": "3ee485cacda2e5e7fa9dfceeeaa9f4935fa7cbe9",
+      "disk_size_bytes": 451993600,
+      "disk_size_human": "431 MB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that 3ee485ca commits are merged into 3de7c85a"
+      ],
+      "notes": "All 3 commits fully subsumed in PR #27."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-mission-control-integration",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m14-mission-control-connected-integration",
+      "commit": "a13230ee979be6a89c31ae7676778f237f3747ff",
+      "disk_size_bytes": 455270400,
+      "disk_size_human": "434 MB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that a13230ee is an ancestor of 3de7c85a"
+      ],
+      "notes": "Fully subsumed by PR #27."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-vscode-ipc-03",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m14-ipc-03-connected-client",
+      "commit": "73b7298cd4a12368c5b058fa1a812fc4aeaa5d44",
+      "disk_size_bytes": 448204800,
+      "disk_size_human": "427 MB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that 73b7298c is an ancestor of 3de7c85a"
+      ],
+      "notes": "Fully subsumed by PR #27."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-vscode-m14-02",
+      "classification": "SAFE_TO_ARCHIVE_CANDIDATE",
+      "branch": "feat/m14-vscode-extension-host-hardening",
+      "commit": "ed80b243bfa99052a657c9197c369fc6e232fe08",
+      "disk_size_bytes": 442101760,
+      "disk_size_human": "421 MB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "LOW",
+      "recommended_action": "SAFE_TO_REMOVE_WORKTREE_AFTER_APPROVAL",
+      "prerequisites": [
+        "Operator confirmation that ed80b243 is an ancestor of 3de7c85a"
+      ],
+      "notes": "Fully subsumed by PR #27."
+    },
+    {
+      "path": "D:\\Projects\\agent-studios-ags-cli",
+      "classification": "INDEPENDENT_PROJECT",
+      "branch": "feat/provider-management-v1",
+      "commit": "a98129ef7e6f3ebc441aa37eb15e9668ad5493b8",
+      "disk_size_bytes": 4912906240,
+      "disk_size_human": "4.57 GB",
+      "git_status": "CLEAN",
+      "untracked_files_count": 0,
+      "active_processes": [],
+      "safe_to_delete": false,
+      "risk_level": "MEDIUM",
+      "recommended_action": "MANUAL_OPERATOR_REVIEW_AND_SEPARATE_MERGE",
+      "prerequisites": [
+        "Operator decision on standalone CLI vs integrated daemon crate"
+      ],
+      "notes": "Contains provider discovery & CLI management v1.2 (PR #20). Safe on remote."
+    }
+  ]
+}

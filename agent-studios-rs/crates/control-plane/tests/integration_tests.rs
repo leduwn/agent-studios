@@ -71,6 +71,10 @@ impl EventStore for FailingEventStore {
     fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         self.inner.all_events()
     }
+
+    fn event_count(&self) -> Result<usize, StoreError> {
+        self.inner.event_count()
+    }
 }
 
 // ============================================================================
@@ -1307,6 +1311,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "task_b".to_string(),
@@ -1318,6 +1323,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec!["task_a".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "task_c".to_string(),
@@ -1329,6 +1335,7 @@ fn test_create_task_batch_success() {
             dependency_keys: vec!["task_b".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 
@@ -1374,6 +1381,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t2".to_string(),
@@ -1385,6 +1393,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["t1".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t3".to_string(),
@@ -1396,6 +1405,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["t2".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "t4".to_string(),
@@ -1407,6 +1417,7 @@ fn test_create_task_batch_transactional_all_or_zero() {
             dependency_keys: vec!["non_existent_key".to_string()],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 
@@ -1440,6 +1451,7 @@ fn test_create_task_batch_duplicate_key_rejected() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
         BatchTaskSpec {
             key: "same_key".to_string(),
@@ -1451,12 +1463,242 @@ fn test_create_task_batch_duplicate_key_rejected() {
             dependency_keys: vec![],
             dependency_task_ids: vec![],
             dependency_output_policy: DependencyOutputPolicy::TaskSuccess,
+            execution: None,
         },
     ];
 
     let result = cp.create_task_batch(studio.id, batch);
     assert!(result.is_err());
     assert_eq!(cp.all_tasks().count(), 0);
+}
+
+#[test]
+fn test_control_plane_sqlite_restore_from_store_and_resume_mutations() {
+    use agent_studios_control_plane::sqlite_store::SqliteEventStore;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("control_plane.db");
+    let now = Utc::now();
+
+    let studio_id;
+    let agent_id;
+    let task_id;
+    let run_id;
+
+    // 1. Initial execution before simulated restart
+    {
+        let store = SqliteEventStore::open(&db_path).unwrap();
+        let mut cp = ControlPlane::new(FixedClock::new(now), store);
+
+        let studio = cp.create_studio("Durable Studio").unwrap();
+        studio_id = studio.id;
+
+        let agent = cp
+            .register_agent(studio_id, "Worker Agent", AgentKind::Internal, None)
+            .unwrap();
+        agent_id = agent.id;
+
+        let task = cp
+            .create_task(
+                studio_id,
+                "Durable Task",
+                "Task Description",
+                None,
+                Some(agent_id),
+                vec![],
+            )
+            .unwrap();
+        task_id = task.id;
+
+        let run = cp.create_run(task_id, agent_id).unwrap();
+        run_id = run.id;
+
+        assert_eq!(cp.events_for_studio(studio_id, 1).unwrap().len(), 4);
+    }
+
+    // 2. Simulate daemon restart and restore from SQLite store
+    {
+        let store = SqliteEventStore::open(&db_path).unwrap();
+        let mut restored_cp =
+            ControlPlane::restore_from_store(FixedClock::new(now), store).unwrap();
+
+        // Verify entities reconstructed without duplicating store entries
+        assert!(restored_cp.get_studio(studio_id).is_some());
+        assert_eq!(
+            restored_cp.get_studio(studio_id).unwrap().name,
+            "Durable Studio"
+        );
+
+        assert!(restored_cp.get_agent(agent_id).is_some());
+        assert_eq!(
+            restored_cp.get_agent(agent_id).unwrap().display_name,
+            "Worker Agent"
+        );
+
+        let task = restored_cp.get_task(task_id).unwrap();
+        assert_eq!(task.title, "Durable Task");
+
+        let run = restored_cp.get_run(run_id).unwrap();
+        assert_eq!(run.task_id, task_id);
+
+        let events = restored_cp.events_for_studio(studio_id, 1).unwrap();
+        assert_eq!(events.len(), 4);
+
+        // 3. Verify subsequent mutations succeed with correct monotonic sequences
+        let second_task = restored_cp
+            .create_task(studio_id, "Second Task", "", None, None, vec![])
+            .unwrap();
+        assert_eq!(second_task.title, "Second Task");
+
+        let events_after = restored_cp.events_for_studio(studio_id, 1).unwrap();
+        assert_eq!(events_after.len(), 5);
+        assert_eq!(events_after.last().unwrap().sequence, 5);
+    }
+}
+
+#[test]
+fn test_control_plane_events_tail_and_slice() {
+    use agent_studios_control_plane::sqlite_store::SqliteEventStore;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("bounded_events.db");
+    let now = Utc::now();
+
+    let store = SqliteEventStore::open(&db_path).unwrap();
+    let mut cp = ControlPlane::new(FixedClock::new(now), store);
+
+    let studio = cp.create_studio("Bounded Studio").unwrap();
+    let agent = cp
+        .register_agent(studio.id, "Agent 1", AgentKind::Internal, None)
+        .unwrap();
+
+    for i in 1..=5 {
+        cp.create_task(
+            studio.id,
+            format!("Task {i}"),
+            "Task desc",
+            None,
+            Some(agent.id),
+            vec![],
+        )
+        .unwrap();
+    }
+
+    // Total events: StudioCreated(1) + AgentRegistered(2) + 5 Tasks(3..=7) = 7 events
+    assert_eq!(cp.event_count().unwrap(), 7);
+
+    // events_tail(3) returns the last 3 events (sequences 5, 6, 7)
+    let tail_3 = cp.events_tail(3).unwrap();
+    assert_eq!(tail_3.len(), 3);
+    assert_eq!(tail_3[0].sequence, 5);
+    assert_eq!(tail_3[1].sequence, 6);
+    assert_eq!(tail_3[2].sequence, 7);
+
+    // events_slice(0, 2) returns first 2 events
+    let slice_head = cp.events_slice(0, 2).unwrap();
+    assert_eq!(slice_head.len(), 2);
+    assert_eq!(slice_head[0].sequence, 1);
+    assert_eq!(slice_head[1].sequence, 2);
+
+    // events_slice(4, 10) returns remaining 3 events
+    let slice_tail = cp.events_slice(4, 10).unwrap();
+    assert_eq!(slice_tail.len(), 3);
+    assert_eq!(slice_tail[0].sequence, 5);
+    assert_eq!(slice_tail[2].sequence, 7);
+}
+
+#[test]
+fn test_control_plane_reconcile_interrupted_executions() {
+    use agent_studios_control_plane::sqlite_store::SqliteEventStore;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("recovery_interrupted.db");
+    let now = Utc::now();
+
+    let studio_id;
+    let task_id;
+    let run_id;
+
+    // 1. Setup running task and running run
+    {
+        let store = SqliteEventStore::open(&db_path).unwrap();
+        let mut cp = ControlPlane::new(FixedClock::new(now), store);
+
+        let studio = cp.create_studio("Crash Studio").unwrap();
+        studio_id = studio.id;
+
+        let agent = cp
+            .register_agent(studio_id, "Active Agent", AgentKind::Internal, None)
+            .unwrap();
+
+        let task = cp
+            .create_task(studio_id, "Active Task", "", None, Some(agent.id), vec![])
+            .unwrap();
+        task_id = task.id;
+
+        let run = cp.create_run(task_id, agent.id).unwrap();
+        run_id = run.id;
+
+        // Transition run to Starting then Running
+        cp.transition_run_state(run_id, RunState::Starting).unwrap();
+        cp.transition_run_state(run_id, RunState::Running).unwrap();
+
+        // Transition task to Running
+        cp.transition_task_state(task_id, TaskState::Running)
+            .unwrap();
+
+        assert_eq!(cp.get_task(task_id).unwrap().state, TaskState::Running);
+        assert_eq!(cp.get_run(run_id).unwrap().state, RunState::Running);
+    }
+
+    // 2. Restart and reconcile
+    {
+        let store = SqliteEventStore::open(&db_path).unwrap();
+        let mut cp = ControlPlane::restore_from_store(FixedClock::new(now), store).unwrap();
+
+        assert_eq!(cp.get_task(task_id).unwrap().state, TaskState::Running);
+        assert_eq!(cp.get_run(run_id).unwrap().state, RunState::Running);
+
+        let (interrupted_tasks, interrupted_runs) = cp.reconcile_interrupted_executions().unwrap();
+        assert_eq!(interrupted_tasks, 1);
+        assert_eq!(interrupted_runs, 1);
+
+        // Verify task transitioned to Failed
+        let task = cp.get_task(task_id).unwrap();
+        assert_eq!(task.state, TaskState::Failed);
+
+        // Verify run transitioned to Failed
+        let run = cp.get_run(run_id).unwrap();
+        assert_eq!(run.state, RunState::Failed);
+
+        // Verify RunOutcomeRecorded audit event is persisted
+        let events = cp.events_for_studio(studio_id, 1).unwrap();
+        let has_interrupted_audit = events.iter().any(|env| match &env.event {
+            ControlPlaneEvent::RunOutcomeRecorded {
+                run_id: rid,
+                classification,
+                safe_error_summary,
+                ..
+            } => {
+                *rid == run_id
+                    && classification == "daemon_interrupted"
+                    && safe_error_summary
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("daemon_interrupted")
+            }
+            _ => false,
+        });
+        assert!(has_interrupted_audit);
+
+        // 3. Verify idempotency on second reconciliation pass
+        let (zero_tasks, zero_runs) = cp.reconcile_interrupted_executions().unwrap();
+        assert_eq!(zero_tasks, 0);
+        assert_eq!(zero_runs, 0);
+    }
 }
 
 #[test]
