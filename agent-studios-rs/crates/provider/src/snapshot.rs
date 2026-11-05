@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::ProviderCatalog;
 use crate::definition::ProviderDefinition;
 use crate::error::ProviderError;
+use crate::id::{ProviderId, ProviderInstanceId};
 use crate::instance::ProviderInstance;
 use crate::model::ModelDescriptor;
 
@@ -18,6 +21,8 @@ pub struct ProviderCatalogSnapshot {
     pub definitions: Vec<ProviderDefinition>,
     pub instances: Vec<ProviderInstance>,
     pub models: Vec<ModelDescriptor>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_instances: BTreeMap<ProviderId, ProviderInstanceId>,
 }
 
 impl ProviderCatalog {
@@ -34,12 +39,14 @@ impl ProviderCatalog {
             .cloned()
             .collect();
         let models = self.list_models().into_iter().cloned().collect();
+        let default_instances = self.default_instances().clone();
 
         ProviderCatalogSnapshot {
             schema_version: PROVIDER_CATALOG_SCHEMA_VERSION,
             definitions,
             instances,
             models,
+            default_instances,
         }
     }
 
@@ -67,6 +74,10 @@ impl ProviderCatalog {
 
         for model in snapshot.models {
             staged.register_model(model)?;
+        }
+
+        for (prov_id, inst_id) in snapshot.default_instances {
+            staged.set_default_instance_for_provider(&prov_id, &inst_id)?;
         }
 
         Ok(staged)
@@ -178,6 +189,7 @@ mod tests {
             definitions: vec![],
             instances: vec![],
             models: vec![orphaned_model],
+            default_instances: BTreeMap::new(),
         };
 
         let err = catalog.import_snapshot(bad_snapshot).unwrap_err();
@@ -195,6 +207,7 @@ mod tests {
             definitions: vec![],
             instances: vec![],
             models: vec![],
+            default_instances: BTreeMap::new(),
         };
         let err = ProviderCatalog::from_snapshot(bad_version).unwrap_err();
         assert_eq!(

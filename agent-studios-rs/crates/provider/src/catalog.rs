@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::builtin::builtin_definitions;
 use crate::definition::ProviderDefinition;
 use crate::error::ProviderError;
@@ -17,6 +19,7 @@ use crate::registry::{ModelRegistry, ProviderRegistry};
 pub struct ProviderCatalog {
     provider_registry: ProviderRegistry,
     model_registry: ModelRegistry,
+    default_instances: BTreeMap<ProviderId, ProviderInstanceId>,
 }
 
 impl ProviderCatalog {
@@ -65,7 +68,9 @@ impl ProviderCatalog {
         &mut self,
         id: &ProviderId,
     ) -> Result<ProviderDefinition, ProviderError> {
-        self.provider_registry.remove_provider_definition(id)
+        let def = self.provider_registry.remove_provider_definition(id)?;
+        self.default_instances.remove(id);
+        Ok(def)
     }
 
     pub fn list_provider_definitions(&self) -> Vec<&ProviderDefinition> {
@@ -109,7 +114,11 @@ impl ProviderCatalog {
                 model_count,
             });
         }
-        self.provider_registry.remove_provider_instance(id)
+        let instance = self.provider_registry.remove_provider_instance(id)?;
+        if self.default_instances.get(&instance.provider_id) == Some(id) {
+            self.default_instances.remove(&instance.provider_id);
+        }
+        Ok(instance)
     }
 
     /// Explicit cascade removal of a provider instance and all its associated models.
@@ -135,11 +144,72 @@ impl ProviderCatalog {
         }
 
         let instance = self.provider_registry.remove_provider_instance(id)?;
+        if self.default_instances.get(&instance.provider_id) == Some(id) {
+            self.default_instances.remove(&instance.provider_id);
+        }
         Ok((instance, removed_models))
     }
 
     pub fn list_provider_instances(&self) -> Vec<&ProviderInstance> {
         self.provider_registry.list_provider_instances()
+    }
+
+    /// Returns all registered provider instances belonging to a specific provider family in deterministic order.
+    pub fn get_instances_for_provider(&self, provider_id: &ProviderId) -> Vec<&ProviderInstance> {
+        self.provider_registry
+            .get_instances_for_provider(provider_id)
+    }
+
+    /// Returns the default provider instance configured for a specific provider family, if set.
+    pub fn get_default_instance_for_provider(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Option<&ProviderInstance> {
+        self.default_instances
+            .get(provider_id)
+            .and_then(|id| self.get_provider_instance(id))
+    }
+
+    /// Returns the default provider instance ID configured for a specific provider family, if set.
+    pub fn get_default_instance_id_for_provider(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Option<&ProviderInstanceId> {
+        self.default_instances.get(provider_id)
+    }
+
+    /// Configures the default provider instance for a specific provider family.
+    /// Fails if the instance does not exist or does not belong to the provider family.
+    pub fn set_default_instance_for_provider(
+        &mut self,
+        provider_id: &ProviderId,
+        instance_id: &ProviderInstanceId,
+    ) -> Result<(), ProviderError> {
+        let instance = self
+            .get_provider_instance(instance_id)
+            .ok_or(ProviderError::UnknownProviderInstance(*instance_id))?;
+        if &instance.provider_id != provider_id {
+            return Err(ProviderError::InvalidConfiguration(format!(
+                "Instance '{instance_id}' belongs to provider '{}', not '{provider_id}'",
+                instance.provider_id
+            )));
+        }
+        self.default_instances
+            .insert(provider_id.clone(), *instance_id);
+        Ok(())
+    }
+
+    /// Clears the default provider instance configuration for a specific provider family.
+    pub fn clear_default_instance_for_provider(
+        &mut self,
+        provider_id: &ProviderId,
+    ) -> Option<ProviderInstanceId> {
+        self.default_instances.remove(provider_id)
+    }
+
+    /// Returns read-only reference to the default instances map.
+    pub fn default_instances(&self) -> &BTreeMap<ProviderId, ProviderInstanceId> {
+        &self.default_instances
     }
 
     // ------------------------------------------------------------------------
@@ -191,5 +261,28 @@ impl ProviderCatalog {
 
     pub fn list_models(&self) -> Vec<&ModelDescriptor> {
         self.model_registry.list_models()
+    }
+
+    // ------------------------------------------------------------------------
+    // Configuration Importer Operations
+    // ------------------------------------------------------------------------
+
+    /// Previews importing configurations into this catalog without modifying state.
+    pub fn preview_import(
+        &self,
+        source_format: crate::importer::SourceFormat,
+        content: &str,
+        strategy: crate::importer::ConflictResolutionStrategy,
+    ) -> Result<crate::importer::ImportPreview, ProviderError> {
+        crate::importer::preview_import(self, source_format, content, strategy)
+    }
+
+    /// Atomically applies an import preview into this catalog.
+    pub fn apply_import(
+        &mut self,
+        preview: crate::importer::ImportPreview,
+        strategy: crate::importer::ConflictResolutionStrategy,
+    ) -> Result<crate::importer::ImportResult, ProviderError> {
+        crate::importer::apply_import(self, preview, strategy)
     }
 }
