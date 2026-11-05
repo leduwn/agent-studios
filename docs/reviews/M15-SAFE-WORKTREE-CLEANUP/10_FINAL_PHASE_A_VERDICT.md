@@ -6,7 +6,7 @@
 **Audit Outcome**: `PHASE_A_FINALIZED`  
 **Destructive Cleanup Status**: `PHASE_B_NOT_EXECUTED`  
 **Operational Gate**: `AWAITING_EXPLICIT_OPERATOR_APPROVAL`  
-**Manifest SHA-256**: `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`  
+**Manifest SHA-256**: `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`  
 
 ---
 

@@ -4,7 +4,7 @@
 **Date**: 2026-11-05  
 **Auditor**: Principal Git Repository Engineer, Windows Filesystem Safety Auditor  
 **Audit Phase**: PHASE A COMPLETE — AWAITING OPERATOR APPROVAL  
-**Manifest SHA-256**: `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`  
+**Manifest SHA-256**: `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`  
 
 ---
 
@@ -34,7 +34,7 @@ To execute Phase B and safely reclaim **~23.69 GB** of disk space, explicit oper
 ## 3. Cryptographic Verification & Manifest Binding
 
 - **Manifest Path**: `docs/reviews/M15-SAFE-WORKTREE-CLEANUP/cleanup_candidate_manifest.json`
-- **Manifest SHA-256**: `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`
+- **Manifest SHA-256**: `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`
 - **Audited Baseline HEAD**: `224f0bf486021afcf3d0773d4fc5fd6c86578411`
 - **Initial Documentation Commit**: `583b2ff29dcae508c3ef03c777fa67e73859c718`
 - **Ancestry Verification Policy**: Direct descendant of audited baseline `224f0bf486021afcf3d0773d4fc5fd6c86578411` with zero non-documentation diff (`git diff --name-only 224f0bf486021afcf3d0773d4fc5fd6c86578411 HEAD` must show only `docs/` files). No source code, tests, or configurations modified.
@@ -47,7 +47,7 @@ To execute Phase B and safely reclaim **~23.69 GB** of disk space, explicit oper
 To authorize Phase B destructive cleanup, the operator issues the following directive in a new prompt:
 
 ```text
-APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc
+APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339
 ```
 
 ---

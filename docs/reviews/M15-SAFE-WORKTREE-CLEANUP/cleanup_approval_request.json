@@ -1,4 +1,4 @@
-﻿{
+{
     "request_id":  "REQ-20261105-WORKTREE-CLEANUP-01",
     "timestamp":  "2026-11-05T09:00:00Z",
     "status":  "AWAITING_EXPLICIT_OPERATOR_APPROVAL",
@@ -11,8 +11,8 @@
     "ancestry_verification_policy":  "HEAD_DESCENDS_FROM_BASELINE_DOCS_ONLY_DIFF",
     "ancestry_verification_rule":  "Phase B execution pre-check verifies: (1) git merge-base --is-ancestor 224f0bf486021afcf3d0773d4fc5fd6c86578411 HEAD returns 0, and (2) git diff --name-only 224f0bf486021afcf3d0773d4fc5fd6c86578411 HEAD contains only docs/ paths (zero source code or configuration changes).",
     "manifest_relative_path":  "docs/reviews/M15-SAFE-WORKTREE-CLEANUP/cleanup_candidate_manifest.json",
-    "manifest_sha256":  "0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc",
-    "operator_approval_directive_template":  "APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc",
+    "manifest_sha256":  "3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339",
+    "operator_approval_directive_template":  "APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339",
     "allowlisted_candidates_count":  7,
     "total_recoverable_disk_mb":  24258.61,
     "total_recoverable_disk_gb":  23.69,

@@ -4,22 +4,22 @@
 **Date**: 2026-11-05  
 **Auditor**: Principal Git Repository Engineer, Windows Filesystem Safety Auditor  
 **Status**: STANDBY — REQUIRES EXPLICIT OPERATOR APPROVAL  
-**Approved Manifest SHA-256**: `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`  
+**Approved Manifest SHA-256**: `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`  
 
 ---
 
 ## 1. Safety Guard Notice
 
 **THIS PLAN MUST NOT BE EXECUTED DURING PHASE A.**  
-Execution is strictly restricted to Phase B following receipt of an explicit operator directive matching manifest SHA-256 `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`.
+Execution is strictly restricted to Phase B following receipt of an explicit operator directive matching manifest SHA-256 `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`.
 
 ---
 
 ## 2. Pre-Execution Verification Steps
 
 Before running any removal command in Phase B, verify:
-1. Operator approval string exactly matches: `APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`.
-2. Manifest integrity: `Get-FileHash docs/reviews/M15-SAFE-WORKTREE-CLEANUP/cleanup_candidate_manifest.json` matches SHA-256 `0ad2ef03f893b448a16e8a618bf916b93445967a0f3a50ef19c5b4827c9b58cc`.
+1. Operator approval string exactly matches: `APPROVE P0 CLEANUP PHASE B: 7 allowlisted worktrees, manifest SHA-256: 3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`.
+2. Manifest integrity: `Get-FileHash docs/reviews/M15-SAFE-WORKTREE-CLEANUP/cleanup_candidate_manifest.json` matches SHA-256 `3143bc38c54161adc8e2cc27598c8377826406e6557d35a45890827d9d76e339`.
 3. Canonical repository HEAD descends from audited baseline `224f0bf486021afcf3d0773d4fc5fd6c86578411` (`git merge-base --is-ancestor 224f0bf486021afcf3d0773d4fc5fd6c86578411 HEAD`), and `git diff --name-only 224f0bf486021afcf3d0773d4fc5fd6c86578411 HEAD` contains only paths under `docs/` (zero source code, tests, or configurations modified).
 4. Candidate worktrees remain 100% clean (`git -C <path> status --porcelain=v1` returns empty).
 5. Candidate worktree HEAD SHAs match expected values in the manifest.
