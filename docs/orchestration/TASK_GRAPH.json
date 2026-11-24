@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "baseline_branch": "integration/m15-1-joint-validation",
+  "baseline_sha": "5f7b5f525b7b5a56bccac2ea3cfd149d809e3f6c",
+  "worktree_path": "D:\\Projects\\agent-studios-active\\m15-1-joint-validation",
+  "tasks": [
+    {
+      "id": "W1-T1",
+      "wave": 1,
+      "title": "Merge PR #33 tip, unified docs, and build cache policy into joint-validation",
+      "agent": "Agent F (Release & DevOps)",
+      "dependencies": [],
+      "status": "done",
+      "allowed_scope": ["git merges only"]
+    },
+    {
+      "id": "W1-T2",
+      "wave": 1,
+      "title": "Create persistent orchestration control documents",
+      "agent": "Master Orchestrator",
+      "dependencies": ["W1-T1"],
+      "status": "in_progress",
+      "allowed_scope": ["docs/orchestration/**"]
+    },
+    {
+      "id": "W2-T1",
+      "wave": 2,
+      "title": "Implement ConnectedClient, connect_or_fallback, ClaudeCodeRuntime probing, and sandboxed local action execution in cli-client",
+      "agent": "Agent C (Runtime & Provider)",
+      "dependencies": ["W1-T2"],
+      "status": "pending",
+      "allowed_scope": [
+        "agent-studios-rs/crates/cli-client/Cargo.toml",
+        "agent-studios-rs/crates/cli-client/src/lib.rs",
+        "agent-studios-rs/crates/cli-client/src/runtime.rs",
+        "agent-studios-rs/crates/cli-client/src/connected.rs",
+        "agent-studios-rs/crates/cli-client/src/embedded.rs"
+      ]
+    },
+    {
+      "id": "W2-T2",
+      "wave": 2,
+      "title": "Implement ags run (--headless, --stdin, NDJSON, exit codes 0/1/2/3), ags daemon, and ags provider discover",
+      "agent": "Agent D (CLI & TUI)",
+      "dependencies": ["W2-T1"],
+      "status": "pending",
+      "allowed_scope": [
+        "agent-studios-rs/crates/cli/Cargo.toml",
+        "agent-studios-rs/crates/cli/src/main.rs",
+        "agent-studios-rs/crates/cli/src/commands/mod.rs",
+        "agent-studios-rs/crates/cli/src/commands/provider.rs",
+        "agent-studios-rs/crates/cli/src/commands/run.rs",
+        "agent-studios-rs/crates/cli/src/commands/daemon.rs"
+      ]
+    },
+    {
+      "id": "W2-T3",
+      "wave": 2,
+      "title": "Implement P0 real agent execution acceptance & CLI acceptance test suites",
+      "agent": "Agent E (Independent QA & Security)",
+      "dependencies": ["W2-T1", "W2-T2"],
+      "status": "pending",
+      "allowed_scope": [
+        "agent-studios-rs/crates/cli-client/tests/p0_real_execution_acceptance_tests.rs",
+        "agent-studios-rs/crates/cli/tests/cli_acceptance_tests.rs"
+      ]
+    },
+    {
+      "id": "W3-T1",
+      "wave": 3,
+      "title": "Implement agent-studios-extensibility crate (Skills, MCP, Hooks, Hierarchical Instructions) and CLI integration",
+      "agent": "Agent D & Agent A",
+      "dependencies": ["W2-T2"],
+      "status": "pending",
+      "allowed_scope": [
+        "agent-studios-rs/Cargo.toml",
+        "agent-studios-rs/crates/extensibility/**",
+        "agent-studios-rs/crates/cli/Cargo.toml",
+        "agent-studios-rs/crates/cli/src/main.rs",
+        "agent-studios-rs/crates/cli/src/commands/mod.rs",
+        "agent-studios-rs/crates/cli/src/commands/extensibility.rs"
+      ]
+    },
+    {
+      "id": "W4-T1",
+      "wave": 4,
+      "title": "Implement EN/VI localization bundles, UI/Agent language decoupling, and Windows canonical paths in VS Code extension",
+      "agent": "Agent B (Frontend & Desktop)",
+      "dependencies": ["W1-T2"],
+      "status": "pending",
+      "allowed_scope": [
+        "apps/agent-studios-vscode/package.json",
+        "apps/agent-studios-vscode/src/i18n/**",
+        "apps/agent-studios-vscode/src/config/**",
+        "apps/agent-studios-vscode/src/test/unit/LocalizationAndPaths.test.ts"
+      ]
+    },
+    {
+      "id": "W4-T2",
+      "wave": 4,
+      "title": "Implement M18 concurrency stress (12 workers, 1000+ turns, 100k events) & IPC/approval race security tests",
+      "agent": "Agent E (Independent QA & Security)",
+      "dependencies": ["W1-T2"],
+      "status": "pending",
+      "allowed_scope": [
+        "agent-studios-rs/crates/control-plane/tests/m18_stress_and_hardening_tests.rs",
+        "agent-studios-rs/crates/ipc-transport/tests/m18_concurrency_security_tests.rs"
+      ]
+    },
+    {
+      "id": "W4-T3",
+      "wave": 4,
+      "title": "Implement Windows x64 standalone bundle & installer scripts, product.json, and M19 release documentation",
+      "agent": "Agent F (Release & DevOps)",
+      "dependencies": ["W2-T2", "W3-T1", "W4-T1"],
+      "status": "pending",
+      "allowed_scope": [
+        "scripts/packaging/**",
+        "installer/windows/**",
+        "docs/release/**"
+      ]
+    },
+    {
+      "id": "W5-T1",
+      "wave": 5,
+      "title": "Execute mandatory backend, frontend, and packaging release gates and update orchestration state",
+      "agent": "Master Orchestrator & Agent E",
+      "dependencies": ["W2-T3", "W3-T1", "W4-T1", "W4-T2", "W4-T3"],
+      "status": "pending",
+      "allowed_scope": ["docs/orchestration/**"]
+    }
+  ]
+}
