@@ -29,13 +29,38 @@ import { ChatWebviewViewProvider } from './chat/ChatWebviewViewProvider';
 import { DiffReviewManager } from './cards/DiffReviewManager';
 import { MissionControlProjection } from './mission-control/state/MissionControlProjection';
 import { registerMissionControlCommands } from './mission-control/MissionControlCommands';
+import {
+  AgentResponseLanguage,
+  LocalizationManager,
+} from './i18n/LocalizationManager';
 
 let statusBarItem: vscode.StatusBarItem;
+let localizationManager: LocalizationManager | undefined;
+
+export function getLocalizationManager(): LocalizationManager | undefined {
+  return localizationManager;
+}
+
+function normalizeAgentResponseLanguage(raw: string): AgentResponseLanguage {
+  if (raw === 'en-US' || raw === 'vi-VN' || raw === 'auto') {
+    return raw;
+  }
+  return 'auto';
+}
 
 /**
  * Extension activation lifecycle entry point.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // 0. Initialize bilingual UI localization decoupled from agent response language
+  const initialConfig = vscode.workspace.getConfiguration('agentStudios');
+  localizationManager = new LocalizationManager({
+    displayLanguage: initialConfig.get<string>('displayLanguage', 'en-US'),
+    agentResponseLanguage: normalizeAgentResponseLanguage(
+      initialConfig.get<string>('agentResponseLanguage', 'auto')
+    ),
+  });
+
   // 1. Initialize BridgeManager and SessionStateProjection
   const bridgeManager = new BridgeManager();
   context.subscriptions.push(bridgeManager);
@@ -198,6 +223,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 5. Handle configuration changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (
+        e.affectsConfiguration('agentStudios.displayLanguage') ||
+        e.affectsConfiguration('agentStudios.agentResponseLanguage')
+      ) {
+        const langConfig = vscode.workspace.getConfiguration('agentStudios');
+        localizationManager?.setDisplayLanguage(
+          langConfig.get<string>('displayLanguage', 'en-US')
+        );
+        localizationManager?.setAgentResponseLanguage(
+          normalizeAgentResponseLanguage(
+            langConfig.get<string>('agentResponseLanguage', 'auto')
+          )
+        );
+        updateStatusBar();
+      }
       if (e.affectsConfiguration('agentStudios.previewMode')) {
         const config = vscode.workspace.getConfiguration('agentStudios');
         const isPreview = config.get<boolean>('previewMode', false);

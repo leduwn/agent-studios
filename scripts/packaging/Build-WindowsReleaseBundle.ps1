@@ -88,6 +88,7 @@ $commitSha = (& git -C $repoRoot rev-parse HEAD).Trim()
 $manifest = [ordered]@{
     product = "Agent Studios"
     version = "1.0.0-rc1"
+    profile = $Profile
     target = "win32-x64"
     signed = $false
     signing_status = "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"
@@ -104,4 +105,10 @@ $hashLines = Get-ChildItem -Path $bundleDir -Recurse -File | Where-Object { $_.N
 }
 Set-Content -Path (Join-Path $bundleDir "SHA256SUMS.txt") -Value $hashLines -Encoding UTF8
 
-Write-Host "==> Bundle staged cleanly at $bundleDir"
+# Package standalone distributable ZIP archive + checksum
+$zipPath = Join-Path $OutputBase "AgentStudios-v1.0.0-rc1-win-x64.zip"
+Compress-Archive -Path "$bundleDir\*" -DestinationPath $zipPath -Force
+$zipHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -Path "$zipPath.sha256" -Value "$zipHash  $(Split-Path -Leaf $zipPath)" -Encoding UTF8
+
+Write-Host "==> Bundle staged cleanly at $bundleDir (archive: $zipPath)"

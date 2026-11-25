@@ -72,4 +72,16 @@ if ($LASTEXITCODE -ne 0) { throw "Install-AgentStudios.ps1 -DryRun failed" }
 & (Join-Path $BundleDir "Uninstall-AgentStudios.ps1") -DryRun
 if ($LASTEXITCODE -ne 0) { throw "Uninstall-AgentStudios.ps1 -DryRun failed" }
 
+$parentDir = Split-Path -Parent $BundleDir
+$zipPath = Join-Path $parentDir "AgentStudios-v1.0.0-rc1-win-x64.zip"
+$zipShaPath = "$zipPath.sha256"
+if (-not (Test-Path $zipPath)) { throw "Missing release ZIP archive: $zipPath" }
+if (-not (Test-Path $zipShaPath)) { throw "Missing release ZIP checksum: $zipShaPath" }
+$expectedZipHash = ((Get-Content $zipShaPath | Select-Object -First 1) -split "\s+", 2)[0].Trim().ToLowerInvariant()
+$actualZipHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualZipHash -ne $expectedZipHash) {
+    throw "Release ZIP checksum mismatch: expected $expectedZipHash, got $actualZipHash"
+}
+Write-Host "    Verified release ZIP archive checksum cleanly ($zipPath)."
+
 Write-Host "==> ALL RELEASE BUNDLE VERIFICATION CHECKS PASSED."

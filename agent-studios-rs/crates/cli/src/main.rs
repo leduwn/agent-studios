@@ -11,7 +11,9 @@ mod config;
 mod doctor;
 use doctor::AgsDoctor;
 
+use agent_studios_cli_client::connected::ConnectedClient;
 use agent_studios_cli_client::embedded::EmbeddedClient;
+use agent_studios_ipc_transport::daemon::DaemonBootstrapInfo;
 use agent_studios_tui::{AgsApp, OfflinePreviewApp};
 
 #[derive(Parser, Debug)]
@@ -151,6 +153,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Route 3: Interactive TUI
+    if !cli.demo {
+        let bootstrap_path = DaemonBootstrapInfo::default_runtime_path();
+        if bootstrap_path.exists() {
+            let workspace_name = std::env::current_dir()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "agent-studios-workspace".to_string());
+            if let Ok(connected) =
+                ConnectedClient::connect_from_bootstrap(&bootstrap_path, workspace_name).await
+            {
+                let mut app = AgsApp::new(Arc::new(connected));
+                app.run().await?;
+                return Ok(());
+            }
+        }
+    }
+
     let runtime_mode = if cli.demo {
         agent_studios_cli_client::client::RuntimeMode::Demo
     } else {

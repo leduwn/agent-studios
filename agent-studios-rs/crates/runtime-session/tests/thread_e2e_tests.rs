@@ -144,8 +144,31 @@ async fn run_turn_to_completion(
     (got_turn_complete, got_error, messages)
 }
 
-#[tokio::test]
-async fn test_thread_e2e_openai_chat_completions() {
+fn run_with_large_stack<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(fut)
+        })
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+#[test]
+fn test_thread_e2e_openai_chat_completions() {
+    run_with_large_stack(test_thread_e2e_openai_chat_completions_inner());
+}
+
+async fn test_thread_e2e_openai_chat_completions_inner() {
     let mock_server = MockServer::start().await;
 
     let sse_body = "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
@@ -230,8 +253,12 @@ async fn test_thread_e2e_openai_chat_completions() {
     assert!(requests.iter().all(|r| !r.url.path().contains("/models")));
 }
 
-#[tokio::test]
-async fn test_thread_e2e_anthropic_messages() {
+#[test]
+fn test_thread_e2e_anthropic_messages() {
+    run_with_large_stack(test_thread_e2e_anthropic_messages_inner());
+}
+
+async fn test_thread_e2e_anthropic_messages_inner() {
     let mock_server = MockServer::start().await;
 
     let sse_body = "event: message_start\n\
@@ -322,8 +349,12 @@ async fn test_thread_e2e_anthropic_messages() {
     assert!(requests.iter().all(|r| !r.url.path().contains("/models")));
 }
 
-#[tokio::test]
-async fn test_thread_e2e_gemini_generate_content() {
+#[test]
+fn test_thread_e2e_gemini_generate_content() {
+    run_with_large_stack(test_thread_e2e_gemini_generate_content_inner());
+}
+
+async fn test_thread_e2e_gemini_generate_content_inner() {
     let mock_server = MockServer::start().await;
 
     let sse_body = "data: {\"responseId\":\"resp_gem_123\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"Hello from Gemini!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":5,\"totalTokenCount\":15}}\n\n";
@@ -400,8 +431,12 @@ async fn test_thread_e2e_gemini_generate_content() {
     assert!(requests.iter().all(|r| r.method != "GET"));
 }
 
-#[tokio::test]
-async fn test_thread_e2e_openai_responses_native_bridge() {
+#[test]
+fn test_thread_e2e_openai_responses_native_bridge() {
+    run_with_large_stack(test_thread_e2e_openai_responses_native_bridge_inner());
+}
+
+async fn test_thread_e2e_openai_responses_native_bridge_inner() {
     let mock_server = MockServer::start().await;
 
     let sse_body = "event: response.created\n\
@@ -480,8 +515,14 @@ async fn test_thread_e2e_openai_responses_native_bridge() {
     assert!(requests.iter().all(|r| !r.url.path().contains("/models")));
 }
 
-#[tokio::test]
-async fn test_thread_e2e_custom_protocol_failure_no_silent_fallback_to_responses() {
+#[test]
+fn test_thread_e2e_custom_protocol_failure_no_silent_fallback_to_responses() {
+    run_with_large_stack(
+        test_thread_e2e_custom_protocol_failure_no_silent_fallback_to_responses_inner(),
+    );
+}
+
+async fn test_thread_e2e_custom_protocol_failure_no_silent_fallback_to_responses_inner() {
     let mock_server = MockServer::start().await;
 
     // Fail chat completions
@@ -556,8 +597,12 @@ async fn test_thread_e2e_custom_protocol_failure_no_silent_fallback_to_responses
     );
 }
 
-#[tokio::test]
-async fn test_thread_e2e_host_tools_preservation() {
+#[test]
+fn test_thread_e2e_host_tools_preservation() {
+    run_with_large_stack(test_thread_e2e_host_tools_preservation_inner());
+}
+
+async fn test_thread_e2e_host_tools_preservation_inner() {
     let mock_server = MockServer::start().await;
 
     let sse_body = "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
@@ -650,8 +695,12 @@ async fn test_thread_e2e_host_tools_preservation() {
     );
 }
 
-#[tokio::test]
-async fn test_thread_e2e_child_and_fork_inheritance() {
+#[test]
+fn test_thread_e2e_child_and_fork_inheritance() {
+    run_with_large_stack(test_thread_e2e_child_and_fork_inheritance_inner());
+}
+
+async fn test_thread_e2e_child_and_fork_inheritance_inner() {
     let mock_server = MockServer::start().await;
 
     let temp_dir = tempfile::tempdir().unwrap();
