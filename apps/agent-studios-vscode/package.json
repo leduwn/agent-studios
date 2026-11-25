@@ -273,6 +273,25 @@
             "error"
           ],
           "description": "Extension log verbosity"
+        },
+        "agentStudios.displayLanguage": {
+          "type": "string",
+          "default": "en-US",
+          "enum": [
+            "en-US",
+            "vi-VN"
+          ],
+          "description": "UI display language for Agent Studios views, wizards, and Mission Control (strictly decoupled from agent response language)"
+        },
+        "agentStudios.agentResponseLanguage": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "en-US",
+            "vi-VN"
+          ],
+          "description": "Preferred conversation language for agent responses ('auto' mirrors your prompt language independent of UI display language)"
         }
       }
     }

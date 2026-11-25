@@ -86,6 +86,17 @@ impl EmbeddedClient {
         Self::bootstrap_with_runtime_mode_and_capacity(workspace_name, runtime, mode, 512).await
     }
 
+    /// Bootstraps a fresh in-process EmbeddedClient with an explicit runtime preference.
+    pub async fn bootstrap_with_preference(
+        workspace_name: &str,
+        mode: RuntimeMode,
+        preferred_runtime: Option<&str>,
+    ) -> Result<Self, ClientError> {
+        let runtime =
+            crate::runtime::resolve_runtime_with_preference(mode, preferred_runtime).await?;
+        Self::bootstrap_with_runtime_mode_and_capacity(workspace_name, runtime, mode, 512).await
+    }
+
     /// Bootstraps a fresh in-process EmbeddedClient with custom broadcast channel capacity.
     pub async fn bootstrap_with_capacity(
         workspace_name: &str,
@@ -1470,11 +1481,25 @@ impl AgentStudiosClient for EmbeddedClient {
 
     async fn get_worktree_diff(
         &self,
-        _worktree_id: WorktreeId,
+        worktree_id: WorktreeId,
     ) -> Result<CapturedChanges, ClientError> {
-        Err(ClientError::Unsupported(
-            "Worktree diff inspection is not attached in embedded mode".to_string(),
-        ))
+        let wt_record = {
+            let cp = self.control_plane.lock().await;
+            cp.state().worktrees.get(&worktree_id).cloned()
+        };
+
+        let Some(wt) = wt_record else {
+            return Err(ClientError::Unsupported(
+                "Worktree diff inspection is not attached in embedded mode".to_string(),
+            ));
+        };
+
+        self.orchestrator
+            .capture_changes_async(wt.root, wt.base_commit)
+            .await
+            .map_err(|e| {
+                ClientError::OperationFailed(format!("Failed to capture worktree diff: {e}"))
+            })
     }
 
     async fn reconcile_patch(
@@ -1484,5 +1509,45 @@ impl AgentStudiosClient for EmbeddedClient {
         Err(ClientError::Unsupported(
             "Git reconciliation engine is not attached in embedded mode; requires external workspace reconciler".to_string(),
         ))
+    }
+}
+
+impl EmbeddedClient {
+    /// Captures and reconciles changes from a task's managed worktree directly into `target_worktree`.
+    pub async fn capture_and_reconcile_task(
+        &self,
+        task_id: TaskId,
+        target_worktree: &std::path::Path,
+        commit_message: Option<&str>,
+    ) -> Result<(CapturedChanges, ReconciliationOutcome), ClientError> {
+        let wt = {
+            let cp = self.control_plane.lock().await;
+            cp.state()
+                .worktrees
+                .values()
+                .find(|w| w.studio_id == self.studio_id && w.assigned_task_id == Some(task_id))
+                .cloned()
+        }
+        .ok_or_else(|| {
+            ClientError::NotFound(format!("No managed worktree assigned to task {task_id}"))
+        })?;
+
+        let captured = self
+            .orchestrator
+            .capture_changes_async(wt.root.clone(), wt.base_commit.clone())
+            .await
+            .map_err(|e| ClientError::OperationFailed(format!("capture_changes failed: {e}")))?;
+
+        let outcome = self
+            .orchestrator
+            .reconcile_patch_async(
+                target_worktree.to_path_buf(),
+                captured.patch_bytes.clone(),
+                commit_message.map(str::to_string),
+            )
+            .await
+            .map_err(|e| ClientError::OperationFailed(format!("reconcile_patch failed: {e}")))?;
+
+        Ok((captured, outcome))
     }
 }

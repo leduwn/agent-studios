@@ -14,6 +14,9 @@ agent-studios-orchestration = { path = "../orchestration" }
 agent-studios-workspace = { path = "../workspace" }
 agent-studios-external-runtime = { path = "../external-runtime" }
 agent-studios-opencode-runtime = { path = "../opencode-runtime" }
+agent-studios-claude-code-runtime = { path = "../claude-code-runtime" }
+agent-studios-ipc-protocol = { path = "../ipc-protocol" }
+agent-studios-ipc-transport = { path = "../ipc-transport" }
 agent-studios-provider = { path = "../provider" }
 serde = { workspace = true }
 serde_json = { workspace = true }

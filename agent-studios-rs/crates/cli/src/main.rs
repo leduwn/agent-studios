@@ -57,6 +57,36 @@ enum Commands {
         #[command(subcommand)]
         command: commands::model::ModelCommands,
     },
+
+    /// Execute an engineering goal via multi-agent orchestration (supports --headless and --stdin)
+    Run(commands::run::RunArgs),
+
+    /// Inspect or query the local agsd background daemon
+    Daemon {
+        #[command(subcommand)]
+        command: commands::daemon::DaemonCommands,
+    },
+
+    /// Manage M16 SKILL.md packages across Global, Project, and Agent scopes
+    Skill {
+        #[command(subcommand)]
+        command: commands::extensibility::SkillCommands,
+    },
+
+    /// Inspect configured MCP servers with redacted credentials
+    Mcp {
+        #[command(subcommand)]
+        command: commands::extensibility::McpCommands,
+    },
+
+    /// Inspect configured lifecycle hooks (pre_turn, post_task, on_reconciliation, on_approval)
+    Hooks {
+        #[command(subcommand)]
+        command: commands::extensibility::HooksCommands,
+    },
+
+    /// Resolve hierarchical AGENTS.md and CLAUDE.md instructions inside worktree bounds
+    Instructions(commands::extensibility::InstructionsArgs),
 }
 
 #[tokio::main]
@@ -88,6 +118,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Commands::Model { command } => {
                 commands::model::handle_model_command(command).await?;
+                return Ok(());
+            }
+            Commands::Run(args) => {
+                let code = commands::run::execute_run_command(args, cli.demo).await;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+                return Ok(());
+            }
+            Commands::Daemon { command } => {
+                commands::daemon::handle_daemon_command(command).await?;
+                return Ok(());
+            }
+            Commands::Skill { command } => {
+                commands::extensibility::handle_skill_command(command)?;
+                return Ok(());
+            }
+            Commands::Mcp { command } => {
+                commands::extensibility::handle_mcp_command(command)?;
+                return Ok(());
+            }
+            Commands::Hooks { command } => {
+                commands::extensibility::handle_hooks_command(command)?;
+                return Ok(());
+            }
+            Commands::Instructions(args) => {
+                commands::extensibility::handle_instructions_command(args)?;
                 return Ok(());
             }
         }

@@ -86,6 +86,17 @@ async fn probe_executable(path: &PathBuf) -> Result<String, String> {
 
 #[tokio::test]
 async fn test_cli_smoke_headless_read_only_prompt_execution() {
+    if std::env::var("AGENT_STUDIOS_LIVE_CLI_SMOKE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        println!(
+            "NOT_TESTED: Live Claude Code CLI execution skipped by default (Zero-Billable Invariant); set AGENT_STUDIOS_LIVE_CLI_SMOKE=1 to opt in"
+        );
+        return;
+    }
+
     // 1. Check if claude.exe exists
     let binary_path = match resolve_claude_cli_binary() {
         Some(p) => p,
@@ -126,7 +137,7 @@ async fn test_cli_smoke_headless_read_only_prompt_execution() {
         let shim = shim_dir.path().join("claude_smoke_wrapper.cmd");
         let content = format!(
             r#"@echo off
-python -u -c "import sys, subprocess; cmd = [sys.argv[1], '--verbose', '--bare'] + sys.argv[2:]; p = subprocess.Popen(cmd, stdin=subprocess.PIPE); line = sys.stdin.buffer.readline(); p.communicate(input=line); sys.exit(p.returncode)" "{}" %*
+python -u -c "import sys, subprocess; args = sys.argv[2:]; cmd = ([sys.argv[1]] + args) if '--version' in args else ([sys.argv[1], '--verbose', '--bare'] + args); p = subprocess.Popen(cmd, stdin=None if '--version' in args else subprocess.PIPE); line = None if '--version' in args else sys.stdin.buffer.readline(); p.communicate(input=line); sys.exit(p.returncode)" "{}" %*
 set SMOKE_EXIT=%ERRORLEVEL%
 > "{}" echo %SMOKE_EXIT%
 exit /b %SMOKE_EXIT%
@@ -141,7 +152,7 @@ exit /b %SMOKE_EXIT%
         let content = format!(
             r#"#!/bin/sh
 if command -v python3 >/dev/null 2>&1; then
-    python3 -u -c "import sys, subprocess; cmd = [sys.argv[1], '--verbose', '--bare'] + sys.argv[2:]; p = subprocess.Popen(cmd, stdin=subprocess.PIPE); line = sys.stdin.buffer.readline(); p.communicate(input=line); sys.exit(p.returncode)" "{}" "$@"
+    python3 -u -c "import sys, subprocess; args = sys.argv[2:]; cmd = ([sys.argv[1]] + args) if '--version' in args else ([sys.argv[1], '--verbose', '--bare'] + args); p = subprocess.Popen(cmd, stdin=None if '--version' in args else subprocess.PIPE); line = None if '--version' in args else sys.stdin.buffer.readline(); p.communicate(input=line); sys.exit(p.returncode)" "{}" "$@"
 else
     "{}" --verbose --bare "$@"
 fi

@@ -1,7 +1,10 @@
 //! CLI Subcommand Handlers
 
+pub mod daemon;
+pub mod extensibility;
 pub mod model;
 pub mod provider;
+pub mod run;
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 agent-studios-cli-client = { path = "../cli-client" }
+agent-studios-extensibility = { path = "../extensibility" }
+agent-studios-ipc-protocol = { path = "../ipc-protocol" }
+agent-studios-ipc-transport = { path = "../ipc-transport" }
 agent-studios-provider = { path = "../provider" }
 agent-studios-tui = { path = "../tui" }
 agent-studios-protocol = { path = "../protocol" }
@@ -26,3 +29,6 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

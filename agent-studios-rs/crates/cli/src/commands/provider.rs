@@ -38,6 +38,9 @@ pub enum ProviderCommands {
 
     /// Test connectivity and credentials for a provider instance
     Test(TestProviderArgs),
+
+    /// Dynamically discover available remote models for a provider instance
+    Discover(DiscoverProviderArgs),
 }
 
 #[derive(Args, Debug)]
@@ -142,6 +145,21 @@ pub struct TestProviderArgs {
     pub format: OutputFormat,
 }
 
+#[derive(Args, Debug)]
+pub struct DiscoverProviderArgs {
+    /// Provider instance ID
+    #[arg(value_name = "INSTANCE_ID")]
+    pub instance_id: String,
+
+    /// Output format (table or json)
+    #[arg(long, default_value = "table")]
+    pub format: OutputFormat,
+
+    /// Save discovered models directly into the local provider catalog
+    #[arg(long)]
+    pub save: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Table,
@@ -177,6 +195,7 @@ pub async fn handle_provider_command(
         ProviderCommands::Remove(args) => handle_remove(args),
         ProviderCommands::Import(args) => handle_import(args),
         ProviderCommands::Test(args) => handle_test(args).await,
+        ProviderCommands::Discover(args) => handle_discover(args).await,
     }
 }
 
@@ -632,4 +651,69 @@ async fn handle_test(args: TestProviderArgs) -> Result<(), Box<dyn std::error::E
         println!("✗ Overall Status: FAILED");
         Err("Provider connection test failed".into())
     }
+}
+
+async fn handle_discover(args: DiscoverProviderArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let mut catalog = load_catalog()?;
+    let id = ProviderInstanceId::from_str(&args.instance_id)?;
+    let instance = catalog
+        .get_provider_instance(&id)
+        .ok_or_else(|| format!("Provider instance '{id}' not found in catalog"))?
+        .clone();
+
+    let secret_store = std::sync::Arc::new(get_system_secret_store());
+    let discovery_client = agent_studios_provider::ModelDiscoveryClient::new(
+        secret_store,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(300),
+    );
+
+    let models = discovery_client.discover_models(&instance).await?;
+
+    if args.save {
+        for descriptor in &models {
+            let _ = catalog.register_model(descriptor.clone());
+        }
+        save_catalog(&catalog)?;
+    }
+
+    if args.format == OutputFormat::Json {
+        println!("{}", serde_json::to_string_pretty(&models)?);
+        return Ok(());
+    }
+
+    if models.is_empty() {
+        println!(
+            "No models discovered on provider instance '{}' ({}).",
+            instance.display_name, instance.id
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Discovered {} model(s) on '{}' ({})",
+        models.len(),
+        instance.display_name,
+        instance.id
+    );
+    println!("{:-<72}", "");
+    for m in &models {
+        println!(
+            "  {:<34} ctx={:<8} out={:<8}",
+            m.id,
+            m.limits
+                .context_window_tokens
+                .map(|c| format!("{c}"))
+                .unwrap_or_else(|| "-".to_string()),
+            m.limits
+                .max_output_tokens
+                .map(|o| format!("{o}"))
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    if args.save {
+        println!("\n✓ Saved discovered models into provider catalog.");
+    }
+
+    Ok(())
 }

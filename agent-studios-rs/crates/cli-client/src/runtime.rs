@@ -322,14 +322,57 @@ impl AgentRuntime for DeterministicLocalRuntime {
 
 /// Resolves an `AgentRuntime` instance according to explicit `RuntimeMode`.
 /// In `Production` mode:
-/// Discovers available model-backed external runtimes (such as OpenCode).
+/// Discovers available model-backed external runtimes (such as Claude Code or OpenCode).
 /// Fails closed with `ClientError::Configuration` if no real runtime is available.
 /// In `Demo` or `Preview` mode:
 /// Returns `DeterministicLocalRuntime` explicitly labeled as simulated execution.
 pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>, ClientError> {
+    resolve_runtime_with_preference(mode, None).await
+}
+
+/// Resolves an `AgentRuntime` instance honoring an optional runtime implementation preference
+/// (`"claude-code"`, `"opencode"`, or `"deterministic-local"`).
+pub async fn resolve_runtime_with_preference(
+    mode: RuntimeMode,
+    preferred: Option<&str>,
+) -> Result<Arc<dyn AgentRuntime>, ClientError> {
+    let pref = preferred.map(|s| s.trim().to_ascii_lowercase());
+
+    if let Some(ref p) = pref
+        && (p == DETERMINISTIC_LOCAL_IMPL_ID || p == "local" || p == "demo")
+    {
+        return Ok(Arc::new(DeterministicLocalRuntime::with_mode(mode)));
+    }
+
     match mode {
         RuntimeMode::Production => {
-            if let Ok(mut opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
+            let try_claude = pref
+                .as_deref()
+                .map(|p| p == "claude-code" || p == "claude")
+                .unwrap_or(true);
+            let try_opencode = pref
+                .as_deref()
+                .map(|p| p == "opencode" || p == "open-code")
+                .unwrap_or(true);
+
+            if try_claude
+                && let Ok(claude) = agent_studios_claude_code_runtime::ClaudeCodeRuntime::new()
+            {
+                let instances = claude.discover().await.unwrap_or_default();
+                if instances
+                    .iter()
+                    .any(|i| i.availability == RuntimeAvailability::Available)
+                {
+                    tracing::info!(
+                        "Discovered live Claude Code runtime instance; using ClaudeCodeRuntime"
+                    );
+                    return Ok(Arc::new(claude));
+                }
+            }
+
+            if try_opencode
+                && let Ok(mut opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new()
+            {
                 if let Some(catalog) = crate::embedded::load_catalog_snapshot_safe() {
                     opencode = opencode.with_catalog(Arc::new(catalog));
                 }
@@ -345,8 +388,14 @@ pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>,
                 }
             }
 
+            if let Some(p) = pref {
+                return Err(ClientError::Configuration(format!(
+                    "Requested runtime '{p}' is not available or not discovered in PATH."
+                )));
+            }
+
             Err(ClientError::Configuration(
-                "No AI runtime configured or discovered. Start an OpenCode daemon or CLI in PATH, or launch with `ags --demo` / `ags --preview` for simulated execution."
+                "No AI runtime configured or discovered. Start an OpenCode daemon or Claude Code CLI in PATH, or launch with `ags --demo` / `ags --preview` for simulated execution."
                     .to_string(),
             ))
         }
@@ -361,6 +410,11 @@ pub async fn resolve_runtime(mode: RuntimeMode) -> Result<Arc<dyn AgentRuntime>,
 #[allow(clippy::collapsible_if)]
 pub async fn discover_available_runtimes() -> Vec<DiscoveredRuntimeInstance> {
     let mut instances = Vec::new();
+    if let Ok(claude) = agent_studios_claude_code_runtime::ClaudeCodeRuntime::new() {
+        if let Ok(found) = claude.discover().await {
+            instances.extend(found);
+        }
+    }
     if let Ok(mut opencode) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
         if let Some(catalog) = crate::embedded::load_catalog_snapshot_safe() {
             opencode = opencode.with_catalog(Arc::new(catalog));

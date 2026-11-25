@@ -122,6 +122,9 @@ name = "agent-studios-cli"
 version = "0.1.0"
 dependencies = [
  "agent-studios-cli-client",
+ "agent-studios-extensibility",
+ "agent-studios-ipc-protocol",
+ "agent-studios-ipc-transport",
  "agent-studios-protocol",
  "agent-studios-provider",
  "agent-studios-tui",
@@ -131,6 +134,7 @@ dependencies = [
  "dirs",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -141,8 +145,11 @@ dependencies = [
 name = "agent-studios-cli-client"
 version = "0.1.0"
 dependencies = [
+ "agent-studios-claude-code-runtime",
  "agent-studios-control-plane",
  "agent-studios-external-runtime",
+ "agent-studios-ipc-protocol",
+ "agent-studios-ipc-transport",
  "agent-studios-opencode-runtime",
  "agent-studios-orchestration",
  "agent-studios-protocol",
@@ -185,6 +192,22 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "agent-studios-extensibility"
+version = "0.1.0"
+dependencies = [
+ "agent-studios-ipc-protocol",
+ "agent-studios-protocol",
+ "chrono",
+ "dunce",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

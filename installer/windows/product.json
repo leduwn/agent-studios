@@ -1,0 +1,26 @@
+{
+  "nameShort": "Agent Studios",
+  "nameLong": "Agent Studios",
+  "applicationName": "agent-studios",
+  "dataFolderName": ".agent-studios",
+  "win32MutexName": "agentstudios",
+  "licenseName": "Apache-2.0",
+  "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0",
+  "win32DirName": "Agent Studios",
+  "win32NameVersion": "Agent Studios 1.0.0-rc1",
+  "win32RegValueName": "AgentStudios",
+  "win32AppUserModelId": "AgentStudios.Desktop",
+  "win32ShellNameShort": "Agent Studios",
+  "urlProtocol": "agentstudios",
+  "agentStudios": {
+    "defaultMode": "agent",
+    "activityBarSingleIcon": "agent-studios-activitybar",
+    "bundledDaemon": "agsd.exe",
+    "bundledCli": "ags.exe",
+    "canonicalPathsWindows": {
+      "configToml": "%APPDATA%\\AgentStudios\\config.toml",
+      "stateDb": "%LOCALAPPDATA%\\AgentStudios\\state.db",
+      "artifactsDir": "%LOCALAPPDATA%\\AgentStudios\\artifacts\\"
+    }
+  }
+}

@@ -336,7 +336,9 @@ impl AgsDoctor {
             } else {
                 (
                     "INFO",
-                    format!("Daemon (agsd) offline at {pipe_name}; standalone in-process EmbeddedClient fallback active"),
+                    format!(
+                        "Daemon (agsd) offline at {pipe_name}; standalone in-process EmbeddedClient fallback active"
+                    ),
                     false,
                 )
             }
@@ -347,13 +349,19 @@ impl AgsDoctor {
             if sock_path.exists() {
                 (
                     "OK",
-                    format!("Connected to native daemon via Unix domain socket ({})", sock_path.display()),
+                    format!(
+                        "Connected to native daemon via Unix domain socket ({})",
+                        sock_path.display()
+                    ),
                     false,
                 )
             } else {
                 (
                     "INFO",
-                    format!("Daemon (agsd) offline at {}; standalone in-process EmbeddedClient fallback active", sock_path.display()),
+                    format!(
+                        "Daemon (agsd) offline at {}; standalone in-process EmbeddedClient fallback active",
+                        sock_path.display()
+                    ),
                     false,
                 )
             }

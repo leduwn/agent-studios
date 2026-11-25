@@ -1,0 +1,22 @@
+[package]
+name = "agent-studios-extensibility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "M16 Extensibility Engine: Skills (SKILL.md), MCP, Lifecycle Hooks, and Hierarchical Instructions"
+
+[dependencies]
+agent-studios-ipc-protocol = { path = "../ipc-protocol" }
+agent-studios-protocol = { path = "../protocol" }
+chrono = { workspace = true }
+dunce = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -17,6 +17,7 @@ members = [
     "crates/ipc-protocol",
     "crates/ipc-transport",
     "crates/cli-client",
+    "crates/extensibility",
     "crates/tui",
     "crates/cli",
 ]
