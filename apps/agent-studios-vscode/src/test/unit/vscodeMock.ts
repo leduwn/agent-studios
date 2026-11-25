@@ -318,6 +318,7 @@ export class MockDiagnostic {
 }
 
 export const mockWorkspaceFindFilesResult: MockUri[] = [];
+export const mockWorkspaceReadFileMap = new Map<string, string>();
 export const mockDiagnosticsList: MockDiagnostic[] = [];
 
 export const mockWindowMessages = {
@@ -326,6 +327,7 @@ export const mockWindowMessages = {
   error: [] as string[],
   modalWarningResponse: undefined as string | undefined,
   quickPickSelection: undefined as unknown,
+  inputBoxResponse: undefined as string | undefined,
   openDialogResult: undefined as MockUri[] | undefined,
   saveDialogResult: undefined as MockUri | undefined,
   clipboardText: '',
@@ -340,10 +342,12 @@ export function resetMockState(): void {
   mockWindowMessages.error.length = 0;
   mockWindowMessages.modalWarningResponse = undefined;
   mockWindowMessages.quickPickSelection = undefined;
+  mockWindowMessages.inputBoxResponse = undefined;
   mockWindowMessages.openDialogResult = undefined;
   mockWindowMessages.saveDialogResult = undefined;
   mockWindowMessages.clipboardText = '';
   mockWorkspaceFindFilesResult.length = 0;
+  mockWorkspaceReadFileMap.clear();
   mockDiagnosticsList.length = 0;
   vscodeMock.window.activeTextEditor = undefined;
 }
@@ -366,6 +370,18 @@ export const vscodeMock = {
   languages: {
     getDiagnostics: (_uri?: unknown): MockDiagnostic[] => {
       return [...mockDiagnosticsList];
+    },
+    registerInlineCompletionItemProvider: (
+      _selector: unknown,
+      _provider: unknown
+    ): MockDisposable => {
+      return new MockDisposable();
+    },
+    registerCodeActionsProvider: (
+      _selector: unknown,
+      _provider: unknown
+    ): MockDisposable => {
+      return new MockDisposable();
     },
   },
   commands: {
@@ -413,6 +429,12 @@ export const vscodeMock = {
         return mockWindowMessages.quickPickSelection;
       }
       return items[0];
+    },
+    showInputBox: async (options?: { value?: string }): Promise<string | undefined> => {
+      if (mockWindowMessages.inputBoxResponse !== undefined) {
+        return mockWindowMessages.inputBoxResponse;
+      }
+      return options?.value;
     },
     showTextDocument: async (doc: unknown): Promise<unknown> => {
       return { document: doc };
@@ -464,8 +486,9 @@ export const vscodeMock = {
       stat: async (_uri: MockUri): Promise<{ type: MockFileType; size: number }> => {
         return { type: MockFileType.File, size: 100 };
       },
-      readFile: async (_uri: MockUri): Promise<Uint8Array> => {
-        return Buffer.from('');
+      readFile: async (uri: MockUri): Promise<Uint8Array> => {
+        const mapped = mockWorkspaceReadFileMap.get(uri.fsPath || uri.path);
+        return Buffer.from(mapped ?? '');
       },
     },
     openTextDocument: async (uriOrOptions: unknown): Promise<{ uri: unknown }> => {

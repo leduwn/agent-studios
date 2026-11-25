@@ -27,6 +27,12 @@ import { SessionDetailWebview } from './webviews/SessionDetailWebview';
 import { TaskGraphWebview } from './webviews/TaskGraphWebview';
 import { ChatWebviewViewProvider } from './chat/ChatWebviewViewProvider';
 import { DiffReviewManager } from './cards/DiffReviewManager';
+import { HunkReviewManager, registerHunkReviewCommands } from './cards/HunkReviewManager';
+import { ConversationManager, registerConversationCommands } from './chat/ConversationManager';
+import { registerExtensibilityCommands } from './commands/ExtensibilityCommands';
+import { registerProviderManagementCommands } from './commands/ProviderManagementCommands';
+import { ContextEngine } from './context/ContextEngine';
+import { registerEditorIntelligence } from './editor/EditorIntelligenceProvider';
 import { MissionControlProjection } from './mission-control/state/MissionControlProjection';
 import { registerMissionControlCommands } from './mission-control/MissionControlCommands';
 import {
@@ -172,6 +178,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const missionControlProjection = new MissionControlProjection(bridgeManager);
   context.subscriptions.push(missionControlProjection);
   registerMissionControlCommands(context, missionControlProjection, diffReviewManager);
+
+  // 3c. Register Wave 4 Daily AI Coding Workbench Features (RC2)
+  const conversationManager = new ConversationManager(context, () => bridgeManager.bridge);
+  context.subscriptions.push(conversationManager);
+  registerConversationCommands(context, conversationManager);
+
+  const contextEngine = new ContextEngine();
+  void contextEngine;
+
+  const hunkReviewManager = new HunkReviewManager();
+  context.subscriptions.push(hunkReviewManager);
+  registerHunkReviewCommands(context, hunkReviewManager);
+
+  registerEditorIntelligence(context, () => bridgeManager.bridge);
+  registerProviderManagementCommands(context, () => bridgeManager.bridge);
+  registerExtensibilityCommands(context);
 
   // 4. Create and update status bar item
   statusBarItem = vscode.window.createStatusBarItem(

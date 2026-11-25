@@ -2,7 +2,7 @@
   "name": "agent-studios-vscode",
   "displayName": "Agent Studios",
   "description": "Code-OSS native AI Agents Workbench extension for Agent Studios",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "publisher": "agent-studios",
   "license": "Apache-2.0",
   "repository": {
@@ -175,6 +175,68 @@
       {
         "command": "agent-studios.generateTests",
         "title": "Generate Unit Tests with Agent Studios",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.newConversation",
+        "title": "Agent Studios: New Conversation",
+        "category": "Agent Studios",
+        "icon": "$(add)"
+      },
+      {
+        "command": "agent-studios.searchConversations",
+        "title": "Agent Studios: Search Conversation History",
+        "category": "Agent Studios",
+        "icon": "$(search)"
+      },
+      {
+        "command": "agent-studios.renameConversation",
+        "title": "Agent Studios: Rename Conversation",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.archiveConversation",
+        "title": "Agent Studios: Archive Conversation",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.fixDiagnostics",
+        "title": "Agent Studios: Fix Diagnostics",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.inlineEdit",
+        "title": "Agent Studios: Inline Selection Edit",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.revertCheckpoint",
+        "title": "Agent Studios: Revert Last File Checkpoint",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.configureProvider",
+        "title": "Agent Studios: Configure Provider (SecretReference)",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.testProviderConnection",
+        "title": "Agent Studios: Test Provider Connection",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.manageSkills",
+        "title": "Agent Studios: Inspect Workspace Skills",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.manageMcpServers",
+        "title": "Agent Studios: Inspect MCP Servers (Redacted)",
+        "category": "Agent Studios"
+      },
+      {
+        "command": "agent-studios.inspectInstructionsHierarchy",
+        "title": "Agent Studios: Inspect Instructions Hierarchy",
         "category": "Agent Studios"
       }
     ],
