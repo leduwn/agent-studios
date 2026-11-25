@@ -1,15 +1,15 @@
 # Next Actions Queue (`NEXT_ACTIONS.md`)
 
-1. Commit Wave 1 orchestration control docs on `integration/m15-1-joint-validation`.
-2. Execute **Wave 2** (M15.1 & P0 Real Execution):
-   - Implement `ConnectedClient`, `connect_or_fallback`, `ClaudeCodeRuntime` discovery, and local worktree action execution in `crates/cli-client`.
-   - Implement `ags run`, `ags daemon`, `ags provider discover` in `crates/cli`.
-   - Write and verify `p0_real_execution_acceptance_tests.rs` and `cli_acceptance_tests.rs`.
-3. Execute **Wave 3** (M16 Extensibility):
-   - Implement `agent-studios-extensibility` crate (`skills`, `mcp`, `hooks`, `instructions`) and `ags` CLI commands.
-4. Execute **Wave 4** (M17/M18/M19):
-   - Implement EN/VI localization bundles, language decoupling, and Windows canonical paths in `apps/agent-studios-vscode`.
-   - Implement M18 stress (12 workers, 1,000+ turns, 100k events) and concurrency/security tests.
-   - Implement Windows release bundler, installer/uninstaller scripts, and M19 release documentation.
-5. Execute **Wave 5** (Mandatory Quality Gates):
-   - Run full backend (`fmt`, `check`, `clippy -D warnings`, `test --workspace`, `build --bin agsd --bin ags`), frontend (`lint`, `typecheck`, `build`, `test:unit`, `test:e2e`, `vsce package`), and bundle verification.
+All offline engineering Waves 1–5 are complete and verified on `integration/m15-1-joint-validation` (code SHA `58293983af34ccf46ac44f2b44e224a33af31ba8`).
+
+Remaining actions require human operator authorization (`GATE-01`..`GATE-04`):
+
+1. **`GATE-01` — PR Review & Merge to Protected `main`**:
+   - Review consolidated `integration/m15-1-joint-validation` and align `PR #33`, `PR #31`, `PR #34`, and `PR #32` before merging into protected `main`.
+   - Note CI parity: run GitHub Actions matrix (`ubuntu-latest` + `windows-latest`, including `npm run test:integration` Extension Host tests) on the pushed integration branch.
+2. **`GATE-02` — Legacy Worktree Cleanup**:
+   - Operator approval before removing legacy worktrees listed in `09_SAFE_WORKTREE_CLEANUP_PLAN.md` (leave `D:\Projects\agent-studios` untouched unless explicitly approved).
+3. **`GATE-03` — Live Cloud LLM Provider Acceptance (`$1`–`$5` cap)**:
+   - Provision real credentials and authorize opt-in live model acceptance runs (`AGENT_STUDIOS_LIVE_CLI_SMOKE=1` / provider API keys) once ready to leave the `$0.00` offline boundary.
+4. **`GATE-04` — Code Signing & Release Publishing**:
+   - Sign `bin\agsd.exe`, `bin\ags.exe`, and generated Windows installer binaries in `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64` (replacing `UNSIGNED_RC1_REQUIRES_OPERATOR_CERT`) and optionally compile `AgentStudios.nsi` with NSIS for `.exe` setup distribution.
