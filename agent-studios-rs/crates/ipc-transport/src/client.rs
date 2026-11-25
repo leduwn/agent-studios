@@ -361,6 +361,16 @@ impl IpcClient {
         }
     }
 
+    /// Sends an arbitrary `IpcCommand` and waits for its raw `IpcResponse`.
+    pub async fn send_command(
+        &mut self,
+        command: IpcCommand,
+    ) -> Result<IpcResponse, TransportError> {
+        let mut inner = self.inner.lock().await;
+        send_msg(&mut inner.writer, &command).await?;
+        recv_msg(&mut inner.reader, self.config.max_frame_size).await
+    }
+
     /// Sends Ping, verifies Pong, measures roundtrip latency.
     pub async fn ping(&mut self, payload: &str) -> Result<PongResponse, TransportError> {
         let mut inner = self.inner.lock().await;

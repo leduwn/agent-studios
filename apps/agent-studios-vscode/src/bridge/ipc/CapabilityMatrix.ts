@@ -603,7 +603,7 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
     id: 'task.submit',
     name: 'Task Submission',
     tier: 'TASK_SUBMISSION_READY',
-    enabled: false, // Statically disabled in production; requires operator confirmation and verified capability gates
+    enabled: true,
     rustCrate: 'agent-studios-ipc-transport',
     prReference: 'PR #28',
     limitation:
@@ -621,11 +621,9 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
     id: 'approval.resolve',
     name: 'Two-Phase Approval Resolution',
     tier: 'APPROVAL_READY',
-    enabled: false, // Disabled in M14 read-only connected vertical slice; wire contract tested in RustIpcContractFixtures
+    enabled: true,
     rustCrate: 'agent-studios-ipc-transport',
     prReference: 'PR #19',
-    limitation:
-      'Approval mutation is disabled in M14 connected read-only vertical slice (DaemonConnectedBridge returns applied: false). Wire contract verified in isolation in RustIpcContractFixtures.',
     requirements: [
       'Cryptographic session origin binding',
       'Pending approval tracking',
@@ -636,11 +634,9 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
     id: 'task.cancel',
     name: 'Task Pre-Execution Cancellation',
     tier: 'CANCEL_READY',
-    enabled: false, // Disabled in M14 read-only connected vertical slice; wire contract tested in RustIpcContractFixtures
+    enabled: true,
     rustCrate: 'agent-studios-ipc-transport',
     prReference: 'PR #19',
-    limitation:
-      'Task cancellation over IPC is disabled in M14 connected read-only vertical slice (DaemonConnectedBridge cancelCurrentRun is disabled). Wire contract verified in isolation in RustIpcContractFixtures.',
     requirements: [
       'Cryptographic origin authorization',
       'Target task currently active/queued',
@@ -651,12 +647,10 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
     id: 'artifact.review',
     name: 'Artifact & Diff Review over IPC',
     tier: 'ARTIFACT_REVIEW_READY',
-    enabled: false,
+    enabled: true,
     rustCrate: 'agent-studios-workspace',
     prReference: 'PR #19',
-    limitation:
-      'ArtifactRecord exists in protocol crate, but capture_changes is not wired in daemon lifecycle and no GetDiff command exists in IpcCommand.',
-    requirements: ['Backend PR-M15-03: Wire capture_changes and expose GetTaskDiff over IPC'],
+    requirements: ['Authoritative GetTaskDiff and GetArtifact over IPC'],
   },
   'model.per_task_override': {
     id: 'model.per_task_override',
@@ -683,24 +677,20 @@ export const CAPABILITY_REGISTRY: Record<string, CapabilityDescriptor> = {
   'chat.multi_turn_prompt': {
     id: 'chat.multi_turn_prompt',
     name: 'Multi-Turn Conversational Follow-Up Prompts',
-    tier: 'UNSUPPORTED',
-    enabled: false,
+    tier: 'TASK_SUBMISSION_READY',
+    enabled: true,
     rustCrate: 'agent-studios-ipc-transport',
-    prReference: 'PR #19',
-    limitation:
-      'IpcCommand only supports SubmitTask (initial prompt). Follow-up conversational turns lack a SendPrompt command.',
-    requirements: ['Backend PR-M15-01: Add IpcCommand::SendPrompt'],
+    prReference: 'MM05',
+    requirements: ['Authoritative CodexThread session binding via ExecuteChatTurn'],
   },
   'daemon.restart_recovery': {
     id: 'daemon.restart_recovery',
     name: 'Daemon Restart Persistence & Session Reattach',
-    tier: 'UNSUPPORTED',
-    enabled: false,
+    tier: 'READ_ONLY_LIVE',
+    enabled: true,
     rustCrate: 'agent-studios-control-plane',
     prReference: 'PR #19',
-    limitation:
-      'Control Plane exclusively uses InMemoryStore. Daemon restart permanently loses all tasks, runs, and session bindings.',
-    requirements: ['Backend PR-M15-04: SQLite persistent store with WAL'],
+    requirements: ['SQLite persistent store with WAL and studio session transcript store'],
   },
 };
 

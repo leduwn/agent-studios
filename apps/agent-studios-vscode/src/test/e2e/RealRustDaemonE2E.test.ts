@@ -427,38 +427,40 @@ describe('Tier 3: Real Compiled Rust agsd E2E Test Suite (AUTHENTICATED_RUST_IPC
     assert.strictEqual(health.status, 'healthy');
   });
 
-  it('16. Read-only mutation rejection (assert requestApprovalDecision and submitEditorAction fail closed)', async () => {
+  it('16. Capability policy mutation gating (assert disabled capabilities fail closed)', async () => {
     assert.ok(bridge, 'Bridge must be initialized');
+    const { CapabilityMatrix } = await import('../../bridge/ipc/CapabilityMatrix');
+    try {
+      CapabilityMatrix.setCapabilityEnabled('approval.resolve', false);
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
 
-    const approvalRes = await bridge.requestApprovalDecision('appr-real-01', 'approved');
-    assert.strictEqual(approvalRes.applied, false, 'requestApprovalDecision must fail closed in read-only slice');
-    assert.ok((approvalRes.message || '').includes('read-only'), 'Message must indicate read-only constraint');
+      const approvalRes = await bridge.requestApprovalDecision('appr-real-01', 'approved');
+      assert.strictEqual(approvalRes.applied, false, 'requestApprovalDecision must fail closed when approval.resolve is disabled');
+      assert.ok((approvalRes.message || '').includes('disabled'), 'Message must indicate capability policy constraint');
 
-    const editorRes = await bridge.submitEditorAction({
-      action: 'refactor',
-      documentUri: 'file:///workspace/test.ts',
-      languageId: 'typescript',
-      selectedText: 'fn()',
-      selectionRange: { startLine: 1, startCol: 0, endLine: 1, endCol: 4 },
-    });
-    assert.strictEqual(editorRes.accepted, false, 'submitEditorAction must fail closed in read-only slice');
-    assert.ok((editorRes.message || '').includes('read-only'), 'Message must indicate read-only constraint');
+      const editorRes = await bridge.submitEditorAction({
+        action: 'refactor',
+        documentUri: 'file:///workspace/test.ts',
+        languageId: 'typescript',
+        selectedText: 'fn()',
+        selectionRange: { startLine: 1, startCol: 0, endLine: 1, endCol: 4 },
+      });
+      assert.strictEqual(editorRes.accepted, false, 'submitEditorAction must fail closed when task.submit is disabled');
+      assert.ok((editorRes.message || '').includes('disabled'), 'Message must indicate capability policy constraint');
 
-    await assert.rejects(
-      async () => {
-        await bridge!.sendMessage({ message: 'test', mode: 'ask' }, () => {});
-      },
-      (err: Error) => err.message.includes('read-only') || err.message.includes('disabled'),
-      'sendMessage must reject in read-only slice'
-    );
+      await assert.rejects(
+        async () => {
+          await bridge!.sendMessage({ message: 'test', mode: 'ask' }, () => {});
+        },
+        (err: Error) => err.message.includes('disabled'),
+        'sendMessage must reject when task.submit is disabled'
+      );
 
-    await assert.rejects(
-      async () => {
-        await bridge!.createSession('test goal');
-      },
-      (err: Error) => err.message.includes('read-only') || err.message.includes('disabled'),
-      'createSession must reject in read-only slice'
-    );
+      const session = await bridge!.createSession('test goal');
+      assert.ok(session.id, 'createSession must create an authoritative studio session on agsd');
+    } finally {
+      CapabilityMatrix.resetCapabilities();
+    }
   });
 
   it('17. Standard-client shutdown denial (assert standard client sending shutdown receives permission denied)', async () => {

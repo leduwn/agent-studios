@@ -411,6 +411,45 @@ export type RustIpcCommand =
       provider_id: string;
     }
   | {
+      type: 'set_provider_secret';
+      secret_ref: { backend: string; locator: string };
+      secret_value: string;
+    }
+  | {
+      type: 'delete_provider_secret';
+      secret_ref: { backend: string; locator: string };
+    }
+  | {
+      type: 'execute_chat_turn';
+      studio_id: string;
+      prompt: string;
+      mode?: string;
+      provider_instance_id?: string;
+      model_id?: string;
+      reasoning_effort?: string;
+      permission_mode?: string;
+      follow_up_mode?: string;
+      workspace_path?: string;
+      attachments?: unknown[];
+    }
+  | {
+      type: 'interrupt_chat_turn';
+      studio_id: string;
+    }
+  | {
+      type: 'get_studio_transcript';
+      studio_id: string;
+    }
+  | {
+      type: 'execute_multi_agent_goal';
+      studio_id: string;
+      goal: string;
+      provider_instance_id?: string;
+      model_id?: string;
+      repository_path?: string;
+      permission_mode?: string;
+    }
+  | {
       type: 'fork_studio';
       source_studio_id: string;
       name?: string;
@@ -561,6 +600,33 @@ export type RustIpcResponse =
         discovery: { state: string; message: string };
         runtime: { state: string; message: string };
       };
+    }
+  | {
+      type: 'provider_secret_updated';
+      secret_ref: { backend: string; locator: string };
+      stored: boolean;
+    }
+  | {
+      type: 'chat_turn_completed';
+      studio_id: string;
+      thread_id: string;
+      message: Record<string, unknown>;
+    }
+  | {
+      type: 'chat_turn_interrupted';
+      studio_id: string;
+      interrupted: boolean;
+    }
+  | {
+      type: 'studio_transcript';
+      studio_id: string;
+      thread_id?: string | null;
+      messages: Array<Record<string, unknown>>;
+    }
+  | {
+      type: 'multi_agent_goal_completed';
+      studio_id: string;
+      summary: Record<string, unknown>;
     }
   | {
       type: 'extensibility_listed';

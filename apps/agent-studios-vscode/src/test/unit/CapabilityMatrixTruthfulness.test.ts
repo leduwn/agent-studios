@@ -22,37 +22,38 @@ import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
 import { DaemonConnectedBridge } from '../../bridge/DaemonConnectedBridge';
 
 describe('Capability Matrix Truthfulness & Synchronization', () => {
+  afterEach(() => {
+    CapabilityMatrix.resetCapabilities();
+  });
+
   describe('Authoritative Capability Declarations in CapabilityMatrix', () => {
-    it('declares task.submit as TASK_SUBMISSION_READY and enabled: false in production', () => {
+    it('declares task.submit as TASK_SUBMISSION_READY and enabled by default in Extension-First mode', () => {
       const cap = CAPABILITY_REGISTRY['task.submit'];
       assert.ok(cap, 'task.submit capability descriptor must exist');
       assert.strictEqual(cap.tier, 'TASK_SUBMISSION_READY');
-      assert.strictEqual(cap.enabled, false);
-      assert.ok(cap.limitation?.includes('defaults'), 'Must document daemon-level default model limitation');
+      assert.strictEqual(cap.enabled, true);
+      assert.ok(cap.limitation?.includes('defaults'), 'Must document operator confirmation & model routing gates');
     });
 
-    it('declares approval.resolve as APPROVAL_READY and enabled: false in production read-only slice', () => {
+    it('declares approval.resolve as APPROVAL_READY and enabled by default', () => {
       const cap = CAPABILITY_REGISTRY['approval.resolve'];
       assert.ok(cap, 'approval.resolve capability descriptor must exist');
       assert.strictEqual(cap.tier, 'APPROVAL_READY');
-      assert.strictEqual(cap.enabled, false);
-      assert.ok(cap.limitation?.includes('disabled in M14'), 'Must document read-only vertical slice limitation');
+      assert.strictEqual(cap.enabled, true);
     });
 
-    it('declares task.cancel as CANCEL_READY and enabled: false in production read-only slice', () => {
+    it('declares task.cancel as CANCEL_READY and enabled by default', () => {
       const cap = CAPABILITY_REGISTRY['task.cancel'];
       assert.ok(cap, 'task.cancel capability descriptor must exist');
       assert.strictEqual(cap.tier, 'CANCEL_READY');
-      assert.strictEqual(cap.enabled, false);
-      assert.ok(cap.limitation?.includes('disabled in M14'), 'Must document read-only vertical slice limitation');
+      assert.strictEqual(cap.enabled, true);
     });
 
-    it('declares artifact.review as ARTIFACT_REVIEW_READY and enabled: false', () => {
+    it('declares artifact.review as ARTIFACT_REVIEW_READY and enabled by default', () => {
       const cap = CAPABILITY_REGISTRY['artifact.review'];
       assert.ok(cap, 'artifact.review capability descriptor must exist');
       assert.strictEqual(cap.tier, 'ARTIFACT_REVIEW_READY');
-      assert.strictEqual(cap.enabled, false);
-      assert.ok(cap.limitation?.includes('capture_changes'), 'Must document backend PR-M15-03 requirement');
+      assert.strictEqual(cap.enabled, true);
     });
 
     it('declares read-only query capabilities as enabled: true', () => {
@@ -83,7 +84,6 @@ describe('Capability Matrix Truthfulness & Synchronization', () => {
       assert.strictEqual(manager.isPreviewMode, true);
       assert.strictEqual(manager.isCapabilityEnabled('approval.resolve'), true);
       assert.strictEqual(manager.isCapabilityEnabled('task.cancel'), true);
-      assert.strictEqual(manager.isCapabilityEnabled('artifact.review'), false);
 
       const approvalDesc = manager.getCapabilityDescriptor('approval.resolve');
       assert.ok(approvalDesc);
@@ -92,12 +92,12 @@ describe('Capability Matrix Truthfulness & Synchronization', () => {
       manager.dispose();
     });
 
-    it('reports strict production capabilities when active bridge is DaemonConnectedBridge', () => {
+    it('fails closed on mutating capabilities when DaemonConnectedBridge is not yet connected', () => {
       const daemonBridge = new DaemonConnectedBridge();
       const manager = new BridgeManager(daemonBridge);
 
       assert.strictEqual(manager.isDaemonMode, true);
-      // Even if connected, mutating operations are disabled in read-only slice
+      // Must fail closed while disconnected
       assert.strictEqual(manager.isCapabilityEnabled('approval.resolve'), false);
       assert.strictEqual(manager.isCapabilityEnabled('task.cancel'), false);
       assert.strictEqual(manager.isCapabilityEnabled('task.submit'), false);
@@ -108,24 +108,26 @@ describe('Capability Matrix Truthfulness & Synchronization', () => {
   });
 
   describe('DaemonConnectedBridge Truthful Fail-Closed Behavior', () => {
-    it('requestApprovalDecision fails closed and returns applied: false without mutating daemon', async () => {
+    it('requestApprovalDecision rejects when bridge is disconnected or capability is disabled', async () => {
       const bridge = new DaemonConnectedBridge();
-      const result = await bridge.requestApprovalDecision('appr-01', 'approved');
-
-      assert.strictEqual(result.applied, false);
-      assert.strictEqual(result.decision, 'approved');
-      assert.ok(result.message?.includes('disabled in M14-IPC-03'));
+      await assert.rejects(
+        async () => {
+          await bridge.requestApprovalDecision('appr-01', 'approved');
+        },
+        (err: Error) => err.message.includes('not connected')
+      );
       bridge.dispose();
     });
 
-    it('cancelCurrentRun rejects with disabled error instead of fabricating cancellation', async () => {
+    it('cancelCurrentRun rejects with capability policy error when task.cancel is disabled', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.cancel', false);
       const bridge = new DaemonConnectedBridge();
       await assert.rejects(
         async () => {
           await bridge.cancelCurrentRun();
         },
         (err: Error) => {
-          return err.message.includes('disabled in M14-IPC-03');
+          return err.message.includes('disabled by capability policy');
         }
       );
       bridge.dispose();

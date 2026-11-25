@@ -39,6 +39,9 @@ struct Cli {
 
     #[arg(long, default_value = "full", value_parser = ["full", "normal"])]
     durability: String,
+
+    #[arg(long, alias = "default_repo_path")]
+    repo: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -67,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_dir: cli.state_dir,
         db_path: cli.db_path,
         durability,
+        default_repo_path: cli.repo,
     };
 
     run_daemon(config).await?;

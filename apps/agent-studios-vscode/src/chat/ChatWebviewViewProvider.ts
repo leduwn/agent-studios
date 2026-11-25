@@ -283,6 +283,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
     const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
+    if (
+      session &&
+      this._messages.length === 0 &&
+      typeof this.bridge.getSessionTranscript === 'function'
+    ) {
+      this._messages = await this.bridge.getSessionTranscript(session.id).catch(() => []);
+    }
+
     const readiness = typeof this.bridge.getExecutionReadiness === 'function'
       ? await this.bridge.getExecutionReadiness().catch(() => null)
       : null;
@@ -578,6 +586,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     attachments?: ContextAttachment[];
     modelId?: string;
     providerId?: string;
+    runtime?: string;
+    studioId?: string;
+    reasoningEffort?: 'low' | 'medium' | 'high';
+    permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
+    followUpQueueMode?: 'queue' | 'steer';
   }): Promise<void> {
     const prompt = message.text || '';
     if (!prompt.trim()) {
@@ -585,6 +598,9 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
 
     const mode = message.mode || this._activeMode;
+    const reasoningEffort = message.reasoningEffort || this._reasoningEffort;
+    const permissionMode = message.permissionMode || this._permissionMode;
+    const followUpQueueMode = message.followUpQueueMode || this._followUpQueueMode;
     const baseAttachments = message.attachments || this._attachments;
     const attachments: ContextAttachment[] = [...baseAttachments];
     if (this._contextEngine) {
@@ -607,8 +623,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const request: ChatSendRequest = {
       message: prompt,
       mode,
+      studioId: message.studioId || this._stateProjection?.session?.id,
       modelId: message.modelId || this._selectedModelId,
       providerInstanceId: message.providerId || this._selectedProviderId,
+      reasoningEffort,
+      permissionMode,
+      followUpQueueMode,
+      runtime: message.runtime,
+      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined,
       attachments,
     };
 
@@ -807,7 +829,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     try {
       const session = await this.bridge.switchSession(sessionId);
       this._stateProjection?.switchSession(session);
-      this._messages = [];
+      const transcript =
+        typeof this.bridge.getSessionTranscript === 'function'
+          ? await this.bridge.getSessionTranscript(session.id).catch(() => [])
+          : [];
+      this._messages = transcript;
       await this.postMessage({
         type: 'syncState',
         state: {
@@ -872,6 +898,12 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         forkedSession = await this.bridge.createSession('Forked Session');
       }
       this._stateProjection?.switchSession(forkedSession);
+      if (typeof this.bridge.getSessionTranscript === 'function') {
+        const transcript = await this.bridge.getSessionTranscript(forkedSession.id).catch(() => null);
+        if (transcript && transcript.length > 0) {
+          this._messages = transcript;
+        }
+      }
       await this.postMessage({
         type: 'syncState',
         state: {
@@ -1109,6 +1141,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     const sessions = await this.bridge.listSessions().catch(() => []);
     const providers = await this.bridge.listProviderSummaries().catch(() => []);
     const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    if (
+      session &&
+      this._messages.length === 0 &&
+      typeof this.bridge.getSessionTranscript === 'function'
+    ) {
+      this._messages = await this.bridge.getSessionTranscript(session.id).catch(() => []);
+    }
 
     const readiness = typeof this.bridge.getExecutionReadiness === 'function'
       ? await this.bridge.getExecutionReadiness().catch(() => null)

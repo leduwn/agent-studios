@@ -74,6 +74,10 @@ pub struct ServerState {
     pub authorized_workspaces: Arc<Mutex<Vec<std::path::PathBuf>>>,
     pub strict_workspace_roots: bool,
     pub recovery_status: Arc<Mutex<agent_studios_ipc_protocol::RecoveryStatusReport>>,
+    pub state_dir: Option<std::path::PathBuf>,
+    pub provider_catalog_path: Option<std::path::PathBuf>,
+    pub secret_vault: Arc<crate::codex_runtime::DaemonSecretVault>,
+    pub codex_engine: Arc<crate::codex_runtime::CodexStudioEngine>,
 }
 
 impl ServerState {
@@ -213,6 +217,22 @@ impl ServerState {
     ) -> Vec<agent_studios_external_runtime::id::RuntimeImplementationId> {
         self.runtime_registry.list_ids().await
     }
+
+    pub async fn persist_provider_catalog(&self) {
+        if let Some(ref path) = self.provider_catalog_path {
+            let catalog = self.provider_catalog.read().await;
+            let snapshot = catalog.export_snapshot();
+            if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let tmp = path.with_extension("tmp");
+                if std::fs::write(&tmp, json.as_bytes()).is_ok() {
+                    let _ = std::fs::rename(&tmp, path);
+                }
+            }
+        }
+    }
 }
 
 /// Converts a domain `EventEnvelope` into a framed wire `IpcEvent` with a given sequence number.
@@ -252,6 +272,7 @@ pub struct IpcServerBuilder {
     recovery_status: Option<agent_studios_ipc_protocol::RecoveryStatusReport>,
     state_dir: Option<std::path::PathBuf>,
     db_path: Option<std::path::PathBuf>,
+    enable_codex_internal_runtime: bool,
 }
 
 impl Default for IpcServerBuilder {
@@ -269,6 +290,7 @@ impl IpcServerBuilder {
             recovery_status: None,
             state_dir: None,
             db_path: None,
+            enable_codex_internal_runtime: false,
             supported_capabilities: vec![
                 "worktree_isolation".to_string(),
                 "approval_routing".to_string(),
@@ -435,6 +457,11 @@ impl IpcServerBuilder {
         self
     }
 
+    pub fn with_codex_internal_runtime(mut self) -> Self {
+        self.enable_codex_internal_runtime = true;
+        self
+    }
+
     pub fn build(self) -> Result<IpcServer, TransportError> {
         let (cp, recovery_status) = if let Some(cp) = self.control_plane {
             let total_events = cp.event_count().unwrap_or(0);
@@ -535,11 +562,45 @@ impl IpcServerBuilder {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
         let nonce_tracker = NonceTracker::new(60_000, 10_000);
 
-        let catalog_arc = Arc::new(
-            self.provider_catalog
-                .unwrap_or_else(ProviderCatalog::with_builtin_definitions),
-        );
+        let mut loaded_catalog = if let Some(cat) = self.provider_catalog {
+            cat
+        } else {
+            let mut cat = ProviderCatalog::with_builtin_definitions();
+            if let Some(ref state_dir) = self.state_dir {
+                let catalog_path = state_dir.join("provider_catalog.json");
+                if catalog_path.exists()
+                    && let Ok(content) = std::fs::read_to_string(&catalog_path)
+                    && let Ok(snapshot) = serde_json::from_str::<
+                        agent_studios_provider::ProviderCatalogSnapshot,
+                    >(&content)
+                    && let Ok(restored) = ProviderCatalog::from_snapshot(snapshot)
+                {
+                    for def in restored.list_provider_definitions() {
+                        if cat.get_provider_definition(&def.id).is_none() {
+                            let _ = cat.register_provider_definition(def.clone());
+                        }
+                    }
+                    for inst in restored.list_provider_instances() {
+                        let _ = cat.register_provider_instance(inst.clone());
+                    }
+                    for model in restored.list_models() {
+                        let _ = cat.register_model(model.clone());
+                    }
+                }
+            }
+            cat
+        };
+        for def in agent_studios_provider::builtin_definitions() {
+            if loaded_catalog.get_provider_definition(&def.id).is_none() {
+                let _ = loaded_catalog.register_provider_definition(def);
+            }
+        }
+        let catalog_arc = Arc::new(loaded_catalog);
         let provider_catalog = Arc::new(tokio::sync::RwLock::new((*catalog_arc).clone()));
+        let provider_catalog_path = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("provider_catalog.json"));
 
         let default_model_ref = self.default_model_ref.or_else(|| {
             if let Ok(model_str) = std::env::var("AGENT_STUDIOS_DEFAULT_MODEL")
@@ -555,6 +616,44 @@ impl IpcServerBuilder {
             }
         });
 
+        let workspace_orchestrator = self.workspace_orchestrator.or_else(|| {
+            let base_dir = std::env::temp_dir().join("agent-studios-workspaces");
+            let wt_root = base_dir.join("worktrees");
+            let art_root = base_dir.join("artifacts");
+            agent_studios_workspace::WorkspaceOrchestrator::new(wt_root, art_root)
+                .ok()
+                .map(Arc::new)
+        });
+
+        let secrets_vault_path = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("secrets.vault.json"));
+        let secret_vault = Arc::new(crate::codex_runtime::DaemonSecretVault::new(
+            secrets_vault_path,
+        ));
+        let sessions_path = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("studio_sessions.json"));
+        let codex_home = self
+            .state_dir
+            .as_ref()
+            .map(|d| d.join("codex-home"))
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("agent-studios-codex-{}", uuid::Uuid::new_v4()))
+            });
+        let codex_engine = Arc::new(crate::codex_runtime::CodexStudioEngine::new(
+            codex_home,
+            provider_catalog.clone(),
+            secret_vault.clone(),
+            sessions_path,
+            workspace_orchestrator.clone(),
+            self.default_repo_path.clone(),
+            default_model_ref.clone(),
+        ));
+
+        let mut configured_instance_id = self.configured_instance_id;
         let runtime_registry = if let Some(reg) = self.runtime_registry {
             for rt in self.runtimes {
                 let id = rt.implementation_id().clone();
@@ -569,6 +668,16 @@ impl IpcServerBuilder {
         } else {
             let mut list = self.runtimes;
             if list.is_empty() {
+                if self.enable_codex_internal_runtime {
+                    list.push(Arc::new(
+                        crate::codex_runtime::InternalCodexAgentRuntime::new(codex_engine.clone()),
+                    ));
+                    if configured_instance_id.is_none() {
+                        configured_instance_id = Some(
+                            crate::codex_runtime::InternalCodexAgentRuntime::default_instance_id(),
+                        );
+                    }
+                }
                 #[allow(clippy::collapsible_if)]
                 if let Ok(rt) = agent_studios_opencode_runtime::OpenCodeRuntime::new() {
                     let rt = rt.with_catalog(catalog_arc.clone());
@@ -583,15 +692,6 @@ impl IpcServerBuilder {
                 },
             )?
         };
-
-        let workspace_orchestrator = self.workspace_orchestrator.or_else(|| {
-            let base_dir = std::env::temp_dir().join("agent-studios-workspaces");
-            let wt_root = base_dir.join("worktrees");
-            let art_root = base_dir.join("artifacts");
-            agent_studios_workspace::WorkspaceOrchestrator::new(wt_root, art_root)
-                .ok()
-                .map(Arc::new)
-        });
 
         let state = Arc::new(ServerState {
             auth_signer: Arc::new(HmacSigner),
@@ -616,12 +716,16 @@ impl IpcServerBuilder {
             active_runtime_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             pending_runtime_approvals: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             default_model_ref,
-            configured_instance_id: self.configured_instance_id,
+            configured_instance_id,
             in_flight_approvals: Arc::new(Mutex::new(HashSet::new())),
             in_flight_cancellations: Arc::new(Mutex::new(HashSet::new())),
             authorized_workspaces: Arc::new(Mutex::new(self.authorized_workspaces)),
             strict_workspace_roots: self.strict_workspace_roots,
             recovery_status: Arc::new(Mutex::new(recovery_status)),
+            state_dir: self.state_dir,
+            provider_catalog_path,
+            secret_vault,
+            codex_engine,
         });
 
         Ok(IpcServer { state })

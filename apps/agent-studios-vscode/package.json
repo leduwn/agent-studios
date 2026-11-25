@@ -2,7 +2,7 @@
   "name": "agent-studios-vscode",
   "displayName": "Agent Studios",
   "description": "Code-OSS native AI Agents Workbench extension for Agent Studios",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "publisher": "agent-studios",
   "license": "Apache-2.0",
   "repository": {

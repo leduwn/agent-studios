@@ -308,12 +308,20 @@ export function registerProviderManagementCommands(
           password: true,
         })) ?? defaultEnv;
 
+      const defaultModelInput =
+        (await vscode.window.showInputBox?.({
+          prompt: 'Optional default model ID (leave blank for dynamic /v1/models discovery)',
+          value: '',
+        })) || '';
+
       let secretRefKey = secretInput.trim();
       let secretSource: 'env' | 'secret_storage' | 'none' = !secretRefKey ? 'none' : 'env';
+      let rawSecretValue: string | undefined;
       const instanceId = crypto.randomUUID();
       if (secretRefKey && looksLikePlaintextSecret(secretRefKey)) {
+        rawSecretValue = secretRefKey;
         const handle = `agentStudios.secret.${instanceId}`;
-        await profileManager.storeSecretInExtensionVault(handle, secretRefKey);
+        await profileManager.storeSecretInExtensionVault(handle, rawSecretValue);
         secretRefKey = handle;
         secretSource = 'secret_storage';
       }
@@ -325,10 +333,14 @@ export function registerProviderManagementCommands(
         baseUrl,
         secretRefKey,
         secretSource,
+        defaultModel: defaultModelInput.trim() || undefined,
       });
 
       const bridge = bridgeProvider();
       if (bridge.connectionState === 'connected' && bridge.upsertProviderInstance) {
+        const initialModels = created.defaultModel
+          ? [{ id: created.defaultModel, name: created.defaultModel, contextWindow: 128000, isDefault: true }]
+          : [];
         await bridge.upsertProviderInstance({
           instanceId: created.instanceId,
           providerType: created.providerType,
@@ -336,6 +348,10 @@ export function registerProviderManagementCommands(
           protocol: created.protocol,
           baseUrl: created.baseUrl,
           secretEnvVar: created.secretRef.source === 'env' ? created.secretRef.key : undefined,
+          secretLocator: created.secretRef.source === 'secret_storage' ? created.secretRef.key : undefined,
+          secretBackend: created.secretRef.source === 'secret_storage' ? 'os_credential_store' : 'environment_variable',
+          secretValue: rawSecretValue,
+          models: initialModels,
         });
       }
 

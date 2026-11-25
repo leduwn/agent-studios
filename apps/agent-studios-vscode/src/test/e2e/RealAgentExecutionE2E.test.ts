@@ -422,6 +422,7 @@ describe('Tier 3: Real Agent Execution & Runtime E2E Suite', function () {
     });
 
     it('13. fails closed when task submission attempted with task.submit disabled in CapabilityMatrix', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
       assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), false);
 
       const challenge = OperatorConfirmationManager.createChallenge(validStudioId, 'test prompt');
@@ -589,40 +590,46 @@ describe('Tier 3: Real Agent Execution & Runtime E2E Suite', function () {
       assert.strictEqual(transport.sentCommands.length, 0, 'No wire commands should be dispatched');
     });
 
-    it('18. verifies DaemonConnectedBridge mutation methods fail closed in read-only slice', async () => {
-      // Disconnected or read-only slice mutation rejection checks
+    it('18. verifies DaemonConnectedBridge mutation methods fail closed when disconnected', async () => {
+      // Disconnected fail-closed rejection checks
       const bridge = new DaemonConnectedBridge();
 
-      // Approval mutation fails closed
-      const approvalRes = await bridge.requestApprovalDecision('appr-01', 'approved');
-      assert.strictEqual(approvalRes.applied, false);
-      assert.ok((approvalRes.message || '').includes('read-only'));
+      // Approval mutation fails closed while disconnected
+      await assert.rejects(
+        async () => {
+          await bridge.requestApprovalDecision('appr-01', 'approved');
+        },
+        (err: Error) => err.message.includes('not connected')
+      );
 
-      // Editor action fails closed
-      const editorRes = await bridge.submitEditorAction({
-        action: 'refactor',
-        documentUri: 'file:///workspace/app.ts',
-        languageId: 'typescript',
-        selectedText: 'code',
-        selectionRange: { startLine: 1, startCol: 0, endLine: 1, endCol: 4 },
-      });
-      assert.strictEqual(editorRes.accepted, false);
-      assert.ok((editorRes.message || '').includes('read-only'));
+      // Editor action fails closed while disconnected
+      await assert.rejects(
+        async () => {
+          await bridge.submitEditorAction({
+            action: 'refactor',
+            documentUri: 'file:///workspace/app.ts',
+            languageId: 'typescript',
+            selectedText: 'code',
+            selectionRange: { startLine: 1, startCol: 0, endLine: 1, endCol: 4 },
+          });
+        },
+        (err: Error) => err.message.includes('not connected')
+      );
 
-      // Chat prompt fails closed
+      // Chat prompt fails closed while disconnected
       await assert.rejects(
         async () => {
           await bridge.sendMessage({ message: 'write code', mode: 'agent' }, () => {});
         },
-        (err: Error) => err.message.includes('disabled') || err.message.includes('read-only')
+        (err: Error) => err.message.includes('not connected')
       );
 
-      // Create session fails closed
+      // Create session fails closed while disconnected
       await assert.rejects(
         async () => {
           await bridge.createSession('new session goal');
         },
-        (err: Error) => err.message.includes('disabled') || err.message.includes('read-only')
+        (err: Error) => err.message.includes('not connected')
       );
 
       bridge.dispose();

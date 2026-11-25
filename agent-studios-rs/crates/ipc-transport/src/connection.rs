@@ -21,8 +21,8 @@ use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
 use agent_studios_protocol::worktree::WorktreeState;
 use agent_studios_provider::{
-    DefaultSecretResolver, ModelDescriptor, ModelDiscoveryClient, ProviderConnectionReport,
-    ProviderInstance, ProviderInstanceId,
+    ModelDescriptor, ModelDiscoveryClient, ProviderConnectionReport, ProviderInstance,
+    ProviderInstanceId, secret::SecretReference,
 };
 use agent_studios_workspace::capture::parse_git_diff_summary;
 
@@ -152,6 +152,51 @@ pub enum IpcCommand {
     TestProviderConnection {
         provider_id: ProviderInstanceId,
     },
+    SetProviderSecret {
+        secret_ref: SecretReference,
+        secret_value: String,
+    },
+    DeleteProviderSecret {
+        secret_ref: SecretReference,
+    },
+    ExecuteChatTurn {
+        studio_id: StudioId,
+        prompt: String,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        provider_instance_id: Option<ProviderInstanceId>,
+        #[serde(default)]
+        model_id: Option<String>,
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        #[serde(default)]
+        permission_mode: Option<String>,
+        #[serde(default)]
+        follow_up_mode: Option<String>,
+        #[serde(default)]
+        workspace_path: Option<String>,
+        #[serde(default)]
+        attachments: Vec<serde_json::Value>,
+    },
+    InterruptChatTurn {
+        studio_id: StudioId,
+    },
+    GetStudioTranscript {
+        studio_id: StudioId,
+    },
+    ExecuteMultiAgentGoal {
+        studio_id: StudioId,
+        goal: String,
+        #[serde(default)]
+        provider_instance_id: Option<ProviderInstanceId>,
+        #[serde(default)]
+        model_id: Option<String>,
+        #[serde(default)]
+        repository_path: Option<String>,
+        #[serde(default)]
+        permission_mode: Option<String>,
+    },
     ListModels {
         #[serde(default)]
         instance_id: Option<ProviderInstanceId>,
@@ -271,6 +316,28 @@ pub enum IpcResponse {
     },
     ProviderConnectionTested {
         report: ProviderConnectionReport,
+    },
+    ProviderSecretUpdated {
+        secret_ref: SecretReference,
+        stored: bool,
+    },
+    ChatTurnCompleted {
+        studio_id: StudioId,
+        thread_id: String,
+        message: serde_json::Value,
+    },
+    ChatTurnInterrupted {
+        studio_id: StudioId,
+        interrupted: bool,
+    },
+    StudioTranscript {
+        studio_id: StudioId,
+        thread_id: Option<String>,
+        messages: Vec<serde_json::Value>,
+    },
+    MultiAgentGoalCompleted {
+        studio_id: StudioId,
+        summary: serde_json::Value,
     },
     ExtensibilityListed {
         skills: Vec<serde_json::Value>,
@@ -1524,6 +1591,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     };
                     match upsert_res {
                         Ok(provider) => {
+                            server_state.persist_provider_catalog().await;
                             let _ = server_state.emit_event(
                                 "provider_upserted",
                                 serde_json::json!({
@@ -1549,6 +1617,9 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                             .remove_provider_instance_cascade(&provider_id)
                             .is_ok()
                     };
+                    if removed {
+                        server_state.persist_provider_catalog().await;
+                    }
                     tx.send(IpcResponse::ProviderRemoved {
                         provider_id,
                         removed,
@@ -1571,7 +1642,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         }
                         Some(instance) => {
                             let discovery = ModelDiscoveryClient::new(
-                                Arc::new(DefaultSecretResolver::default()),
+                                server_state.secret_vault.clone(),
                                 std::time::Duration::from_secs(10),
                                 std::time::Duration::from_secs(300),
                             );
@@ -1584,6 +1655,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                             let _ = catalog.register_model(model.clone());
                                         }
                                     }
+                                    server_state.persist_provider_catalog().await;
                                     tx.send(IpcResponse::ModelsDiscovered {
                                         provider_id,
                                         models: discovered,
@@ -1619,7 +1691,7 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                         }
                         Some(instance) => {
                             let discovery = ModelDiscoveryClient::new(
-                                Arc::new(DefaultSecretResolver::default()),
+                                server_state.secret_vault.clone(),
                                 std::time::Duration::from_secs(10),
                                 std::time::Duration::from_secs(60),
                             );
@@ -1629,6 +1701,175 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                                 .map_err(|_| TransportError::ConnectionClosed)?;
                         }
                     }
+                }
+                IpcCommand::SetProviderSecret {
+                    secret_ref,
+                    secret_value,
+                } => {
+                    use agent_studios_provider::SecretStore;
+                    match server_state
+                        .secret_vault
+                        .set_secret(&secret_ref, &secret_value)
+                    {
+                        Ok(()) => {
+                            tx.send(IpcResponse::ProviderSecretUpdated {
+                                secret_ref,
+                                stored: true,
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(e) => {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Failed to store provider secret: {e}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::DeleteProviderSecret { secret_ref } => {
+                    use agent_studios_provider::SecretStore;
+                    match server_state.secret_vault.delete_secret(&secret_ref) {
+                        Ok(()) => {
+                            tx.send(IpcResponse::ProviderSecretUpdated {
+                                secret_ref,
+                                stored: false,
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(e) => {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Failed to delete provider secret: {e}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::ExecuteChatTurn {
+                    studio_id,
+                    prompt,
+                    mode,
+                    provider_instance_id,
+                    model_id,
+                    reasoning_effort,
+                    permission_mode,
+                    follow_up_mode,
+                    workspace_path,
+                    attachments,
+                } => {
+                    let state_bg = server_state.clone();
+                    let tx_bg = tx.clone();
+                    tokio::spawn(async move {
+                        let params = crate::codex_runtime::ChatTurnParams {
+                            studio_id,
+                            prompt,
+                            mode,
+                            provider_instance_id,
+                            model_id,
+                            reasoning_effort,
+                            permission_mode,
+                            follow_up_mode,
+                            workspace_path,
+                            attachments,
+                        };
+                        match state_bg
+                            .codex_engine
+                            .execute_chat_turn(&state_bg, params)
+                            .await
+                        {
+                            Ok(outcome) => {
+                                let msg_val = serde_json::to_value(&outcome.assistant_message)
+                                    .unwrap_or_default();
+                                let _ = tx_bg
+                                    .send(IpcResponse::ChatTurnCompleted {
+                                        studio_id: outcome.studio_id,
+                                        thread_id: outcome.thread_id,
+                                        message: msg_val,
+                                    })
+                                    .await;
+                            }
+                            Err(err) => {
+                                let _ = tx_bg.send(IpcResponse::Error { message: err }).await;
+                            }
+                        }
+                    });
+                }
+                IpcCommand::InterruptChatTurn { studio_id } => {
+                    match server_state
+                        .codex_engine
+                        .interrupt_studio_turn(studio_id)
+                        .await
+                    {
+                        Ok(interrupted) => {
+                            tx.send(IpcResponse::ChatTurnInterrupted {
+                                studio_id,
+                                interrupted,
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(err) => {
+                            tx.send(IpcResponse::Error { message: err })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::GetStudioTranscript { studio_id } => {
+                    let (thread_id, msgs) =
+                        server_state.codex_engine.get_transcript(studio_id).await;
+                    let messages = msgs
+                        .into_iter()
+                        .filter_map(|m| serde_json::to_value(m).ok())
+                        .collect();
+                    tx.send(IpcResponse::StudioTranscript {
+                        studio_id,
+                        thread_id,
+                        messages,
+                    })
+                    .await
+                    .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::ExecuteMultiAgentGoal {
+                    studio_id,
+                    goal,
+                    provider_instance_id,
+                    model_id,
+                    repository_path,
+                    permission_mode,
+                } => {
+                    let state_bg = server_state.clone();
+                    let tx_bg = tx.clone();
+                    tokio::spawn(async move {
+                        let params = crate::codex_runtime::MultiAgentGoalParams {
+                            studio_id,
+                            goal,
+                            provider_instance_id,
+                            model_id,
+                            repository_path,
+                            permission_mode,
+                        };
+                        match state_bg
+                            .codex_engine
+                            .execute_multi_agent_goal(&state_bg, params)
+                            .await
+                        {
+                            Ok(summary) => {
+                                let _ = tx_bg
+                                    .send(IpcResponse::MultiAgentGoalCompleted {
+                                        studio_id,
+                                        summary,
+                                    })
+                                    .await;
+                            }
+                            Err(err) => {
+                                let _ = tx_bg.send(IpcResponse::Error { message: err }).await;
+                            }
+                        }
+                    });
                 }
                 IpcCommand::ForkStudio {
                     source_studio_id,
@@ -1659,6 +1900,10 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
 
                     match res {
                         Ok(studio) => {
+                            server_state
+                                .codex_engine
+                                .fork_studio_transcript(source_studio_id, studio.id)
+                                .await;
                             let _ = server_state.publish_control_plane_events(envelopes);
                             tx.send(IpcResponse::StudioCreated { studio })
                                 .await

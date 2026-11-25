@@ -114,3 +114,12 @@ Agent Studios is not built in isolation; it stands on the shoulders of the open-
 | **UI Presentation** | Terminal / Web | Custom Electron shell | Terminal CLI | Full Monaco IDE | Dual Mode: Agent Mode + IDE Mode |
 | **Extensibility** | MCP, SKILL.md, AGENTS.md| Custom plugins | CLAUDE.md, MCP | VS Code extensions | MCP, SKILL.md, AGENTS.md, Extensions |
 | **Activity Bar Impact** | N/A | N/A | N/A | N/A | Exactly ONE icon (`Agents`) |
+
+---
+
+## 4. MASTER MISSION 05 Architectural Integration Notes (Direct Runtime Parity)
+
+During MASTER MISSION 05 (`fix/extension-real-execution-and-parity`), we bridged the gap between the crate-level Codex engine (`agent-studios-internal-agent` / `codex-core`) and the live `agsd` IPC daemon (`crates/ipc-transport`) + VS Code Extension (`apps/agent-studios-vscode`):
+- **Codex Runtime Bridge in `agsd` (`crates/ipc-transport/src/codex_runtime.rs`)**: Registered `InternalCodexAgentRuntime` (`codex`) alongside `CodexStudioEngine`, keeping `ThreadManager` / `CodexThread` alive per `StudioId` across sequential turns, forwarding composer controls (`reasoning_effort`, `permission_mode`, `follow_up_mode`, `mode`), and enforcing `SandboxPolicy::ReadOnly` + tool lifecycle guards in `read-only` mode.
+- **SecretStorage -> `DaemonSecretVault` Provisioning**: Closed the BYOK credential drop where VS Code `SecretStorage` keys previously caused `AuthenticationScheme::None`; secrets are now provisioned over local ACL-protected IPC (`SetProviderSecret`) into `DaemonSecretVault` (backing both `SecretStore` and `SecretResolver`) with 0600/User-only persistence, while `ProviderCatalog` snapshots persist across `agsd` restarts in `provider_catalog.json`.
+- **Workspace Extensibility & Multi-Agent Worktrees**: `CodexStudioEngine` resolves hierarchical `AGENTS.md`, progressively loads `$skill` `SKILL.md` bodies, executes `PreTurn` hooks and tier-gated MCP calls, and runs multi-agent Coordinator -> parallel Worktree Workers -> Reconciliation directly against `ServerState.control_plane` + `WorkspaceOrchestrator`.

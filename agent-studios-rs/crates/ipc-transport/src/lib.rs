@@ -7,6 +7,7 @@ pub mod windows;
 pub mod unix;
 
 pub mod client;
+pub mod codex_runtime;
 pub mod connection;
 pub mod daemon;
 pub mod lock;

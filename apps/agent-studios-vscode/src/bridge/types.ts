@@ -235,8 +235,15 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   mode?: AgentMode;
+  threadId?: string;
+  providerInstanceId?: string;
+  modelId?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
   attachments?: ContextAttachment[];
   toolCalls?: ToolCallInfo[];
+  artifacts?: Array<{ id?: string; path?: string; kind?: string }>;
+  metrics?: Record<string, unknown>;
   approvalId?: string;
   isStreaming?: boolean;
 }
@@ -244,8 +251,15 @@ export interface ChatMessage {
 export interface ChatSendRequest {
   message: string;
   mode: AgentMode;
+  studioId?: string;
   providerInstanceId?: string;
   modelId?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
+  followUpQueueMode?: 'queue' | 'steer';
+  runtime?: string;
+  workspacePath?: string;
+  multiAgent?: boolean;
   attachments?: ContextAttachment[];
   confirmedByUser?: boolean;
 }

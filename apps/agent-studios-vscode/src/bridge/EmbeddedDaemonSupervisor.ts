@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { DaemonDiscovery } from './ipc/DaemonDiscovery';
+import { NativeIpcTransport } from './ipc/NativeIpcTransport';
 
 export interface EnsureDaemonResult {
   running: boolean;
@@ -19,9 +20,12 @@ export interface EnsureDaemonResult {
   bootstrapPath: string;
   pid?: number;
   endpoint?: string;
+  reason?: string;
 }
 
 export class EmbeddedDaemonSupervisor {
+  private static _startupLocks = new Map<string, Promise<EnsureDaemonResult>>();
+
   public static resolveAgsdBinary(extensionPath?: string): string | null {
     const exeSuffix = process.platform === 'win32' ? '.exe' : '';
     const binaryName = `agsd${exeSuffix}`;
@@ -43,8 +47,9 @@ export class EmbeddedDaemonSupervisor {
         : undefined,
     ];
 
+    // Security gate: only resolve workspace-relative binaries when the workspace is explicitly trusted
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (workspaceRoot) {
+    if (workspaceRoot && vscode.workspace.isTrusted !== false) {
       candidates.push(
         path.join(workspaceRoot, 'agent-studios-rs', 'target', 'release', binaryName),
         path.join(workspaceRoot, 'agent-studios-rs', 'target', 'debug', binaryName)
@@ -71,6 +76,29 @@ export class EmbeddedDaemonSupervisor {
     }
   }
 
+  private static async verifyIpcHealth(
+    endpoint: string,
+    keyId: string,
+    clientKey: string
+  ): Promise<boolean> {
+    const transport = new NativeIpcTransport({
+      endpoint,
+      keyId,
+      clientKey,
+      connectTimeoutMs: 1500,
+      commandTimeoutMs: 2500,
+    });
+    try {
+      await transport.connect();
+      const resp = await transport.sendCommand({ type: 'get_health' });
+      return resp.type === 'health' && resp.status === 'healthy';
+    } catch {
+      return false;
+    } finally {
+      transport.disconnect();
+    }
+  }
+
   public static async ensureDaemonRunning(options?: {
     extensionPath?: string;
     bootstrapPath?: string;
@@ -84,10 +112,40 @@ export class EmbeddedDaemonSupervisor {
     const bootstrapPath =
       options?.bootstrapPath || DaemonDiscovery.getDefaultRuntimePath();
 
+    const existing = this._startupLocks.get(bootstrapPath);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = this.ensureDaemonRunningInternal(bootstrapPath, options).finally(() => {
+      if (this._startupLocks.get(bootstrapPath) === promise) {
+        this._startupLocks.delete(bootstrapPath);
+      }
+    });
+    this._startupLocks.set(bootstrapPath, promise);
+    return promise;
+  }
+
+  private static async ensureDaemonRunningInternal(
+    bootstrapPath: string,
+    options?: {
+      extensionPath?: string;
+      bootstrapPath?: string;
+      adminBootstrapPath?: string;
+      pipeName?: string;
+      socketPath?: string;
+      stateDir?: string;
+      workspacePath?: string;
+      startupTimeoutMs?: number;
+    }
+  ): Promise<EnsureDaemonResult> {
     if (fs.existsSync(bootstrapPath)) {
       try {
         const discovered = await DaemonDiscovery.loadBootstrapInfo(bootstrapPath);
-        if (this.isProcessAlive(discovered.pid)) {
+        if (
+          this.isProcessAlive(discovered.pid) &&
+          (await this.verifyIpcHealth(discovered.endpoint, discovered.key_id, discovered.client_key))
+        ) {
           return {
             running: true,
             startedBySupervisor: false,
@@ -109,6 +167,7 @@ export class EmbeddedDaemonSupervisor {
         startedBySupervisor: false,
         binaryPath: null,
         bootstrapPath,
+        reason: 'agsd binary not found in extension bundle, configured path, or trusted workspace.',
       };
     }
 
@@ -125,6 +184,10 @@ export class EmbeddedDaemonSupervisor {
     if (options?.stateDir) {
       args.push('--state-dir', options.stateDir);
     }
+    const workspaceRoot = options?.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot && vscode.workspace.isTrusted !== false) {
+      args.push('--repo', workspaceRoot);
+    }
 
     const child = childProcess.spawn(binaryPath, args, {
       detached: true,
@@ -134,12 +197,16 @@ export class EmbeddedDaemonSupervisor {
     });
     child.unref();
 
-    const deadline = Date.now() + (options?.startupTimeoutMs ?? 5000);
+    const deadline = Date.now() + (options?.startupTimeoutMs ?? 8000);
+    let backoffMs = 50;
     while (Date.now() < deadline) {
       if (fs.existsSync(bootstrapPath)) {
         try {
           const discovered = await DaemonDiscovery.loadBootstrapInfo(bootstrapPath);
-          if (discovered.endpoint) {
+          if (
+            discovered.endpoint &&
+            (await this.verifyIpcHealth(discovered.endpoint, discovered.key_id, discovered.client_key))
+          ) {
             return {
               running: true,
               startedBySupervisor: true,
@@ -150,10 +217,11 @@ export class EmbeddedDaemonSupervisor {
             };
           }
         } catch {
-          // Wait until daemon finishes writing JSON atomically
+          // Wait until daemon finishes writing bootstrap file and binding IPC listener
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      backoffMs = Math.min(250, Math.round(backoffMs * 1.4));
     }
 
     return {
@@ -162,6 +230,7 @@ export class EmbeddedDaemonSupervisor {
       binaryPath,
       bootstrapPath,
       pid: child.pid,
+      reason: 'Timed out waiting for agsd IPC health verification.',
     };
   }
 }

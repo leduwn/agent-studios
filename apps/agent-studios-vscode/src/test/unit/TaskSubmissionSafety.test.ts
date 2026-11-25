@@ -72,7 +72,7 @@ describe('M14.1 Task Submission Safety & Fail-Closed Regression Tests', () => {
   // =========================================================================
   describe('1. Direct SubmitTaskAdapter Bypass & Fail-Closed Enforcement', () => {
     it('fails closed when authoritative capability check fails (task.submit disabled)', async () => {
-      // Capability is disabled by default in M14 read-only slice
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
       assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), false);
 
       const challenge = OperatorConfirmationManager.createChallenge(

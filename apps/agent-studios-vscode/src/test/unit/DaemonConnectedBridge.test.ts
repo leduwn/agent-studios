@@ -281,13 +281,14 @@ describe('DaemonConnectedBridge Unit Tests', () => {
     bridge.dispose();
   });
 
-  it('fails closed on mutating operations in read-only slice', async () => {
+  it('fails closed when capabilities are disabled by policy and executes real turns when enabled', async () => {
+    const { CapabilityMatrix } = await import('../../bridge/ipc/CapabilityMatrix');
     await startMockDaemon((cmd, sendResponse) => {
       if (cmd.type === 'negotiate_capabilities') {
         sendResponse({
           type: 'capabilities_negotiated',
           selected_version: { major: 1, minor: 0, patch: 0 },
-          agreed_capabilities: [],
+          agreed_capabilities: ['task.submit', 'approval.resolve'],
         });
       } else if (cmd.type === 'authenticate') {
         sendResponse({ type: 'authenticated', session_id: 'sess-001' });
@@ -295,6 +296,26 @@ describe('DaemonConnectedBridge Unit Tests', () => {
         // Stream activation, no response
       } else if (cmd.type === 'list_studios') {
         sendResponse({ type: 'studios', studios: [] });
+      } else if (cmd.type === 'create_studio') {
+        sendResponse({
+          type: 'studio_created',
+          studio: { id: 'studio-created-01', name: cmd.name, created_at: '2026-10-30T12:00:00Z' },
+        });
+      } else if (cmd.type === 'resolve_approval') {
+        sendResponse({ type: 'approval_resolved', approval_id: cmd.approval_id, status: 'authorized' });
+      } else if (cmd.type === 'execute_chat_turn') {
+        sendResponse({
+          type: 'chat_turn_completed',
+          studio_id: cmd.studio_id,
+          thread_id: 'thread-live-01',
+          message: {
+            id: 'msg-1',
+            role: 'assistant',
+            content: `Echo: ${cmd.prompt}`,
+            timestamp: Date.now(),
+            mode: cmd.mode,
+          },
+        });
       }
     });
 
@@ -302,40 +323,54 @@ describe('DaemonConnectedBridge Unit Tests', () => {
     const bridge = new DaemonConnectedBridge({ transport });
     await bridge.connect();
 
-    // 1. Approval decision fails closed
-    const approvalRes = await bridge.requestApprovalDecision('appr-01', 'approved');
-    assert.strictEqual(approvalRes.applied, false);
-    assert.ok(approvalRes.message?.includes('disabled in M14-IPC-03'));
+    try {
+      // 1. Fail-closed policy check when capabilities are disabled
+      CapabilityMatrix.setCapabilityEnabled('approval.resolve', false);
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
 
-    // 2. Editor action fails closed
-    const editorRes = await bridge.submitEditorAction({
-      action: 'refactor',
-      documentUri: 'file:///test.ts',
-      languageId: 'typescript',
-      selectedText: 'code',
-      selectionRange: { startLine: 0, startCol: 0, endLine: 1, endCol: 1 },
-    });
-    assert.strictEqual(editorRes.accepted, false);
-    assert.ok(editorRes.message.includes('disabled in M14-IPC-03'));
+      const approvalDisabled = await bridge.requestApprovalDecision('appr-01', 'approved');
+      assert.strictEqual(approvalDisabled.applied, false);
+      assert.ok(approvalDisabled.message?.includes('disabled by capability policy'));
 
-    // 3. Send message fails closed
-    await assert.rejects(async () => {
-      await bridge.sendMessage(
-        { message: 'Do something', mode: 'agent' },
-        () => {}
+      const editorDisabled = await bridge.submitEditorAction({
+        action: 'refactor',
+        documentUri: 'file:///test.ts',
+        languageId: 'typescript',
+        selectedText: 'code',
+        selectionRange: { startLine: 0, startCol: 0, endLine: 1, endCol: 1 },
+      });
+      assert.strictEqual(editorDisabled.accepted, false);
+      assert.ok(editorDisabled.message.includes('disabled by capability policy'));
+
+      await assert.rejects(
+        async () => bridge.sendMessage({ message: 'Do something', mode: 'agent' }, () => {}),
+        (err: Error) => err.message.includes('disabled by capability policy')
       );
-    }, (err: Error) => {
-      return err.message.includes('disabled in M14-IPC-03');
-    });
 
-    // 4. Create session fails closed
-    await assert.rejects(async () => {
-      await bridge.createSession('New goal');
-    }, (err: Error) => {
-      return err.message.includes('disabled in M14-IPC-03');
-    });
+      // 2. When enabled, createSession, sendMessage, and requestApprovalDecision route to daemon IPC
+      CapabilityMatrix.resetCapabilities();
+      const studio = await bridge.createSession('New goal');
+      assert.strictEqual(studio.id, 'studio-created-01');
 
-    bridge.dispose();
+      const deltas: string[] = [];
+      const reply = await bridge.sendMessage(
+        { message: 'Implement feature', mode: 'agent', reasoningEffort: 'high', permissionMode: 'auto-edit' },
+        (chunk) => {
+          if (chunk.type === 'text_delta' && chunk.text) {
+            deltas.push(chunk.text);
+          }
+        }
+      );
+      assert.strictEqual(reply.content, 'Echo: Implement feature');
+      assert.strictEqual(reply.threadId, 'thread-live-01');
+      assert.ok(deltas.join('').includes('Echo: Implement feature'));
+
+      const approvalApplied = await bridge.requestApprovalDecision('appr-01', 'approved');
+      assert.strictEqual(approvalApplied.applied, true);
+    } finally {
+      CapabilityMatrix.resetCapabilities();
+      bridge.dispose();
+    }
   });
 
   it('handles event streaming, watermarking, and deduplication', async () => {

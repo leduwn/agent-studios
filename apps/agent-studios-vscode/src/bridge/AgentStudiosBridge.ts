@@ -95,8 +95,29 @@ export interface AgentStudiosBridge extends vscode.Disposable {
     protocol?: string;
     baseUrl: string;
     secretEnvVar?: string;
+    secretLocator?: string;
+    secretBackend?: 'environment_variable' | 'os_credential_store' | 'external';
+    secretValue?: string;
     models?: ProviderModel[];
   }): Promise<ProviderSummary>;
+  setProviderSecret?(
+    locator: string,
+    secretValue: string,
+    backend?: 'environment_variable' | 'os_credential_store' | 'external'
+  ): Promise<boolean>;
+  deleteProviderSecret?(
+    locator: string,
+    backend?: 'environment_variable' | 'os_credential_store' | 'external'
+  ): Promise<boolean>;
+  getSessionTranscript?(studioId: string): Promise<ChatMessage[]>;
+  executeMultiAgentGoal?(request: {
+    studioId?: string;
+    goal: string;
+    providerInstanceId?: string;
+    modelId?: string;
+    repositoryPath?: string;
+    permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
+  }): Promise<Record<string, unknown>>;
   removeProviderInstance?(providerId: string): Promise<boolean>;
   discoverProviderModels?(providerId: string): Promise<ProviderModel[]>;
   testProviderConnection?(providerId: string): Promise<{

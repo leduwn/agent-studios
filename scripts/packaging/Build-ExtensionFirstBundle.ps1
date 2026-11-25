@@ -7,7 +7,7 @@
 param(
     [ValidateSet("debug", "release")]
     [string]$Profile = "release",
-    [string]$Version = "1.1.0",
+    [string]$Version = "1.1.1",
     [string]$OutputBase = "C:\AgentStudiosBuild\release-bundle",
     [switch]$SkipCargoBuild
 )
@@ -56,9 +56,13 @@ if (-not (Test-Path $agsSrc)) { throw "Missing compiled binary: $agsSrc" }
 
 $binRootDir = Join-Path $vscodeDir "bin"
 $platformBinDir = Join-Path $binRootDir "win32-x64"
-$vsixPath = Join-Path $OutputBase "agent-studios-vscode-$Version-win32-x64.vsix"
+$vsixPath = Join-Path $OutputBase "agent-studios-vscode-$Version-$shortSha-win32-x64.vsix"
 $vsixShaPath = "$vsixPath.sha256"
-$manifestPath = Join-Path $OutputBase "EXTENSION_FIRST_MANIFEST.json"
+$manifestPath = Join-Path $OutputBase "EXTENSION_MANIFEST_$Version-$shortSha.json"
+
+if ($Version -eq "1.1.0") {
+    throw "Refusing to overwrite preserved v1.1.0 VSIX baseline."
+}
 
 $pkgJsonPath = Join-Path $vscodeDir "package.json"
 $pkgObj = Get-Content -Raw $pkgJsonPath | ConvertFrom-Json

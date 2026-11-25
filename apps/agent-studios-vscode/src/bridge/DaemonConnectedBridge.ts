@@ -364,20 +364,22 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Resolves approval decision.
-   * STRICTLY DISABLED AND FAILS CLOSED in M14-IPC-03 read-only slice.
+   * Resolves approval decision via authoritative agsd IPC when approval.resolve is enabled.
    */
   public async requestApprovalDecision(
     id: string,
     decision: 'approved' | 'denied'
   ): Promise<ApprovalDecisionResult> {
-    // FAIL CLOSED: Never mutate backend daemon state in read-only slice.
-    return {
-      id,
-      decision,
-      applied: false,
-      message: 'Approval mutation is disabled in M14-IPC-03 read-only connected vertical slice.',
-    };
+    if (!CapabilityMatrix.isCapabilityEnabled('approval.resolve')) {
+      return {
+        id,
+        decision,
+        applied: false,
+        message: 'Approval resolution is disabled by capability policy (approval.resolve disabled).',
+      };
+    }
+    this.assertConnected();
+    return this.resolveApprovalAuthoritative(id, decision);
   }
 
   /**
@@ -494,13 +496,39 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Submits editor action.
-   * STRICTLY DISABLED AND FAILS CLOSED in M14-IPC-03 read-only slice.
+   * Submits editor action through connected agsd Internal Codex Engine.
    */
   public async submitEditorAction(action: EditorActionRequest): Promise<EditorActionResult> {
+    this.assertConnected();
+    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
+      return {
+        accepted: false,
+        message: `Editor action '${action.action}' is disabled by capability policy.`,
+      };
+    }
+    if (vscode.workspace.isTrusted === false) {
+      return {
+        accepted: false,
+        message: 'Editor action blocked in untrusted workspace.',
+      };
+    }
+
+    const prompt =
+      `Editor Action (${action.action}) for ${action.documentUri} (${action.languageId}, ` +
+      `lines ${action.selectionRange.startLine}-${action.selectionRange.endLine}):\n` +
+      `\`\`\`${action.languageId}\n${action.selectedText}\n\`\`\``;
+    const response = await this.sendMessage(
+      {
+        message: prompt,
+        mode: action.action === 'explain' ? 'ask' : 'agent',
+        permissionMode: action.action === 'explain' ? 'read-only' : 'auto-edit',
+      },
+      () => {}
+    );
     return {
-      accepted: false,
-      message: `Editor action '${action.action}' is disabled in M14-IPC-03 read-only slice.`,
+      accepted: true,
+      taskId: response.id,
+      message: response.content,
     };
   }
 
@@ -546,14 +574,163 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Sends chat message / prompts agent.
-   * STRICTLY DISABLED AND FAILS CLOSED in M14-IPC-03 read-only slice.
+   * Sends chat message / prompts agent via agsd Internal Codex Engine (`execute_chat_turn` / `execute_multi_agent_goal`).
    */
   public async sendMessage(
-    _request: ChatSendRequest,
-    _onChunk: (chunk: ChatStreamChunk) => void
+    request: ChatSendRequest,
+    onChunk: (chunk: ChatStreamChunk) => void
   ): Promise<ChatMessage> {
-    throw new Error('Task execution and AI chat prompt submission are disabled in M14-IPC-03 read-only slice.');
+    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
+      throw new Error('Task execution and AI chat prompt submission are disabled by capability policy.');
+    }
+    if (vscode.workspace.isTrusted === false) {
+      throw new Error('Chat prompt execution blocked in untrusted workspace.');
+    }
+    this.assertConnected();
+
+    let studioId = request.studioId || this._activeStudioId;
+    if (!studioId) {
+      const created = await this.createSession('Agent Studios Chat Session');
+      studioId = created.id;
+    }
+
+    const activeWorkspace =
+      request.workspacePath || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    const trimmed = request.message.trim();
+    const isOrchestrate = Boolean(request.multiAgent) || trimmed.startsWith('/orchestrate ');
+    const goalText = trimmed.startsWith('/orchestrate ')
+      ? trimmed.slice('/orchestrate '.length).trim()
+      : request.message;
+
+    let streamedAnything = false;
+    const eventListener = this._onEvent.event((ev) => {
+      const details = ev.details || {};
+      const evStudio = typeof details.studio_id === 'string' ? details.studio_id : undefined;
+      if (evStudio && evStudio !== studioId) {
+        return;
+      }
+      if (ev.type === 'runtime_output_delta' || ev.type === 'output_delta') {
+        const text = typeof details.text === 'string' ? details.text : ev.summary;
+        if (text) {
+          streamedAnything = true;
+          onChunk({ type: 'text_delta', text });
+        }
+      } else if (ev.type === 'tool_executing' || ev.type === 'tool_started') {
+        onChunk({
+          type: 'tool_call',
+          toolCall: {
+            id: typeof details.call_id === 'string' ? details.call_id : ev.id,
+            name: typeof details.tool_name === 'string' ? details.tool_name : 'tool',
+            status: 'running',
+            target: typeof details.target === 'string' ? details.target : undefined,
+          },
+        });
+      } else if (ev.type === 'tool_completed' || ev.type === 'tool_failed') {
+        onChunk({
+          type: 'tool_call',
+          toolCall: {
+            id: typeof details.call_id === 'string' ? details.call_id : ev.id,
+            name: typeof details.tool_name === 'string' ? details.tool_name : 'tool',
+            status: ev.type === 'tool_failed' ? 'failed' : 'completed',
+          },
+        });
+      } else if (ev.type === 'approval_requested') {
+        const approval = ev.details as unknown as ApprovalRequest;
+        if (approval) {
+          onChunk({ type: 'approval_required', approval });
+        }
+      }
+    });
+
+    try {
+      if (isOrchestrate) {
+        const resp = await this._transport!.sendCommand(
+          {
+            type: 'execute_multi_agent_goal',
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            studio_id: studioId,
+            goal: goalText,
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            provider_instance_id: request.providerInstanceId,
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            model_id: request.modelId,
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            repository_path: activeWorkspace,
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            permission_mode: request.permissionMode,
+          },
+          180000
+        );
+        if (resp.type === 'error') {
+          onChunk({ type: 'error', error: resp.message });
+          throw new Error(resp.message);
+        }
+        if (resp.type !== 'multi_agent_goal_completed') {
+          throw new Error(`Unexpected response for execute_multi_agent_goal: ${resp.type}`);
+        }
+        const summaryObj = resp.summary;
+        const content =
+          typeof summaryObj.coordinator_summary === 'string' && summaryObj.coordinator_summary.trim()
+            ? summaryObj.coordinator_summary
+            : JSON.stringify(summaryObj, null, 2);
+        if (!streamedAnything) {
+          onChunk({ type: 'text_delta', text: content });
+        }
+        onChunk({ type: 'done' });
+        return {
+          id: `msg_multi_${Date.now()}`,
+          role: 'assistant',
+          content,
+          timestamp: Date.now(),
+          mode: request.mode,
+          providerInstanceId: request.providerInstanceId,
+          modelId: request.modelId,
+        };
+      }
+
+      const resp = await this._transport!.sendCommand(
+        {
+          type: 'execute_chat_turn',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          studio_id: studioId,
+          prompt: request.message,
+          mode: request.mode,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          provider_instance_id: request.providerInstanceId,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          model_id: request.modelId,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          reasoning_effort: request.reasoningEffort,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          permission_mode: request.permissionMode,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          follow_up_mode: request.followUpQueueMode,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          workspace_path: activeWorkspace,
+          attachments: request.attachments ?? [],
+        },
+        180000
+      );
+
+      if (resp.type === 'error') {
+        onChunk({ type: 'error', error: resp.message });
+        throw new Error(resp.message);
+      }
+      if (resp.type !== 'chat_turn_completed') {
+        throw new Error(`Unexpected response for execute_chat_turn: ${resp.type}`);
+      }
+
+      const raw = resp.message;
+      const content = typeof raw.content === 'string' ? raw.content : '';
+      if (!streamedAnything && content) {
+        onChunk({ type: 'text_delta', text: content });
+      }
+      onChunk({ type: 'done' });
+      return this.mapTranscriptRecord(raw, request.mode, resp.thread_id);
+    } finally {
+      eventListener.dispose();
+    }
   }
 
   /**
@@ -578,7 +755,7 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
    */
   public async cancelCurrentRun(taskId?: string, reason?: string): Promise<void> {
     if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
-      throw new Error('Task run cancellation is disabled in M14-IPC-03 read-only connected vertical slice.');
+      throw new Error('Task cancellation is disabled by capability policy.');
     }
     this.assertConnected();
     if (taskId) {
@@ -590,6 +767,16 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     if (running) {
       await this.cancelTask(running.id, reason);
       return;
+    }
+    if (this._activeStudioId) {
+      const resp = await this._transport!.sendCommand({
+        type: 'interrupt_chat_turn',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        studio_id: this._activeStudioId,
+      });
+      if (resp.type === 'chat_turn_interrupted' && resp.interrupted) {
+        return;
+      }
     }
     throw new TaskCancellationError('No active or running task found to cancel in current studio.');
   }
@@ -611,11 +798,166 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
-   * Creates a new session.
-   * STRICTLY DISABLED in read-only slice.
+   * Creates a new authoritative studio session on the connected agsd daemon.
    */
-  public async createSession(_goal?: string): Promise<SessionInfo> {
-    throw new Error('Creating studios is disabled in M14-IPC-03 read-only slice.');
+  public async createSession(goal?: string): Promise<SessionInfo> {
+    return this.createStudioAuthoritative(goal?.trim() || 'Agent Studios Session');
+  }
+
+  /**
+   * Fetches authoritative persisted transcript messages for a studio from agsd.
+   */
+  public async getSessionTranscript(studioId: string): Promise<ChatMessage[]> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'get_studio_transcript',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      studio_id: studioId,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Failed to fetch studio transcript: ${resp.message}`);
+    }
+    if (resp.type !== 'studio_transcript') {
+      return [];
+    }
+    return resp.messages.map((m) => this.mapTranscriptRecord(m, undefined, resp.thread_id ?? undefined));
+  }
+
+  /**
+   * Provisions a secret credential into agsd's zero-leakage DaemonSecretVault.
+   */
+  public async setProviderSecret(
+    locator: string,
+    secretValue: string,
+    backend: 'environment_variable' | 'os_credential_store' | 'external' = 'os_credential_store'
+  ): Promise<boolean> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'set_provider_secret',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      secret_ref: { backend, locator },
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      secret_value: secretValue,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Failed to provision provider secret: ${resp.message}`);
+    }
+    return resp.type === 'provider_secret_updated' ? resp.stored : false;
+  }
+
+  /**
+   * Deletes a secret credential from agsd's DaemonSecretVault.
+   */
+  public async deleteProviderSecret(
+    locator: string,
+    backend: 'environment_variable' | 'os_credential_store' | 'external' = 'os_credential_store'
+  ): Promise<boolean> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'delete_provider_secret',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      secret_ref: { backend, locator },
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Failed to delete provider secret: ${resp.message}`);
+    }
+    return resp.type === 'provider_secret_updated' ? !resp.stored : false;
+  }
+
+  /**
+   * Executes a coordinated multi-agent DAG goal inside isolated Git worktrees.
+   */
+  public async executeMultiAgentGoal(request: {
+    studioId?: string;
+    goal: string;
+    providerInstanceId?: string;
+    modelId?: string;
+    repositoryPath?: string;
+    permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
+  }): Promise<Record<string, unknown>> {
+    this.assertConnected();
+    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
+      throw new Error('Multi-agent execution is disabled by capability policy.');
+    }
+    let studioId = request.studioId || this._activeStudioId;
+    if (!studioId) {
+      const created = await this.createSession(request.goal.slice(0, 60));
+      studioId = created.id;
+    }
+    const resp = await this._transport!.sendCommand(
+      {
+        type: 'execute_multi_agent_goal',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        studio_id: studioId,
+        goal: request.goal,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        provider_instance_id: request.providerInstanceId,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        model_id: request.modelId,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        repository_path: request.repositoryPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        permission_mode: request.permissionMode,
+      },
+      180000
+    );
+    if (resp.type === 'error') {
+      throw new Error(resp.message);
+    }
+    if (resp.type !== 'multi_agent_goal_completed') {
+      throw new Error(`Unexpected response for execute_multi_agent_goal: ${resp.type}`);
+    }
+    return resp.summary;
+  }
+
+  private mapTranscriptRecord(
+    raw: Record<string, unknown>,
+    fallbackMode?: ChatSendRequest['mode'],
+    fallbackThreadId?: string
+  ): ChatMessage {
+    const toolCalls = Array.isArray(raw.tool_calls)
+      ? (raw.tool_calls as Array<Record<string, unknown>>).map((tc) => ({
+          id: String(tc.id ?? ''),
+          name: String(tc.name ?? 'tool'),
+          status: (tc.status === 'failed' ? 'failed' : tc.status === 'running' ? 'running' : 'completed') as
+            | 'running'
+            | 'completed'
+            | 'failed',
+          target: typeof tc.target === 'string' ? tc.target : undefined,
+          inputSummary: typeof tc.input_summary === 'string' ? tc.input_summary : undefined,
+          outputSummary: typeof tc.output_summary === 'string' ? tc.output_summary : undefined,
+          durationMs: typeof tc.duration_ms === 'number' ? tc.duration_ms : undefined,
+          error: typeof tc.error === 'string' ? tc.error : undefined,
+        }))
+      : undefined;
+
+    return {
+      id: typeof raw.id === 'string' ? raw.id : `msg_${Date.now()}`,
+      role: raw.role === 'user' ? 'user' : raw.role === 'system' ? 'system' : 'assistant',
+      content: typeof raw.content === 'string' ? raw.content : '',
+      timestamp: typeof raw.timestamp === 'number' ? raw.timestamp : Date.now(),
+      mode: (typeof raw.mode === 'string' ? raw.mode : fallbackMode) as ChatMessage['mode'],
+      threadId: typeof raw.thread_id === 'string' ? raw.thread_id : fallbackThreadId,
+      providerInstanceId:
+        typeof raw.provider_instance_id === 'string' ? raw.provider_instance_id : undefined,
+      modelId: typeof raw.model_id === 'string' ? raw.model_id : undefined,
+      reasoningEffort:
+        typeof raw.reasoning_effort === 'string'
+          ? (raw.reasoning_effort as ChatMessage['reasoningEffort'])
+          : undefined,
+      permissionMode:
+        typeof raw.permission_mode === 'string'
+          ? (raw.permission_mode as ChatMessage['permissionMode'])
+          : undefined,
+      toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
+      artifacts: Array.isArray(raw.artifacts)
+        ? (raw.artifacts as ChatMessage['artifacts'])
+        : undefined,
+      metrics:
+        raw.metrics && typeof raw.metrics === 'object'
+          ? (raw.metrics as Record<string, unknown>)
+          : undefined,
+    };
   }
 
   /**
@@ -715,22 +1057,13 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
     protocol?: string;
     baseUrl: string;
     secretEnvVar?: string;
+    secretLocator?: string;
+    secretBackend?: 'environment_variable' | 'os_credential_store' | 'external';
+    secretValue?: string;
     models?: ProviderModel[];
   }): Promise<ProviderSummary> {
     this.assertConnected();
     const instanceUuid = payload.instanceId || crypto.randomUUID();
-    const authScheme = payload.secretEnvVar
-      ? {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          bearer_token: {
-            secret: {
-              backend: 'environment_variable',
-              locator: payload.secretEnvVar,
-            },
-          },
-        }
-      : 'none';
-
     const protocolFamily =
       payload.protocol ||
       (payload.providerType === 'anthropic'
@@ -738,6 +1071,36 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
         : payload.providerType === 'google-gemini'
           ? 'gemini_generate_content'
           : 'openai_chat_completions');
+
+    const secretBackend =
+      payload.secretBackend ||
+      (payload.secretLocator ? 'os_credential_store' : 'environment_variable');
+    const secretLocator = payload.secretLocator || payload.secretEnvVar;
+
+    if (payload.secretValue && secretLocator) {
+      await this.setProviderSecret(secretLocator, payload.secretValue, secretBackend);
+    }
+
+    let authScheme: unknown = 'none';
+    if (secretLocator) {
+      const secretObj = { backend: secretBackend, locator: secretLocator };
+      if (protocolFamily === 'anthropic_messages') {
+        authScheme = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          api_key_header: { header_name: 'x-api-key', secret: secretObj },
+        };
+      } else if (protocolFamily === 'gemini_generate_content') {
+        authScheme = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          api_key_header: { header_name: 'x-goog-api-key', secret: secretObj },
+        };
+      } else {
+        authScheme = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          bearer_token: { secret: secretObj },
+        };
+      }
+    }
 
     /* eslint-disable @typescript-eslint/naming-convention */
     const provider = {
@@ -753,12 +1116,35 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
       authentication: authScheme,
       enabled: true,
     };
+
+    const rustModels = (payload.models ?? []).map((m) => ({
+      provider_instance_id: instanceUuid,
+      id: m.id,
+      display_name: m.name || m.id,
+      capabilities: {
+        tool_calling: 'supported',
+        parallel_tool_calls: 'unknown',
+        vision_input: 'unknown',
+        reasoning: 'supported',
+        streaming: 'supported',
+        structured_output: 'supported',
+        prompt_caching: 'unknown',
+        web_search: 'unknown',
+        audio_input: 'unknown',
+        audio_output: 'unknown',
+      },
+      limits: {
+        context_window_tokens: m.contextWindow || 128000,
+        max_output_tokens: 16384,
+      },
+      metadata_source: 'manual',
+    }));
     /* eslint-enable @typescript-eslint/naming-convention */
 
     const resp = await this._transport!.sendCommand({
       type: 'upsert_provider',
       provider,
-      models: [],
+      models: rustModels,
     });
     if (resp.type === 'error') {
       throw new Error(`Upsert provider failed: ${resp.message}`);

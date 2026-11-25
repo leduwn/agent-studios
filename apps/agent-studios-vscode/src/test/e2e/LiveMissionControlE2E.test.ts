@@ -216,39 +216,37 @@ describe('Tier 2: Mock Daemon Mission Control Projection E2E (MOCK_PROJECTED_TAS
     assert.ok(bridge, 'Bridge must be initialized');
     assert.ok(adminTransport, 'Admin transport must be initialized');
 
-    // Standard client MUST fail closed on mutations (read-only slice)
-    await assert.rejects(
-      async () => {
-        await bridge!.createSession('Standard Unauthorized Studio');
-      },
-      (err: Error) => {
-        return err.message.includes('disabled') || err.message.includes('read-only');
-      },
-      'Standard client createSession must fail closed'
-    );
+    // When capability policy disables mutating actions, standard client fails closed
+    const { CapabilityMatrix } = await import('../../bridge/ipc/CapabilityMatrix');
+    try {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
+      CapabilityMatrix.setCapabilityEnabled('approval.resolve', false);
 
-    await assert.rejects(
-      async () => {
-        await bridge!.sendMessage(
-          {
-            mode: 'ask',
-            message: 'Execute unauthorized task creation',
-          },
-          () => {}
-        );
-      },
-      (err: Error) => {
-        return err.message.includes('disabled') || err.message.includes('read-only');
-      },
-      'Standard client sendMessage must fail closed'
-    );
+      await assert.rejects(
+        async () => {
+          await bridge!.sendMessage(
+            {
+              mode: 'ask',
+              message: 'Execute unauthorized task creation',
+            },
+            () => {}
+          );
+        },
+        (err: Error) => {
+          return err.message.includes('disabled') || err.message.includes('read-only');
+        },
+        'Standard client sendMessage must fail closed when task.submit is disabled'
+      );
 
-    const approvalRes = await bridge!.requestApprovalDecision('mock-appr-01', 'approved');
-    assert.strictEqual(approvalRes.applied, false, 'Standard client approval mutation must fail closed');
-    assert.ok(
-      approvalRes.message?.includes('disabled') || approvalRes.message?.includes('read-only'),
-      'Approval mutation response must explain read-only restriction'
-    );
+      const approvalRes = await bridge!.requestApprovalDecision('mock-appr-01', 'approved');
+      assert.strictEqual(approvalRes.applied, false, 'Standard client approval mutation must fail closed when approval.resolve is disabled');
+      assert.ok(
+        approvalRes.message?.includes('disabled') || approvalRes.message?.includes('read-only'),
+        'Approval mutation response must explain policy restriction'
+      );
+    } finally {
+      CapabilityMatrix.resetCapabilities();
+    }
 
     // Admin / raw IPC can seed real data into the daemon's Control Plane
     const studioResp = (await adminTransport.sendCommand({
@@ -637,14 +635,27 @@ describe('Tier 2: Mock Daemon Mission Control Projection E2E (MOCK_PROJECTED_TAS
       await realBridge.connect();
       assert.strictEqual(realBridge.connectionState, 'connected');
 
-      // Standard client mutations fail closed against real Rust daemon
-      await assert.rejects(
-        async () => {
-          await realBridge!.createSession('Mutate Standard Fail');
-        },
-        (err: Error) => err.message.includes('disabled') || err.message.includes('read-only'),
-        'Standard client mutations must fail closed on real Rust daemon'
-      );
+      // Capability-gated mutations fail closed against real Rust daemon
+      const { CapabilityMatrix } = await import('../../bridge/ipc/CapabilityMatrix');
+      try {
+        CapabilityMatrix.setCapabilityEnabled('task.submit', false);
+        await assert.rejects(
+          async () => {
+            await realBridge!.sendMessage(
+              {
+                studioId: realStudioId,
+                mode: 'ask',
+                message: 'Mutate Standard Fail',
+              },
+              () => {}
+            );
+          },
+          (err: Error) => err.message.includes('disabled') || err.message.includes('read-only'),
+          'Standard client mutations must fail closed on real Rust daemon'
+        );
+      } finally {
+        CapabilityMatrix.resetCapabilities();
+      }
 
       // Wire real MissionControlProjection
       realManager = new BridgeManager(realBridge);

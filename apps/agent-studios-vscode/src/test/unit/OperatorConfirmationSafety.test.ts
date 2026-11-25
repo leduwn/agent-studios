@@ -433,11 +433,14 @@ describe('M15 UI-05A: OperatorConfirmationSafety Unit Tests', () => {
   // 5. Capability Disabled Gating
   // =========================================================================
   describe('5. Capability Disabled Gating', () => {
-    it('verifies task.submit capability is statically disabled by default', () => {
+    it('verifies task.submit capability can be disabled dynamically for policy gating', () => {
+      assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), true);
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
       assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), false);
     });
 
     it('rejects task submission via ExecutionClient when task.submit capability is disabled', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
       assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), false);
 
       const challenge = OperatorConfirmationManager.createChallenge(validStudioId, validPrompt);
@@ -462,6 +465,7 @@ describe('M15 UI-05A: OperatorConfirmationSafety Unit Tests', () => {
     });
 
     it('rejects task submission via SubmitTaskAdapter when task.submit capability is disabled', async () => {
+      CapabilityMatrix.setCapabilityEnabled('task.submit', false);
       assert.strictEqual(CapabilityMatrix.isCapabilityEnabled('task.submit'), false);
 
       const challenge = OperatorConfirmationManager.createChallenge(validStudioId, validPrompt);

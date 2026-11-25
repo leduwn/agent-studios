@@ -144,7 +144,7 @@ impl DaemonAdminBootstrapInfo {
     }
 }
 
-fn save_secure_bootstrap_file(path: &Path, json: &str) -> Result<(), TransportError> {
+pub(crate) fn save_secure_bootstrap_file(path: &Path, json: &str) -> Result<(), TransportError> {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
@@ -265,6 +265,7 @@ pub struct DaemonConfig {
     pub state_dir: Option<PathBuf>,
     pub db_path: Option<PathBuf>,
     pub durability: agent_studios_control_plane::sqlite_store::DurabilityMode,
+    pub default_repo_path: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -280,6 +281,7 @@ impl Default for DaemonConfig {
             state_dir: None,
             db_path: None,
             durability: agent_studios_control_plane::sqlite_store::DurabilityMode::Full,
+            default_repo_path: None,
         }
     }
 }
@@ -493,7 +495,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         "Daemon standard and admin runtime connection info written with restricted permissions (0600)"
     );
 
-    let server = IpcServerBuilder::new()
+    let mut server_builder = IpcServerBuilder::new()
         .with_auth_key(&config.key_id, client_key.into_bytes())
         .with_admin_auth_key(&admin_key_id, admin_key.into_bytes())
         .with_replay_capacity(config.capacity)
@@ -501,8 +503,14 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), TransportError> {
         .with_control_plane(control_plane)
         .with_recovery_status(recovery_status)
         .with_workspace_orchestrator(Arc::new(workspace_orchestrator))
-        .with_provider_catalog(agent_studios_provider::ProviderCatalog::with_builtin_definitions())
-        .build()?;
+        .with_state_dir(state_dir.clone())
+        .with_codex_internal_runtime();
+    if let Some(ref repo) = config.default_repo_path {
+        server_builder = server_builder
+            .with_default_repo_path(repo.clone())
+            .with_authorized_workspace(repo.clone());
+    }
+    let server = server_builder.build()?;
 
     let shutdown_tok = server.shutdown_token();
     let watcher_tok = shutdown_tok.clone();
