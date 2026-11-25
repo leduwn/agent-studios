@@ -46,14 +46,14 @@ foreach ($f in $requiredFiles) {
     }
 }
 
-$vsixFiles = Get-ChildItem -Path (Join-Path $BundleDir "extension") -Filter "*.vsix"
-if (-not $vsixFiles -or $vsixFiles.Count -lt 1) {
+$vsixFiles = @(Get-ChildItem -Path (Join-Path $BundleDir "extension") -Filter "*.vsix")
+if ($vsixFiles.Count -lt 1) {
     throw "Missing required VSIX package under $(Join-Path $BundleDir 'extension')"
 }
 
 Write-Host "==> Verifying SHA256SUMS.txt..."
 $checksumFile = Join-Path $BundleDir "SHA256SUMS.txt"
-$lines = Get-Content $checksumFile | Where-Object { $_.Trim() -ne "" }
+$lines = @(Get-Content $checksumFile | Where-Object { $_.Trim() -ne "" })
 foreach ($line in $lines) {
     $parts = $line -split "\s{2,}", 2
     $expectedHash = $parts[0].Trim().ToLowerInvariant()
@@ -78,7 +78,7 @@ if ($LASTEXITCODE -ne 0) { throw "ags.exe --version failed" }
 $doctorOut = & $agsExe doctor --json
 if ($LASTEXITCODE -ne 0) { throw "ags.exe doctor --json failed" }
 $doctorJson = $doctorOut | ConvertFrom-Json
-if ($doctorJson.checks.Count -lt 8) {
+if (@($doctorJson.checks).Count -lt 8) {
     throw "Expected at least 8 diagnostic checks from ags doctor --json"
 }
 
