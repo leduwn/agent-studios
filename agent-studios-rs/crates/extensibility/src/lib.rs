@@ -20,8 +20,9 @@ pub use instructions::{
     InstructionResolver,
 };
 pub use mcp::{
-    McpConfigFile, McpError, McpInvocationDecision, McpRegistry, McpRiskTier, McpScope,
-    McpServerConfig, McpToolCallResult, McpToolDescriptor, McpTransportConfig,
+    McpConfigFile, McpError, McpInitializeResult, McpInvocationDecision, McpPromptDescriptor,
+    McpPromptResult, McpRegistry, McpResourceContents, McpResourceDescriptor, McpRiskTier,
+    McpScope, McpServerConfig, McpToolCallResult, McpToolDescriptor, McpTransportConfig,
 };
 pub use skills::{
     SkillDescriptor, SkillError, SkillManifest, SkillProvenance, SkillRegistry, SkillScope,

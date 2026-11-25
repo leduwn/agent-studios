@@ -302,3 +302,207 @@ fn test_m16_hierarchical_instructions_and_worktree_boundary_enforcement() {
             .unwrap_err();
     assert!(matches!(err, InstructionError::BoundaryViolation(_)));
 }
+
+#[tokio::test]
+async fn test_m16_mcp_streamable_http_handshake_tools_resources_prompts_and_redaction() {
+    use wiremock::matchers::{body_string_contains, header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer top-secret-header"))
+        .and(body_string_contains("\"method\":\"initialize\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("mcp-session-id", "sess-http-001")
+                .set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": { "name": "wiremock-mcp" },
+                        "capabilities": { "tools": {}, "resources": {}, "prompts": {} }
+                    }
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains(
+            "\"method\":\"notifications/initialized\"",
+        ))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"tools/list\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [{
+                    "name": "http_search",
+                    "description": "Search repo (secret sk-secret-abcdef1234567890abcdef)"
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"tools/call\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "content": [{ "type": "text", "text": "matched Bearer super-secret-jwt-value" }],
+                "isError": false
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"resources/list\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {
+                "resources": [{
+                    "uri": "file:///README.md",
+                    "name": "README",
+                    "description": "Repo overview",
+                    "mimeType": "text/markdown"
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"resources/read\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "contents": [{
+                    "uri": "file:///README.md",
+                    "mimeType": "text/markdown",
+                    "text": "Agent Studios docs with key sk-secret-abcdef1234567890abcdef"
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"prompts/list\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "result": {
+                "prompts": [{ "name": "audit-pr", "description": "Security review prompt" }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"prompts/get\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "description": "Audit instructions",
+                "messages": [{ "role": "user", "content": { "type": "text", "text": "Review crate" } }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut headers = std::collections::BTreeMap::new();
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer top-secret-header".to_string(),
+    );
+
+    let mut reg = McpRegistry::default();
+    reg.register_server(McpServerConfig {
+        id: "remote-http".to_string(),
+        name: Some("Remote HTTP MCP".to_string()),
+        enabled: true,
+        timeout_secs: 5,
+        risk_tier: McpRiskTier::High,
+        transport: McpTransportConfig::Http {
+            url: server.uri(),
+            headers,
+        },
+        scope: McpScope::Project,
+    });
+
+    let dir = tempdir().unwrap();
+
+    let init = reg
+        .initialize_server("remote-http", dir.path())
+        .await
+        .unwrap();
+    assert_eq!(init.protocol_version, "2024-11-05");
+    assert_eq!(init.server_name.as_deref(), Some("wiremock-mcp"));
+
+    let tools = reg.discover_tools("remote-http", dir.path()).await.unwrap();
+    assert_eq!(tools.len(), 1);
+    assert!(
+        !tools[0]
+            .description
+            .contains("sk-secret-abcdef1234567890abcdef")
+    );
+
+    // Fail-closed approval check applies uniformly to HTTP servers
+    let blocked = reg
+        .invoke_tool(
+            "remote-http",
+            "http_search",
+            serde_json::json!({ "q": "daemon" }),
+            dir.path(),
+            Some(McpRiskTier::Low),
+            false,
+        )
+        .await;
+    assert!(matches!(blocked, Err(McpError::ApprovalRequired { .. })));
+
+    let res = reg
+        .invoke_tool(
+            "remote-http",
+            "http_search",
+            serde_json::json!({ "q": "daemon" }),
+            dir.path(),
+            Some(McpRiskTier::High),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(res.output.contains("matched"));
+    assert!(!res.output.contains("super-secret-jwt-value"));
+
+    let resources = reg.list_resources("remote-http", dir.path()).await.unwrap();
+    assert_eq!(resources[0].uri, "file:///README.md");
+
+    let contents = reg
+        .read_resource("remote-http", "file:///README.md", dir.path())
+        .await
+        .unwrap();
+    assert!(contents.text.contains("Agent Studios docs"));
+    assert!(!contents.text.contains("sk-secret-abcdef1234567890abcdef"));
+
+    let prompts = reg.list_prompts("remote-http", dir.path()).await.unwrap();
+    assert_eq!(prompts[0].name, "audit-pr");
+
+    let prompt = reg
+        .get_prompt("remote-http", "audit-pr", serde_json::json!({}), dir.path())
+        .await
+        .unwrap();
+    assert_eq!(prompt.messages.len(), 1);
+}

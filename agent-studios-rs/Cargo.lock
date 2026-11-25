@@ -195,6 +195,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-studios-desktop"
+version = "0.1.0"
+dependencies = [
+ "agent-studios-ipc-protocol",
+ "agent-studios-ipc-transport",
+ "agent-studios-protocol",
+ "clap",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "agent-studios-extensibility"
 version = "0.1.0"
 dependencies = [
@@ -202,12 +221,14 @@ dependencies = [
  "agent-studios-protocol",
  "chrono",
  "dunce",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

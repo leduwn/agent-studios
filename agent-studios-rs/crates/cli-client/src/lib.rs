@@ -2,6 +2,7 @@ pub mod client;
 pub mod connected;
 pub mod embedded;
 pub mod events;
+pub mod live_harness;
 pub mod runtime;
 
 pub use client::{
