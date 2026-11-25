@@ -1,0 +1,32 @@
+[package]
+name = "agent-studios-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Standalone Agent Studios Desktop Host, Daemon Supervisor & Code-OSS Profile Launcher"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "AgentStudios"
+path = "src/main.rs"
+
+[dependencies]
+agent-studios-ipc-protocol = { path = "../ipc-protocol" }
+agent-studios-ipc-transport = { path = "../ipc-transport" }
+agent-studios-protocol = { path = "../protocol" }
+clap = { workspace = true }
+dirs = "6.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
