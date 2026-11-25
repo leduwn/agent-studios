@@ -1,18 +1,32 @@
 /**
- * Agent Studios — Conversation & Session History Manager (Wave 4 / Group 1)
+ * Agent Studios — Conversation & Thread Lifecycle Manager (Wave 4 Extension-First)
  *
  * Manages conversation lifecycle (create, list, rename, search, archive/unarchive,
- * pin, Markdown export) and deterministic per-turn token/context budget accounting
- * synchronized with the authoritative AgentStudiosBridge when connected.
+ * pin, fork, interrupt/steer, queued follow-ups, retry, compaction state,
+ * Markdown export) synchronized with the authoritative agsd daemon.
  */
 
 import * as vscode from 'vscode';
 import type { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import type { ChatMessage, SessionStatus, SessionSummary } from '../bridge/types';
 
+export interface CompactionState {
+  compactedCount: number;
+  lastCompactedAt?: number;
+  summary?: string;
+}
+
+export interface QueuedFollowUp {
+  id: string;
+  text: string;
+  mode: 'queue' | 'steer';
+  createdAt: number;
+}
+
 export interface ConversationRecord {
   id: string;
   title: string;
+  parentConversationId?: string;
   status: SessionStatus;
   archived: boolean;
   pinned: boolean;
@@ -21,6 +35,8 @@ export interface ConversationRecord {
   estimatedPromptTokens: number;
   estimatedCompletionTokens: number;
   contextLimitTokens: number;
+  compactionState: CompactionState;
+  queuedFollowUps: QueuedFollowUp[];
   messages: ChatMessage[];
 }
 
@@ -69,6 +85,8 @@ export class ConversationManager implements vscode.Disposable {
       if (rec && rec.id) {
         this.records.set(rec.id, {
           ...rec,
+          compactionState: rec.compactionState ?? { compactedCount: 0 },
+          queuedFollowUps: Array.isArray(rec.queuedFollowUps) ? rec.queuedFollowUps : [],
           messages: Array.isArray(rec.messages) ? rec.messages : [],
         });
       }
@@ -96,12 +114,14 @@ export class ConversationManager implements vscode.Disposable {
 
     if (bridge.connectionState === 'connected') {
       try {
-        const created = await bridge.createSession(cleanTitle);
+        const created = bridge.createStudioAuthoritative
+          ? await bridge.createStudioAuthoritative(cleanTitle)
+          : await bridge.createSession(cleanTitle);
         if (created?.id) {
           id = created.id;
         }
       } catch {
-        // Fall back to local deterministic ID when daemon is offline
+        // Offline draft ID remains valid until daemon reconnects
       }
     }
 
@@ -117,12 +137,60 @@ export class ConversationManager implements vscode.Disposable {
       estimatedPromptTokens: 0,
       estimatedCompletionTokens: 0,
       contextLimitTokens,
+      compactionState: { compactedCount: 0 },
+      queuedFollowUps: [],
       messages: [],
     };
     this.records.set(id, record);
     this.activeConversationId = id;
     await this.persist();
     return record;
+  }
+
+  public async forkConversation(
+    sourceId: string,
+    newTitle?: string
+  ): Promise<ConversationRecord | undefined> {
+    const source = this.records.get(sourceId);
+    if (!source) {
+      return undefined;
+    }
+    const cleanTitle = (newTitle || `${source.title} (Fork)`).trim();
+    const bridge = this.bridgeProvider();
+    let id = `fork-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    if (bridge.connectionState === 'connected' && bridge.forkSession) {
+      try {
+        const forked = await bridge.forkSession(sourceId, cleanTitle);
+        if (forked?.id) {
+          id = forked.id;
+        }
+      } catch {
+        // Fall back cleanly to local lineage fork ID
+      }
+    }
+
+    const now = Date.now();
+    const forkRecord: ConversationRecord = {
+      id,
+      title: cleanTitle,
+      parentConversationId: sourceId,
+      status: 'idle',
+      archived: false,
+      pinned: false,
+      createdAt: now,
+      updatedAt: now,
+      estimatedPromptTokens: source.estimatedPromptTokens,
+      estimatedCompletionTokens: source.estimatedCompletionTokens,
+      contextLimitTokens: source.contextLimitTokens,
+      compactionState: { ...source.compactionState },
+      queuedFollowUps: [],
+      messages: source.messages.map((m) => ({ ...m })),
+    };
+    this.records.set(id, forkRecord);
+    this.activeConversationId = id;
+    await this.persist();
+    return forkRecord;
   }
 
   public async syncWithDaemonSessions(): Promise<SessionSummary[]> {
@@ -155,6 +223,8 @@ export class ConversationManager implements vscode.Disposable {
           estimatedPromptTokens: 0,
           estimatedCompletionTokens: 0,
           contextLimitTokens: 128000,
+          compactionState: { compactedCount: 0 },
+          queuedFollowUps: [],
           messages: [],
         });
       }
@@ -248,6 +318,74 @@ export class ConversationManager implements vscode.Disposable {
     return true;
   }
 
+  public async interruptOrSteer(
+    conversationId: string,
+    followUpText: string,
+    mode: 'steer' | 'queue'
+  ): Promise<QueuedFollowUp | undefined> {
+    const record = this.records.get(conversationId);
+    const clean = followUpText.trim();
+    if (!record || !clean) {
+      return undefined;
+    }
+    if (mode === 'steer') {
+      const bridge = this.bridgeProvider();
+      if (bridge.connectionState === 'connected') {
+        try {
+          await bridge.cancelCurrentRun();
+        } catch {
+          // Run may already be idle
+        }
+      }
+    }
+    const item: QueuedFollowUp = {
+      id: `fq-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      text: clean,
+      mode,
+      createdAt: Date.now(),
+    };
+    record.queuedFollowUps.push(item);
+    record.updatedAt = Date.now();
+    await this.persist();
+    return item;
+  }
+
+  public async retryLastTurn(conversationId: string): Promise<ChatMessage | undefined> {
+    const record = this.records.get(conversationId);
+    if (!record) {
+      return undefined;
+    }
+    for (let i = record.messages.length - 1; i >= 0; i--) {
+      if (record.messages[i].role === 'user') {
+        record.status = 'running';
+        record.updatedAt = Date.now();
+        await this.persist();
+        return { ...record.messages[i] };
+      }
+    }
+    return undefined;
+  }
+
+  public async recordCompaction(
+    conversationId: string,
+    summary: string,
+    tokensSaved: number
+  ): Promise<CompactionState | undefined> {
+    const record = this.records.get(conversationId);
+    if (!record) {
+      return undefined;
+    }
+    record.estimatedPromptTokens = Math.max(0, record.estimatedPromptTokens - Math.max(0, tokensSaved));
+    record.compactionState = {
+      compactedCount: record.compactionState.compactedCount + 1,
+      lastCompactedAt: Date.now(),
+      summary: summary.trim(),
+    };
+    record.updatedAt = Date.now();
+    await this.persist();
+    return record.compactionState;
+  }
+
   public async appendMessage(conversationId: string, message: ChatMessage): Promise<TokenBudgetSnapshot | undefined> {
     const record = this.records.get(conversationId);
     if (!record) {
@@ -293,10 +431,12 @@ export class ConversationManager implements vscode.Disposable {
       `# ${record.title}`,
       '',
       `- Session ID: \`${record.id}\``,
+      record.parentConversationId ? `- Forked From: \`${record.parentConversationId}\`` : '',
       `- Status: ${record.status}`,
+      `- Compactions: ${record.compactionState.compactedCount}`,
       `- Estimated Tokens: ${record.estimatedPromptTokens + record.estimatedCompletionTokens} / ${record.contextLimitTokens}`,
       '',
-    ];
+    ].filter((l) => l !== '');
     for (const msg of record.messages) {
       lines.push(`## ${msg.role.toUpperCase()} (${new Date(msg.timestamp).toISOString()})`);
       lines.push('');
@@ -323,6 +463,18 @@ export function registerConversationCommands(
       const created = await manager.createConversation(title);
       vscode.window.showInformationMessage(`Created conversation: ${created.title}`);
       return created;
+    }),
+    vscode.commands.registerCommand('agent-studios.forkConversation', async (id?: string) => {
+      const targetId = id || manager.getActiveConversation()?.id;
+      if (!targetId) {
+        vscode.window.showInformationMessage('Select or open a conversation before forking.');
+        return undefined;
+      }
+      const forked = await manager.forkConversation(targetId);
+      if (forked) {
+        vscode.window.showInformationMessage(`Forked conversation: ${forked.title}`);
+      }
+      return forked;
     }),
     vscode.commands.registerCommand('agent-studios.searchConversations', async () => {
       const query = await vscode.window.showInputBox?.({

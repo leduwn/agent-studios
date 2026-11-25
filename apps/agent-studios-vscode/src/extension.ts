@@ -185,7 +185,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerConversationCommands(context, conversationManager);
 
   const contextEngine = new ContextEngine();
-  void contextEngine;
+  chatProvider.setContextEngine(contextEngine);
+  chatProvider.setConversationManager(conversationManager);
 
   const hunkReviewManager = new HunkReviewManager();
   context.subscriptions.push(hunkReviewManager);
@@ -241,6 +242,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     bridgeManager.onBridgeChanged(() => updateStatusBar()),
     bridgeManager.stateProjection.onSessionChanged(() => updateStatusBar())
   );
+
+  // Auto-start bundled agsd when configured and not in developer preview mode
+  if (
+    !initialConfig.get<boolean>('previewMode', false) &&
+    initialConfig.get<boolean>('autoStartDaemon', true)
+  ) {
+    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    void bridgeManager
+      .connectDaemon(undefined, {
+        extensionPath: context.extensionUri.fsPath,
+        workspacePath,
+        autoStart: true,
+      })
+      .catch(() => {
+        // Stay fail-closed in DisconnectedBridge until user/workspace provides agsd or triggers connectDaemon
+      });
+  }
 
   // 5. Handle configuration changes
   context.subscriptions.push(

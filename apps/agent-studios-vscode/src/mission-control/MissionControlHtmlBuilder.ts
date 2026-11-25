@@ -304,16 +304,17 @@ export class MissionControlHtmlBuilder {
         });
       };
 
-      // SVG DAG Pan and Zoom
+      // SVG DAG Pan, Zoom, Fit, State Filtering, Minimap & Follow Execution
       let zoomLevel = 1.0;
       let panX = 0;
       let panY = 0;
       let isPanning = false;
       let startX = 0;
       let startY = 0;
+      let followExecution = false;
 
       function updateDagTransform() {
-        const group = document.getElementById('dag-viewport-group');
+        const group = document.getElementById('dag-viewport-group') || document.getElementById('dag-zoom-group');
         if (group) {
           group.setAttribute('transform', 'translate(' + panX + ',' + panY + ') scale(' + zoomLevel + ')');
         }
@@ -329,6 +330,47 @@ export class MissionControlHtmlBuilder {
         panX = 0;
         panY = 0;
         updateDagTransform();
+      };
+
+      window.fitDagToScreen = function() {
+        const svg = document.getElementById('dag-svg');
+        if (!svg) return;
+        const rect = svg.getBoundingClientRect();
+        const layoutW = Number(svg.getAttribute('data-layout-width') || 800);
+        const layoutH = Number(svg.getAttribute('data-layout-height') || 500);
+        if (rect.width > 0 && rect.height > 0) {
+          zoomLevel = Math.max(0.4, Math.min(1.5, Math.min(rect.width / layoutW, rect.height / layoutH)));
+        } else {
+          zoomLevel = 1.0;
+        }
+        panX = 0;
+        panY = 0;
+        updateDagTransform();
+      };
+
+      window.filterDagState = function(stateFilter) {
+        document.querySelectorAll('[data-dag-filter]').forEach(btn => {
+          btn.classList.toggle('active', btn.getAttribute('data-dag-filter') === stateFilter);
+        });
+        document.querySelectorAll('.dag-node').forEach(node => {
+          const nodeState = node.getAttribute('data-state');
+          node.style.opacity = (stateFilter === 'all' || nodeState === stateFilter) ? '1' : '0.25';
+        });
+      };
+
+      window.toggleFollowExecution = function() {
+        followExecution = !followExecution;
+        const btn = document.getElementById('dag-follow-btn');
+        if (btn) {
+          btn.classList.toggle('active', followExecution);
+        }
+        if (followExecution) {
+          const runningNode = document.querySelector('.dag-node[data-state="running"]');
+          const taskId = runningNode && runningNode.getAttribute('data-task-id');
+          if (taskId) {
+            window.selectTask(taskId);
+          }
+        }
       };
 
       function initDagSvg() {
@@ -415,13 +457,25 @@ export class MissionControlHtmlBuilder {
         }
       });
 
-      // Keyboard shortcuts
+      // Keyboard navigation across DAG nodes & inspector close
       window.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') {
-          // Deselect inspector if any
           const activeInspector = document.querySelector('.agent-inspector-container, .task-drawer-panel, .run-inspector-container');
           if (activeInspector) {
-            // Can trigger a deselect
+            window.selectTask('');
+          }
+          return;
+        }
+        if (currentState.activeTab === 'tasks' && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+          const nodes = Array.from(document.querySelectorAll('.dag-node'));
+          if (nodes.length === 0) return;
+          const curIdx = nodes.findIndex(n => n.classList.contains('selected'));
+          const nextIdx = e.key === 'ArrowRight'
+            ? (curIdx + 1) % nodes.length
+            : (curIdx <= 0 ? nodes.length - 1 : curIdx - 1);
+          const targetId = nodes[nextIdx] && nodes[nextIdx].getAttribute('data-task-id');
+          if (targetId) {
+            window.selectTask(targetId);
           }
         }
       });

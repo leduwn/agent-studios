@@ -29,6 +29,8 @@ import { TaskExecutionStore } from '../state/TaskExecutionStore';
 import { ChatHtmlBuilder, RuntimeOption } from './ChatHtmlBuilder';
 import { ChatSecurityGuards } from './ChatSecurityGuards';
 import { RustExecutionReadinessReport } from '../bridge/ipc/RustIpcProtocolTypes';
+import { ContextEngine } from '../context/ContextEngine';
+import { ConversationManager } from './ConversationManager';
 
 export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'agent-studios.chat';
@@ -159,6 +161,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private _view?: vscode.WebviewView;
   private _composerDraft: string = '';
   private _activeMode: AgentMode = 'agent';
+  private _reasoningEffort: 'low' | 'medium' | 'high' = 'medium';
+  private _permissionMode: 'read-only' | 'auto-edit' | 'full-access' = 'auto-edit';
+  private _followUpQueueMode: 'queue' | 'steer' = 'queue';
+  private _contextEngine?: ContextEngine;
+  private _conversationManager?: ConversationManager;
   private _selectedModelId?: string;
   private _selectedProviderId?: string;
   private _attachments: ContextAttachment[] = [];
@@ -170,9 +177,13 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   constructor(
     extensionUri: vscode.Uri,
     bridgeOrManager: AgentStudiosBridge | BridgeManager,
-    stateProjection?: SessionStateProjection
+    stateProjection?: SessionStateProjection,
+    contextEngine?: ContextEngine,
+    conversationManager?: ConversationManager
   ) {
     this._extensionUri = extensionUri;
+    this._contextEngine = contextEngine;
+    this._conversationManager = conversationManager;
 
     if (bridgeOrManager instanceof BridgeManager) {
       this._bridgeManager = bridgeOrManager;
@@ -242,6 +253,14 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
 
   public get attachments(): ContextAttachment[] {
     return [...this._attachments];
+  }
+
+  public setContextEngine(contextEngine: ContextEngine): void {
+    this._contextEngine = contextEngine;
+  }
+
+  public setConversationManager(conversationManager: ConversationManager): void {
+    this._conversationManager = conversationManager;
   }
 
   /**
@@ -364,6 +383,9 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     sessionId?: string;
     draft?: string;
     path?: string;
+    reasoningEffort?: 'low' | 'medium' | 'high';
+    permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
+    followUpQueueMode?: 'queue' | 'steer';
   }): Promise<void> {
     if (!message || !message.command) {
       return;
@@ -498,6 +520,28 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         await this._handleContinueSession(message.sessionId);
         break;
 
+      case 'switchReasoningEffort':
+        if (message.reasoningEffort) {
+          this._reasoningEffort = message.reasoningEffort;
+        }
+        break;
+
+      case 'switchPermissionMode':
+        if (message.permissionMode) {
+          this._permissionMode = message.permissionMode;
+        }
+        break;
+
+      case 'switchFollowUpMode':
+        if (message.followUpQueueMode) {
+          this._followUpQueueMode = message.followUpQueueMode;
+        }
+        break;
+
+      case 'forkSession':
+        await this._handleForkSession(message.sessionId);
+        break;
+
       case 'dismissOnboarding':
         this._hasSeenOnboarding = true;
         break;
@@ -541,7 +585,24 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
 
     const mode = message.mode || this._activeMode;
-    const attachments = message.attachments || this._attachments;
+    const baseAttachments = message.attachments || this._attachments;
+    const attachments: ContextAttachment[] = [...baseAttachments];
+    if (this._contextEngine) {
+      const repoMap = await this._contextEngine.collectWorkspaceRepoMap(15);
+      const packed = this._contextEngine.packWithinBudget(
+        this._contextEngine.collectActiveEditorItems(prompt),
+        4096,
+        repoMap
+      );
+      const seenUris = new Set(attachments.map((a) => a.uri || a.relativePath || ''));
+      for (const att of packed.attachments) {
+        const key = att.uri || att.relativePath || '';
+        if (key && !seenUris.has(key)) {
+          attachments.push(att);
+          seenUris.add(key);
+        }
+      }
+    }
 
     const request: ChatSendRequest = {
       message: prompt,
@@ -780,6 +841,50 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     } catch (err: unknown) {
       await vscode.window.showErrorMessage(
         `Failed to create session: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
+  private async _handleForkSession(sourceSessionId?: string): Promise<void> {
+    try {
+      const current = sourceSessionId || this._stateProjection?.session?.id;
+      let forkedSession = current && this.bridge.forkSession
+        ? await this.bridge.forkSession(current)
+        : undefined;
+      if (!forkedSession && this._conversationManager && current) {
+        const forkedRec = await this._conversationManager.forkConversation(current);
+        if (forkedRec) {
+          forkedSession = {
+            id: forkedRec.id,
+            workspacePath: this._stateProjection?.session?.workspacePath || '',
+            goalSummary: forkedRec.title,
+            status: forkedRec.status,
+            activeAgentCount: 0,
+            totalAgentCount: 0,
+            completedTasksCount: 0,
+            totalTasksCount: 0,
+            startedAt: forkedRec.createdAt,
+            elapsedMs: 0,
+          };
+        }
+      }
+      if (!forkedSession) {
+        forkedSession = await this.bridge.createSession('Forked Session');
+      }
+      this._stateProjection?.switchSession(forkedSession);
+      await this.postMessage({
+        type: 'syncState',
+        state: {
+          session: forkedSession,
+          messages: this._messages,
+          reasoningEffort: this._reasoningEffort,
+          permissionMode: this._permissionMode,
+          followUpQueueMode: this._followUpQueueMode,
+        },
+      });
+    } catch (err: unknown) {
+      await vscode.window.showErrorMessage(
+        `Failed to fork session: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }

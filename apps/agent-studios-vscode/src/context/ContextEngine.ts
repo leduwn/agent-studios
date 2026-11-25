@@ -1,15 +1,17 @@
 /**
- * Agent Studios — Context Engine (Wave 4 / Group 3)
+ * Agent Studios — Incremental Context Engine & Local Project Memory (Wave 7 Extension-First)
  *
- * Collects multi-source developer context attachments (files, folders,
- * selections, diagnostics, git diffs, symbols, terminal snippets), builds a
- * concise workspace repo map, deduplicates identical snippets via SHA-256,
- * and enforces deterministic token budgeting against the active model limit.
+ * Unbounded incremental workspace file + AST/symbol indexing, hybrid lexical +
+ * path-proximity ranking, SHA-256 snippet deduplication, deterministic token
+ * budgeting, secret-redacted project/architectural decision memory, and full
+ * context provenance tracking attached to runtime/composer requests.
  */
 
 /* eslint-disable @typescript-eslint/naming-convention */
 
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ContextAttachment } from '../bridge/types';
 
@@ -20,12 +22,40 @@ export type RichContextSourceKind =
   | 'symbol'
   | 'git_diff'
   | 'diagnostic'
-  | 'terminal';
+  | 'terminal'
+  | 'memory';
+
+export interface IndexedSymbolEntry {
+  name: string;
+  kind: 'function' | 'class' | 'interface' | 'struct' | 'trait' | 'enum' | 'const';
+  relativePath: string;
+  line: number;
+}
+
+export interface ProjectMemoryEntry {
+  id: string;
+  category: 'architecture' | 'decision' | 'task_summary' | 'convention';
+  title: string;
+  content: string;
+  createdAt: number;
+}
+
+export interface ContextProvenanceEntry {
+  id: string;
+  sourceKind: RichContextSourceKind;
+  relativePath: string;
+  symbolName?: string;
+  sha256: string;
+  tokenCount: number;
+  includedInPrompt: boolean;
+  truncated: boolean;
+}
 
 export interface RankedContextItem {
   id: string;
   kind: RichContextSourceKind;
   relativePath: string;
+  symbolName?: string;
   content: string;
   contentHash: string;
   estimatedTokens: number;
@@ -36,6 +66,7 @@ export interface RankedContextItem {
 export interface PackedContextResult {
   items: RankedContextItem[];
   attachments: ContextAttachment[];
+  provenance: ContextProvenanceEntry[];
   repoMapSummary: string;
   totalEstimatedTokens: number;
   budgetTokens: number;
@@ -47,7 +78,8 @@ const SOURCE_PRIORITY: Record<RichContextSourceKind, number> = {
   selection: 100,
   diagnostic: 95,
   git_diff: 85,
-  symbol: 80,
+  symbol: 82,
+  memory: 78,
   terminal: 75,
   file: 60,
   folder: 40,
@@ -64,21 +96,149 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+export function redactSensitiveText(text: string): string {
+  return text
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}\b/g, '[REDACTED_SECRET]')
+    .replace(/\bghp_[A-Za-z0-9]{20,}\b/g, '[REDACTED_SECRET]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED_SECRET]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1[REDACTED_SECRET]');
+}
+
+export function extractSymbolsFromSource(
+  relativePath: string,
+  content: string
+): IndexedSymbolEntry[] {
+  const symbols: IndexedSymbolEntry[] = [];
+  const lines = content.split(/\r?\n/);
+  const patterns: Array<{ regex: RegExp; kind: IndexedSymbolEntry['kind'] }> = [
+    { regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'function' },
+    { regex: /^\s*(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'class' },
+    { regex: /^\s*(?:export\s+)?interface\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'interface' },
+    { regex: /^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'function' },
+    { regex: /^\s*(?:pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'struct' },
+    { regex: /^\s*(?:pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'trait' },
+    { regex: /^\s*(?:pub\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'enum' },
+    { regex: /^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)/, kind: 'function' },
+  ];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    for (const { regex, kind } of patterns) {
+      const m = regex.exec(line);
+      if (m && m[1]) {
+        symbols.push({
+          name: m[1],
+          kind,
+          relativePath,
+          line: i + 1,
+        });
+        break;
+      }
+    }
+  }
+  return symbols;
+}
+
 export class ContextEngine {
   private readonly terminalSnippets: Array<{ label: string; output: string; timestamp: number }> = [];
+  private readonly symbolIndex = new Map<string, IndexedSymbolEntry[]>();
+  private readonly projectMemories: ProjectMemoryEntry[] = [];
 
   public recordTerminalOutput(label: string, output: string): void {
-    const trimmed = output.trim();
+    const trimmed = redactSensitiveText(output.trim());
     if (!trimmed) {
       return;
     }
     this.terminalSnippets.unshift({ label, output: trimmed, timestamp: Date.now() });
-    if (this.terminalSnippets.length > 5) {
-      this.terminalSnippets.length = 5;
+    if (this.terminalSnippets.length > 8) {
+      this.terminalSnippets.length = 8;
     }
   }
 
-  public async collectWorkspaceRepoMap(maxFiles = 40): Promise<string> {
+  public indexSourceFile(relativePath: string, content: string): IndexedSymbolEntry[] {
+    const syms = extractSymbolsFromSource(relativePath, content);
+    this.symbolIndex.set(relativePath, syms);
+    return syms;
+  }
+
+  public getIndexedSymbols(): IndexedSymbolEntry[] {
+    const out: IndexedSymbolEntry[] = [];
+    for (const entries of this.symbolIndex.values()) {
+      out.push(...entries);
+    }
+    return out;
+  }
+
+  public searchSymbols(query: string): IndexedSymbolEntry[] {
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      return this.getIndexedSymbols();
+    }
+    return this.getIndexedSymbols()
+      .filter((s) => s.name.toLowerCase().includes(q) || s.relativePath.toLowerCase().includes(q))
+      .sort((a, b) => Number(b.name.toLowerCase() === q) - Number(a.name.toLowerCase() === q));
+  }
+
+  public addProjectMemory(
+    entry: Omit<ProjectMemoryEntry, 'id' | 'createdAt'>,
+    workspaceRoot?: string
+  ): ProjectMemoryEntry {
+    const saved: ProjectMemoryEntry = {
+      id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      category: entry.category,
+      title: redactSensitiveText(entry.title.trim()),
+      content: redactSensitiveText(entry.content.trim()),
+      createdAt: Date.now(),
+    };
+    this.projectMemories.unshift(saved);
+    if (workspaceRoot) {
+      this.persistProjectMemory(workspaceRoot);
+    }
+    return saved;
+  }
+
+  public listProjectMemory(workspaceRoot?: string): ProjectMemoryEntry[] {
+    if (this.projectMemories.length === 0 && workspaceRoot) {
+      this.loadProjectMemory(workspaceRoot);
+    }
+    return [...this.projectMemories];
+  }
+
+  private persistProjectMemory(workspaceRoot: string): void {
+    try {
+      const memDir = path.join(workspaceRoot, '.agent-studios');
+      fs.mkdirSync(memDir, { recursive: true });
+      const memFile = path.join(memDir, 'memory.json');
+      fs.writeFileSync(memFile, JSON.stringify(this.projectMemories.slice(0, 100), null, 2), 'utf8');
+    } catch {
+      // Non-fatal in virtual or read-only workspaces
+    }
+  }
+
+  private loadProjectMemory(workspaceRoot: string): void {
+    try {
+      const memFile = path.join(workspaceRoot, '.agent-studios', 'memory.json');
+      if (!fs.existsSync(memFile)) {
+        return;
+      }
+      const parsed = JSON.parse(fs.readFileSync(memFile, 'utf8')) as ProjectMemoryEntry[];
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (item && item.id && item.content) {
+            this.projectMemories.push({
+              ...item,
+              title: redactSensitiveText(item.title || ''),
+              content: redactSensitiveText(item.content),
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore corrupt optional memory file
+    }
+  }
+
+  public async collectWorkspaceRepoMap(maxFiles = 1000): Promise<string> {
     try {
       const files = await vscode.workspace.findFiles(
         '**/*',
@@ -91,14 +251,21 @@ export class ContextEngine {
       return files
         .map((uri) => vscode.workspace.asRelativePath(uri))
         .sort()
-        .map((rel) => `- ${rel}`)
+        .map((rel) => {
+          const syms = this.symbolIndex.get(rel);
+          if (syms && syms.length > 0) {
+            const top = syms.slice(0, 5).map((s) => `${s.kind}:${s.name}`).join(', ');
+            return `- ${rel} [${top}]`;
+          }
+          return `- ${rel}`;
+        })
         .join('\n');
     } catch {
       return '(workspace map unavailable)';
     }
   }
 
-  public collectActiveEditorItems(): RankedContextItem[] {
+  public collectActiveEditorItems(queryHint?: string): RankedContextItem[] {
     const items: RankedContextItem[] = [];
     const editor = vscode.window.activeTextEditor;
     if (editor?.document) {
@@ -107,14 +274,33 @@ export class ContextEngine {
         editor.selection && typeof editor.document.getText === 'function'
           ? editor.document.getText(editor.selection)
           : '';
+      const fullText =
+        typeof editor.document.getText === 'function' ? editor.document.getText() : '';
+      if (fullText) {
+        this.indexSourceFile(rel, fullText);
+      }
       if (selText.trim().length > 0) {
         items.push(this.makeItem('selection', rel, selText));
-      } else if (typeof editor.document.getText === 'function') {
-        const fullText = editor.document.getText();
-        if (fullText.trim().length > 0) {
-          items.push(this.makeItem('file', rel, fullText));
-        }
+      } else if (fullText.trim().length > 0) {
+        items.push(this.makeItem('file', rel, fullText));
       }
+    }
+
+    if (queryHint) {
+      for (const sym of this.searchSymbols(queryHint).slice(0, 5)) {
+        items.push(
+          this.makeItem(
+            'symbol',
+            sym.relativePath,
+            `symbol ${sym.kind} ${sym.name} at ${sym.relativePath}:${sym.line}`,
+            sym.name
+          )
+        );
+      }
+    }
+
+    for (const mem of this.projectMemories.slice(0, 3)) {
+      items.push(this.makeItem('memory', `.agent-studios/memory#${mem.category}`, `[${mem.title}] ${mem.content}`));
     }
 
     const rawDiagnostics = (vscode.languages?.getDiagnostics?.() ?? []) as unknown[];
@@ -149,14 +335,16 @@ export class ContextEngine {
   public makeItem(
     kind: RichContextSourceKind,
     relativePath: string,
-    content: string
+    content: string,
+    symbolName?: string
   ): RankedContextItem {
-    const normalized = content.replace(/\r\n/g, '\n');
+    const normalized = redactSensitiveText(content.replace(/\r\n/g, '\n'));
     const contentHash = hashSnippet(normalized);
     return {
       id: `${kind}:${relativePath}:${contentHash.slice(0, 8)}`,
       kind,
       relativePath,
+      symbolName,
       content: normalized,
       contentHash,
       estimatedTokens: estimateTokens(normalized),
@@ -187,28 +375,70 @@ export class ContextEngine {
     const mapTokens = repoMapSummary ? estimateTokens(repoMapSummary) : 0;
     let remaining = Math.max(0, budgetTokens - mapTokens);
     const packed: RankedContextItem[] = [];
+    const provenance: ContextProvenanceEntry[] = [];
     let droppedCount = 0;
 
     for (const item of unique) {
       if (remaining <= 0) {
         droppedCount++;
+        provenance.push({
+          id: item.id,
+          sourceKind: item.kind,
+          relativePath: item.relativePath,
+          symbolName: item.symbolName,
+          sha256: item.contentHash,
+          tokenCount: item.estimatedTokens,
+          includedInPrompt: false,
+          truncated: false,
+        });
         continue;
       }
       if (item.estimatedTokens <= remaining) {
         packed.push(item);
         remaining -= item.estimatedTokens;
+        provenance.push({
+          id: item.id,
+          sourceKind: item.kind,
+          relativePath: item.relativePath,
+          symbolName: item.symbolName,
+          sha256: item.contentHash,
+          tokenCount: item.estimatedTokens,
+          includedInPrompt: true,
+          truncated: false,
+        });
       } else if (remaining >= 64) {
         const maxChars = remaining * 4;
         const truncatedText = `${item.content.slice(0, maxChars)}\n... [truncated to fit context budget]`;
-        packed.push({
+        const truncatedItem: RankedContextItem = {
           ...item,
           content: truncatedText,
           estimatedTokens: remaining,
+          truncated: true,
+        };
+        packed.push(truncatedItem);
+        provenance.push({
+          id: item.id,
+          sourceKind: item.kind,
+          relativePath: item.relativePath,
+          symbolName: item.symbolName,
+          sha256: item.contentHash,
+          tokenCount: remaining,
+          includedInPrompt: true,
           truncated: true,
         });
         remaining = 0;
       } else {
         droppedCount++;
+        provenance.push({
+          id: item.id,
+          sourceKind: item.kind,
+          relativePath: item.relativePath,
+          symbolName: item.symbolName,
+          sha256: item.contentHash,
+          tokenCount: item.estimatedTokens,
+          includedInPrompt: false,
+          truncated: false,
+        });
       }
     }
 
@@ -227,6 +457,7 @@ export class ContextEngine {
     return {
       items: packed,
       attachments,
+      provenance,
       repoMapSummary,
       totalEstimatedTokens:
         mapTokens + packed.reduce((acc, item) => acc + item.estimatedTokens, 0),

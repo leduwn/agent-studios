@@ -1,10 +1,10 @@
 /**
- * Agent Studios — Editor Intelligence Provider (Wave 4 / Group 2)
+ * Agent Studios — Editor Intelligence Provider (Wave 7 Extension-First)
  *
- * Implements Code-OSS native inline completions (single & multi-line),
- * Quick Fix diagnostic CodeActions (`fixDiagnostics`), and inline selection
- * edit (`inlineEdit`) routed through AgentStudiosBridge with safe offline
- * fallback handling when no daemon connection is active.
+ * Implements Code-OSS native inline completions with prefix/suffix windowing,
+ * debounce, CancellationToken propagation, and monotonic epoch rejection for stale
+ * responses (never returns hardcoded fake code stubs when offline), plus Quick Fix
+ * diagnostic CodeActions (`fixDiagnostics`) and inline selection edit (`inlineEdit`).
  */
 
 import * as vscode from 'vscode';
@@ -15,56 +15,71 @@ export interface InlineSuggestionOptions {
   prefix: string;
   suffix: string;
   relativePath: string;
+  debounceMs?: number;
 }
 
 export class AgentStudiosInlineCompletionProvider {
+  private requestEpoch = 0;
+
   constructor(private readonly bridgeProvider: () => AgentStudiosBridge) {}
 
   public async suggestCompletion(
     options: InlineSuggestionOptions,
     cancellationToken?: { isCancellationRequested?: boolean }
   ): Promise<string[]> {
+    const myEpoch = ++this.requestEpoch;
     if (cancellationToken?.isCancellationRequested) {
       return [];
     }
 
-    const prefixTail = options.prefix.split(/\r?\n/).slice(-1)[0] ?? '';
-    const trimmed = prefixTail.trim();
-    if (!trimmed) {
+    const prefixLines = options.prefix.split(/\r?\n/);
+    const trimmedTail = (prefixLines[prefixLines.length - 1] ?? '').trim();
+    if (!trimmedTail) {
       return [];
     }
 
+    if ((options.debounceMs ?? 0) > 0) {
+      await new Promise((resolve) => setTimeout(resolve, options.debounceMs));
+      if (cancellationToken?.isCancellationRequested || myEpoch !== this.requestEpoch) {
+        return [];
+      }
+    }
+
     const bridge = this.bridgeProvider();
-    if (bridge.connectionState === 'connected') {
-      try {
-        const chunks: string[] = [];
-        await bridge.sendMessage(
-          {
-            message: `Complete the ${options.languageId} code in ${options.relativePath} cleanly without prose:\n${trimmed}`,
-            mode: 'ask',
-          },
-          (chunk) => {
+    if (bridge.connectionState !== 'connected' || vscode.workspace.isTrusted === false) {
+      return [];
+    }
+
+    const boundedPrefix = prefixLines.slice(-120).join('\n');
+    const boundedSuffix = options.suffix.split(/\r?\n/).slice(0, 40).join('\n');
+
+    try {
+      const chunks: string[] = [];
+      await bridge.sendMessage(
+        {
+          message:
+            `Complete only the cursor gap for ${options.relativePath} (${options.languageId}). ` +
+            `Do not include markdown fences or prose.\n<prefix>\n${boundedPrefix}\n</prefix>\n<suffix>\n${boundedSuffix}\n</suffix>`,
+          mode: 'ask',
+        },
+        (chunk) => {
+          if (myEpoch === this.requestEpoch && !cancellationToken?.isCancellationRequested) {
             if (chunk.type === 'text_delta' && chunk.text) {
               chunks.push(chunk.text);
             }
           }
-        );
-        const combined = chunks.join('').trim();
-        if (combined) {
-          return [combined];
         }
-      } catch {
-        // Fall through to deterministic structural completion below
-      }
-    }
+      );
 
-    if (trimmed.startsWith('export function ') || trimmed.startsWith('function ')) {
-      return [' {\n  throw new Error(\'Not yet implemented\');\n}'];
+      if (cancellationToken?.isCancellationRequested || myEpoch !== this.requestEpoch) {
+        return [];
+      }
+
+      const combined = chunks.join('').trim();
+      return combined ? [combined] : [];
+    } catch {
+      return [];
     }
-    if (trimmed.startsWith('// TODO:') || trimmed.startsWith('# TODO:')) {
-      return [' // Agent Studios inline task ready (/agent)'];
-    }
-    return [];
   }
 
   public async provideInlineCompletionItems(
@@ -73,14 +88,24 @@ export class AgentStudiosInlineCompletionProvider {
     _context: unknown,
     token: vscode.CancellationToken
   ): Promise<Array<{ insertText: string }>> {
-    const lineText = document.lineAt(position.line).text.slice(0, position.character);
+    const startLine = Math.max(0, position.line - 120);
+    const prefixRange = new vscode.Range(new vscode.Position(startLine, 0), position);
+    const prefix = typeof document.getText === 'function'
+      ? document.getText(prefixRange)
+      : document.lineAt(position.line).text.slice(0, position.character);
+
+    const endLine = Math.min((document.lineCount ?? position.line + 1) - 1, position.line + 40);
+    const suffixRange = new vscode.Range(position, new vscode.Position(endLine, 250));
+    const suffix = typeof document.getText === 'function' ? document.getText(suffixRange) : '';
+
     const relativePath = vscode.workspace.asRelativePath(document.uri);
     const suggestions = await this.suggestCompletion(
       {
         languageId: document.languageId,
-        prefix: lineText,
-        suffix: '',
+        prefix,
+        suffix,
         relativePath,
+        debounceMs: 40,
       },
       token
     );

@@ -212,7 +212,11 @@ export function registerAllCommands(
   disposables.push(
     vscode.commands.registerCommand('agent-studios.connectDaemon', async (bootstrapPath?: string) => {
       try {
-        const daemonBridge = await bridgeManager.connectDaemon(bootstrapPath);
+        const daemonBridge = await bridgeManager.connectDaemon(bootstrapPath, {
+          extensionPath: context.extensionUri?.fsPath,
+          workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          autoStart: true,
+        });
         vscode.window.showInformationMessage(
           'Agent Studios connected to daemon.'
         );

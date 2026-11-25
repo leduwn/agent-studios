@@ -807,6 +807,7 @@ export class ChatHtmlBuilder {
             ${sessionOptionsHtml}
           </select>
           <button id="newSessionBtn" class="btn-sm" title="Start a new session" aria-label="New Session">+ New</button>
+          <button id="forkSessionBtn" class="btn-sm" title="Fork current session branch" aria-label="Fork Session">Fork</button>
         </div>
       </div>
     </header>
@@ -944,6 +945,26 @@ export class ChatHtmlBuilder {
             <select id="modelSelect" class="provider-model-dropdown" aria-label="AI Model and Provider">
               ${modelOptionsHtml}
             </select>
+
+            <!-- Reasoning Effort Selector -->
+            <select id="reasoningEffortSelect" class="mode-select-dropdown" aria-label="Reasoning Effort" title="Model reasoning effort">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+
+            <!-- Permission / Sandbox Mode Selector -->
+            <select id="permissionModeSelect" class="mode-select-dropdown" aria-label="Permission Mode" title="Sandbox & write approval posture">
+              <option value="read-only">Read-only</option>
+              <option value="auto-edit" selected>Auto-edit</option>
+              <option value="full-access">Full-access</option>
+            </select>
+
+            <!-- Follow-up Queue / Steer Mode Selector -->
+            <select id="followUpModeSelect" class="mode-select-dropdown" aria-label="Follow-up Mode" title="Follow-up queue or active run steer">
+              <option value="queue" selected>Queue</option>
+              <option value="steer">Steer</option>
+            </select>
           </div>
 
           <div class="composer-buttons">
@@ -971,6 +992,9 @@ export class ChatHtmlBuilder {
         isPreview: Boolean(initialState.isPreview),
         providers: initialState.providers || [],
         mode: initialState.activeMode || 'agent',
+        reasoningEffort: 'medium',
+        permissionMode: 'auto-edit',
+        followUpQueueMode: 'queue',
         selectedModelId: initialState.selectedModelId || '',
         selectedProviderId: initialState.selectedProviderId || '',
         composerDraft: initialState.composerDraft || '',
@@ -995,6 +1019,10 @@ export class ChatHtmlBuilder {
       var modelSelect = document.getElementById('modelSelect');
       var sessionHistorySelect = document.getElementById('sessionHistorySelect');
       var newSessionBtn = document.getElementById('newSessionBtn');
+      var forkSessionBtn = document.getElementById('forkSessionBtn');
+      var reasoningEffortSelect = document.getElementById('reasoningEffortSelect');
+      var permissionModeSelect = document.getElementById('permissionModeSelect');
+      var followUpModeSelect = document.getElementById('followUpModeSelect');
       var addContextBtn = document.getElementById('addContextBtn');
       var addActiveEditorBtn = document.getElementById('addActiveEditorBtn');
       var contextChipsBar = document.getElementById('contextChipsBar');
@@ -1450,6 +1478,45 @@ export class ChatHtmlBuilder {
       newSessionBtn.addEventListener('click', function() {
         vscode.postMessage({ command: 'newSession' });
       });
+
+      if (forkSessionBtn) {
+        forkSessionBtn.addEventListener('click', function() {
+          vscode.postMessage({
+            command: 'forkSession',
+            sessionId: state.session ? state.session.id : undefined
+          });
+        });
+      }
+
+      if (reasoningEffortSelect) {
+        reasoningEffortSelect.addEventListener('change', function() {
+          state.reasoningEffort = reasoningEffortSelect.value;
+          vscode.postMessage({
+            command: 'switchReasoningEffort',
+            reasoningEffort: state.reasoningEffort
+          });
+        });
+      }
+
+      if (permissionModeSelect) {
+        permissionModeSelect.addEventListener('change', function() {
+          state.permissionMode = permissionModeSelect.value;
+          vscode.postMessage({
+            command: 'switchPermissionMode',
+            permissionMode: state.permissionMode
+          });
+        });
+      }
+
+      if (followUpModeSelect) {
+        followUpModeSelect.addEventListener('change', function() {
+          state.followUpQueueMode = followUpModeSelect.value;
+          vscode.postMessage({
+            command: 'switchFollowUpMode',
+            followUpQueueMode: state.followUpQueueMode
+          });
+        });
+      }
 
       // Context chips remove delegation
       contextChipsBar.addEventListener('click', function(e) {

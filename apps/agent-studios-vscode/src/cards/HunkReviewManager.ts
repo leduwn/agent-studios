@@ -1,11 +1,13 @@
 /**
- * Agent Studios — Hunk-Level Review, Checkpoints & Revert Manager (Wave 4 / Group 4)
+ * Agent Studios — Hunk-Level Review, Checkpoints, Revert & Git Workflow Manager (Wave 7 Extension-First)
  *
- * Parses unified diffs per hunk using `parseUnifiedDiff`, validates context
- * lines before applying changes (conflict detection), records file checkpoints
- * before mutation, and supports exact deterministic revert to checkpoint.
+ * Parses unified diffs per hunk using `DiffParser`, validates context lines
+ * before applying changes (stale-base conflict detection), records file checkpoints
+ * before mutation, supports deterministic revert, and provides safe Git staging
+ * and worktree inspection helpers.
  */
 
+import * as childProcess from 'child_process';
 import * as vscode from 'vscode';
 import { type DiffHunk, DiffParser, type ParsedDiffFile } from './DiffParser';
 
@@ -26,6 +28,14 @@ export interface HunkApplicationResult {
   checkpointId?: string;
 }
 
+export interface MultiFileReviewSummary {
+  totalFiles: number;
+  totalAdditions: number;
+  totalDeletions: number;
+  acceptedHunks: number;
+  rejectedHunks: number;
+}
+
 export class HunkReviewManager implements vscode.Disposable {
   private readonly hunkStates = new Map<string, HunkDecision>();
   private readonly checkpoints = new Map<string, FileCheckpoint[]>();
@@ -41,6 +51,29 @@ export class HunkReviewManager implements vscode.Disposable {
 
   public parseDiff(unifiedDiff: string): ParsedDiffFile[] {
     return DiffParser.parseUnifiedDiff(unifiedDiff).files;
+  }
+
+  public summarizeDiff(artifactId: string, unifiedDiff: string): MultiFileReviewSummary {
+    const parsed = DiffParser.parseUnifiedDiff(unifiedDiff);
+    let acceptedHunks = 0;
+    let rejectedHunks = 0;
+    for (const file of parsed.files) {
+      for (let i = 0; i < file.hunks.length; i++) {
+        const decision = this.getHunkDecision(artifactId, file.newPath, i);
+        if (decision === 'accepted') {
+          acceptedHunks++;
+        } else if (decision === 'rejected') {
+          rejectedHunks++;
+        }
+      }
+    }
+    return {
+      totalFiles: parsed.totalFiles,
+      totalAdditions: parsed.totalAdditions,
+      totalDeletions: parsed.totalDeletions,
+      acceptedHunks,
+      rejectedHunks,
+    };
   }
 
   public getHunkDecision(artifactId: string, filePath: string, hunkIndex: number): HunkDecision {
@@ -83,6 +116,39 @@ export class HunkReviewManager implements vscode.Disposable {
       }
     }
     return undefined;
+  }
+
+  public stageFile(repoRoot: string, relativePath: string): boolean {
+    if (!repoRoot || !relativePath || relativePath.includes('..')) {
+      return false;
+    }
+    const res = childProcess.spawnSync('git', ['add', '--', relativePath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    return res.status === 0;
+  }
+
+  public inspectGitWorktreeStatus(repoRoot: string): {
+    branch: string;
+    changedFiles: string[];
+  } {
+    const branchRes = childProcess.spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    const statusRes = childProcess.spawnSync('git', ['status', '--short'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    const changedFiles = (statusRes.stdout || '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    return {
+      branch: (branchRes.stdout || '').trim() || 'HEAD',
+      changedFiles,
+    };
   }
 
   public applyHunkToContent(

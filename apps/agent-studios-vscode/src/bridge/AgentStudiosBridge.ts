@@ -14,6 +14,7 @@ import {
   ConnectionState,
   EditorActionRequest,
   EditorActionResult,
+  ProviderModel,
   ProviderSummary,
   SessionInfo,
   SessionSummary,
@@ -81,6 +82,33 @@ export interface AgentStudiosBridge extends vscode.Disposable {
   listSessions(): Promise<SessionSummary[]>;
   createSession(goal?: string): Promise<SessionInfo>;
   switchSession(sessionId: string): Promise<SessionInfo>;
+  createStudioAuthoritative?(name: string): Promise<SessionInfo>;
+  forkSession?(sourceStudioId: string, name?: string): Promise<SessionInfo>;
+  resolveApprovalAuthoritative?(
+    approvalId: string,
+    decision: 'approved' | 'denied'
+  ): Promise<ApprovalDecisionResult>;
+  upsertProviderInstance?(payload: {
+    instanceId?: string;
+    providerType: string;
+    displayName: string;
+    protocol?: string;
+    baseUrl: string;
+    secretEnvVar?: string;
+    models?: ProviderModel[];
+  }): Promise<ProviderSummary>;
+  removeProviderInstance?(providerId: string): Promise<boolean>;
+  discoverProviderModels?(providerId: string): Promise<ProviderModel[]>;
+  testProviderConnection?(providerId: string): Promise<{
+    ok: boolean;
+    status: string;
+    details?: unknown;
+  }>;
+  listExtensibility?(workspaceRoot?: string): Promise<{
+    skills: unknown[];
+    mcpServers: unknown[];
+    instructions: unknown[];
+  }>;
 
   dispose(): void;
 }

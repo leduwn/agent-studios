@@ -8,6 +8,7 @@ import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { DisconnectedBridge } from './DisconnectedBridge';
 import { FixtureBridge } from './FixtureBridge';
 import { DaemonConnectedBridge } from './DaemonConnectedBridge';
+import { EmbeddedDaemonSupervisor } from './EmbeddedDaemonSupervisor';
 import { CapabilityMatrix, CapabilityDescriptor, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 
@@ -127,9 +128,24 @@ export class BridgeManager implements vscode.Disposable {
 
   /**
    * Connects to the local/remote agsd daemon and binds to projection.
+   * Automatically starts bundled agsd if autoStart options are supplied.
    */
-  public async connectDaemon(bootstrapPath?: string): Promise<DaemonConnectedBridge> {
-    const daemonBridge = new DaemonConnectedBridge({ bootstrapPath });
+  public async connectDaemon(
+    bootstrapPath?: string,
+    autoStartOptions?: { extensionPath?: string; workspacePath?: string; autoStart?: boolean }
+  ): Promise<DaemonConnectedBridge> {
+    let resolvedBootstrap = bootstrapPath;
+    if (autoStartOptions?.autoStart !== false) {
+      const started = await EmbeddedDaemonSupervisor.ensureDaemonRunning({
+        extensionPath: autoStartOptions?.extensionPath,
+        bootstrapPath,
+        workspacePath: autoStartOptions?.workspacePath,
+      });
+      if (started.running && started.bootstrapPath) {
+        resolvedBootstrap = started.bootstrapPath;
+      }
+    }
+    const daemonBridge = new DaemonConnectedBridge({ bootstrapPath: resolvedBootstrap });
     await daemonBridge.connect();
     this.setBridge(daemonBridge);
     return daemonBridge;

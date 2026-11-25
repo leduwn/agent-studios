@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as http from 'http';
 import * as vscode from 'vscode';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
 import { FixtureBridge } from '../../bridge/FixtureBridge';
@@ -101,14 +102,41 @@ describe('Wave 4 RC2 Extension Daily AI Coding Features', () => {
     await fixture.connect();
 
     const inline = new AgentStudiosInlineCompletionProvider(() => new DisconnectedBridge());
-    const stubSuggestions = await inline.suggestCompletion({
+    const offlineSuggestions = await inline.suggestCompletion({
       languageId: 'typescript',
       prefix: 'export function parseConfig()',
       suffix: '',
       relativePath: 'src/config.ts',
     });
-    assert.ok(stubSuggestions.length === 1);
-    assert.ok(stubSuggestions[0].includes('Not yet implemented'));
+    assert.strictEqual(offlineSuggestions.length, 0);
+
+    const connectedInline = new AgentStudiosInlineCompletionProvider(() => fixture);
+    const liveSuggestions = await connectedInline.suggestCompletion({
+      languageId: 'typescript',
+      prefix: 'export function parseConfig()',
+      suffix: '',
+      relativePath: 'src/config.ts',
+    });
+    assert.strictEqual(liveSuggestions.length, 1);
+    assert.ok(liveSuggestions[0].length > 0);
+
+    const firstEpoch = connectedInline.suggestCompletion({
+      languageId: 'typescript',
+      prefix: 'const a =',
+      suffix: '',
+      relativePath: 'src/config.ts',
+      debounceMs: 40,
+    });
+    const secondEpoch = connectedInline.suggestCompletion({
+      languageId: 'typescript',
+      prefix: 'const b =',
+      suffix: '',
+      relativePath: 'src/config.ts',
+      debounceMs: 5,
+    });
+    const [resFirst, resSecond] = await Promise.all([firstEpoch, secondEpoch]);
+    assert.strictEqual(resFirst.length, 0);
+    assert.strictEqual(resSecond.length, 1);
 
     const codeActions = new AgentStudiosDiagnosticsCodeActionProvider();
     const doc = {
@@ -209,7 +237,28 @@ describe('Wave 4 RC2 Extension Daily AI Coding Features', () => {
     });
     assert.strictEqual(saved.secretRef.source, 'env');
     assert.strictEqual(saved.secretRef.key, 'OPENAI_API_KEY');
-    assert.ok(mgr.discoverModels('gemini').length >= 2);
+
+    // Local zero-billable HTTP /v1/models discovery test across 12-provider registry
+    const mockServer = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [{ id: 'mock-litellm-1' }, { id: 'mock-vllm-1' }] }));
+    });
+    await new Promise<void>((resolve) => mockServer.listen(0, '127.0.0.1', () => resolve()));
+    try {
+      const addr = mockServer.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      const litellm = await mgr.upsertProfile({
+        providerType: 'litellm',
+        displayName: 'Local LiteLLM',
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        secretRefKey: 'LITELLM_API_KEY',
+      });
+      const discovered = await mgr.discoverModelsDynamic(litellm);
+      assert.strictEqual(discovered.length, 2);
+      assert.strictEqual(discovered[0].id, 'mock-litellm-1');
+    } finally {
+      await new Promise<void>((resolve) => mockServer.close(() => resolve()));
+    }
   });
 
   it('Group 6: discovers Skills/MCP/Hooks/AGENTS.md with secret redaction & single Activity Bar invariant', async () => {

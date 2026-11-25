@@ -640,6 +640,253 @@ export class DaemonConnectedBridge implements AgentStudiosBridge {
   }
 
   /**
+   * Authoritatively creates a new studio on the connected agsd daemon.
+   */
+  public async createStudioAuthoritative(name: string): Promise<SessionInfo> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'create_studio',
+      name: name.trim() || 'Agent Studios Session',
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Create studio failed: ${resp.message}`);
+    }
+    if (resp.type !== 'studio_created') {
+      throw new Error(`Unexpected response for create_studio: ${resp.type}`);
+    }
+    this._activeStudioId = resp.studio.id;
+    this._epoch++;
+    return {
+      id: resp.studio.id,
+      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+      goalSummary: resp.studio.name,
+      status: 'idle',
+      activeAgentCount: 0,
+      totalAgentCount: 0,
+      completedTasksCount: 0,
+      totalTasksCount: 0,
+      startedAt: new Date(resp.studio.created_at).getTime() || Date.now(),
+      elapsedMs: 0,
+      isPreview: false,
+    };
+  }
+
+  /**
+   * Forks an existing studio on the connected agsd daemon preserving session lineage.
+   */
+  public async forkSession(sourceStudioId: string, name?: string): Promise<SessionInfo> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'fork_studio',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      source_studio_id: sourceStudioId,
+      name,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Fork studio failed: ${resp.message}`);
+    }
+    if (resp.type !== 'studio_created') {
+      throw new Error(`Unexpected response for fork_studio: ${resp.type}`);
+    }
+    this._activeStudioId = resp.studio.id;
+    this._epoch++;
+    return {
+      id: resp.studio.id,
+      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+      goalSummary: resp.studio.name,
+      status: 'idle',
+      activeAgentCount: 0,
+      totalAgentCount: 0,
+      completedTasksCount: 0,
+      totalTasksCount: 0,
+      startedAt: new Date(resp.studio.created_at).getTime() || Date.now(),
+      elapsedMs: 0,
+      isPreview: false,
+    };
+  }
+
+  /**
+   * Authoritatively upserts a provider instance inside agsd's runtime ProviderCatalog.
+   */
+  public async upsertProviderInstance(payload: {
+    instanceId?: string;
+    providerType: string;
+    displayName: string;
+    protocol?: string;
+    baseUrl: string;
+    secretEnvVar?: string;
+    models?: ProviderModel[];
+  }): Promise<ProviderSummary> {
+    this.assertConnected();
+    const instanceUuid = payload.instanceId || crypto.randomUUID();
+    const authScheme = payload.secretEnvVar
+      ? {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          bearer_token: {
+            secret: {
+              backend: 'environment_variable',
+              locator: payload.secretEnvVar,
+            },
+          },
+        }
+      : 'none';
+
+    const protocolFamily =
+      payload.protocol ||
+      (payload.providerType === 'anthropic'
+        ? 'anthropic_messages'
+        : payload.providerType === 'google-gemini'
+          ? 'gemini_generate_content'
+          : 'openai_chat_completions');
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const provider = {
+      id: instanceUuid,
+      provider_id: payload.providerType,
+      display_name: payload.displayName,
+      protocol: protocolFamily,
+      endpoint: {
+        base_url: payload.baseUrl,
+        static_headers: {},
+        query_params: {},
+      },
+      authentication: authScheme,
+      enabled: true,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    const resp = await this._transport!.sendCommand({
+      type: 'upsert_provider',
+      provider,
+      models: [],
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Upsert provider failed: ${resp.message}`);
+    }
+    if (resp.type !== 'provider_upserted') {
+      throw new Error(`Unexpected response for upsert_provider: ${resp.type}`);
+    }
+    return {
+      instanceId: resp.provider.id,
+      providerType: resp.provider.provider_id,
+      displayName: resp.provider.display_name,
+      models: payload.models ?? [],
+      status: resp.provider.enabled ? 'available' : 'unconfigured',
+    };
+  }
+
+  public async removeProviderInstance(providerId: string): Promise<boolean> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'remove_provider',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      provider_id: providerId,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Remove provider failed: ${resp.message}`);
+    }
+    return resp.type === 'provider_removed' ? resp.removed : false;
+  }
+
+  public async discoverProviderModels(providerId: string): Promise<ProviderModel[]> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'discover_models',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      provider_id: providerId,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Discover models failed: ${resp.message}`);
+    }
+    if (resp.type !== 'models_discovered') {
+      return [];
+    }
+    return resp.models.map((m) => ({
+      id: m.id,
+      name: m.display_name || m.id,
+      contextWindow: m.limits?.context_window_tokens ?? 128000,
+      isDefault: false,
+    }));
+  }
+
+  public async testProviderConnection(providerId: string): Promise<{
+    ok: boolean;
+    status: string;
+    details?: unknown;
+  }> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'test_provider_connection',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      provider_id: providerId,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`Test provider connection failed: ${resp.message}`);
+    }
+    if (resp.type !== 'provider_connection_tested') {
+      return { ok: false, status: 'unexpected_response' };
+    }
+    const r = resp.report;
+    const ok =
+      r.configuration.state === 'passed' &&
+      r.credential.state === 'passed' &&
+      r.reachability.state === 'passed';
+    return { ok, status: r.discovery.state, details: r };
+  }
+
+  public async listExtensibility(workspaceRoot?: string): Promise<{
+    skills: unknown[];
+    mcpServers: unknown[];
+    instructions: unknown[];
+  }> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'list_extensibility',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      workspace_root: workspaceRoot,
+    });
+    if (resp.type === 'error') {
+      throw new Error(`List extensibility failed: ${resp.message}`);
+    }
+    if (resp.type !== 'extensibility_listed') {
+      return { skills: [], mcpServers: [], instructions: [] };
+    }
+    return {
+      skills: resp.skills,
+      mcpServers: resp.mcp_servers,
+      instructions: resp.instructions,
+    };
+  }
+
+  /**
+   * Authoritatively resolves a pending approval when capability is enabled.
+   */
+  public async resolveApprovalAuthoritative(
+    approvalId: string,
+    decision: 'approved' | 'denied'
+  ): Promise<ApprovalDecisionResult> {
+    this.assertConnected();
+    const resp = await this._transport!.sendCommand({
+      type: 'resolve_approval',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      approval_id: approvalId,
+      decision:
+        decision === 'approved'
+          ? { decision: 'approved' }
+          : { decision: 'rejected', reason: 'Denied by operator in VS Code' },
+    });
+    if (resp.type === 'error') {
+      return { id: approvalId, decision, applied: false, message: resp.message };
+    }
+    return {
+      id: approvalId,
+      decision,
+      applied: true,
+      message: `Approval ${approvalId} resolved (${decision}).`,
+    };
+  }
+
+  /**
    * Retrieves execution readiness report from the daemon using ExecutionClient.
    */
   public async getExecutionReadiness(timeoutMs?: number): Promise<RustExecutionReadinessReport> {

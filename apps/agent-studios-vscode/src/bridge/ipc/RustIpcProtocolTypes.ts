@@ -394,6 +394,32 @@ export type RustIpcCommand =
       provider_id: string;
     }
   | {
+      type: 'upsert_provider';
+      provider: unknown;
+      models?: unknown[];
+    }
+  | {
+      type: 'remove_provider';
+      provider_id: string;
+    }
+  | {
+      type: 'discover_models';
+      provider_id: string;
+    }
+  | {
+      type: 'test_provider_connection';
+      provider_id: string;
+    }
+  | {
+      type: 'fork_studio';
+      source_studio_id: string;
+      name?: string;
+    }
+  | {
+      type: 'list_extensibility';
+      workspace_root?: string;
+    }
+  | {
       type: 'list_models';
       instance_id?: string;
     }
@@ -507,8 +533,40 @@ export type RustIpcResponse =
       provider: RustProviderInstance | null;
     }
   | {
+      type: 'provider_upserted';
+      provider: RustProviderInstance;
+    }
+  | {
+      type: 'provider_removed';
+      provider_id: string;
+      removed: boolean;
+    }
+  | {
       type: 'models';
       models: RustModelDescriptor[];
+    }
+  | {
+      type: 'models_discovered';
+      provider_id: string;
+      models: RustModelDescriptor[];
+    }
+  | {
+      type: 'provider_connection_tested';
+      report: {
+        instance_id: string;
+        configuration: { state: string; message: string };
+        credential: { state: string; message: string };
+        reachability: { state: string; message: string };
+        auth: { state: string; message: string };
+        discovery: { state: string; message: string };
+        runtime: { state: string; message: string };
+      };
+    }
+  | {
+      type: 'extensibility_listed';
+      skills: unknown[];
+      mcp_servers: unknown[];
+      instructions: unknown[];
     }
   | {
       type: 'execution_readiness';

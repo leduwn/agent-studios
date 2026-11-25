@@ -36,6 +36,10 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'openInIde',
   'openMissionControl',
   'continueSession',
+  'switchReasoningEffort',
+  'switchPermissionMode',
+  'switchFollowUpMode',
+  'forkSession',
 ] as const);
 
 export type AllowedWebviewCommand = typeof ALLOWED_WEBVIEW_COMMANDS extends Set<infer T> ? T : never;
@@ -326,6 +330,48 @@ export class ChatSecurityGuards {
         }
         if (record.studioId !== undefined && (typeof record.studioId !== 'string' || record.studioId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: "Invalid 'studioId' parameter." };
+        }
+        return { valid: true };
+      }
+
+      case 'switchReasoningEffort': {
+        if (
+          record.reasoningEffort !== undefined &&
+          record.reasoningEffort !== 'low' &&
+          record.reasoningEffort !== 'medium' &&
+          record.reasoningEffort !== 'high'
+        ) {
+          return { valid: false, error: `Invalid reasoningEffort '${String(record.reasoningEffort)}'.` };
+        }
+        return { valid: true };
+      }
+
+      case 'switchPermissionMode': {
+        if (
+          record.permissionMode !== undefined &&
+          record.permissionMode !== 'read-only' &&
+          record.permissionMode !== 'auto-edit' &&
+          record.permissionMode !== 'full-access'
+        ) {
+          return { valid: false, error: `Invalid permissionMode '${String(record.permissionMode)}'.` };
+        }
+        return { valid: true };
+      }
+
+      case 'switchFollowUpMode': {
+        if (
+          record.followUpQueueMode !== undefined &&
+          record.followUpQueueMode !== 'queue' &&
+          record.followUpQueueMode !== 'steer'
+        ) {
+          return { valid: false, error: `Invalid followUpQueueMode '${String(record.followUpQueueMode)}'.` };
+        }
+        return { valid: true };
+      }
+
+      case 'forkSession': {
+        if (record.sessionId !== undefined && (typeof record.sessionId !== 'string' || record.sessionId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'sessionId' parameter." };
         }
         return { valid: true };
       }
