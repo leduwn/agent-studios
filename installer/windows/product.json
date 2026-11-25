@@ -7,7 +7,7 @@
   "licenseName": "Apache-2.0",
   "licenseUrl": "https://www.apache.org/licenses/LICENSE-2.0",
   "win32DirName": "Agent Studios",
-  "win32NameVersion": "Agent Studios 1.0.0-rc1",
+  "win32NameVersion": "Agent Studios 1.0.0-rc2",
   "win32RegValueName": "AgentStudios",
   "win32AppUserModelId": "AgentStudios.Desktop",
   "win32ShellNameShort": "Agent Studios",
@@ -15,6 +15,7 @@
   "agentStudios": {
     "defaultMode": "agent",
     "activityBarSingleIcon": "agent-studios-activitybar",
+    "bundledDesktop": "AgentStudios.exe",
     "bundledDaemon": "agsd.exe",
     "bundledCli": "ags.exe",
     "canonicalPathsWindows": {

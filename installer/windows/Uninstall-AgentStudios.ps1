@@ -5,6 +5,8 @@
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\AgentStudios"),
+    [string]$AppDataRoot = $env:APPDATA,
+    [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
     [switch]$PurgeUserData,
     [switch]$DryRun
 )
@@ -23,9 +25,14 @@ if (Test-Path $InstallDir) {
     Write-Host "Removed installed binaries at $InstallDir"
 }
 
+$startMenuLnk = Join-Path $AppDataRoot "Microsoft\Windows\Start Menu\Programs\Agent Studios.lnk"
+if (Test-Path $startMenuLnk) {
+    Remove-Item -Force $startMenuLnk
+}
+
 if ($PurgeUserData) {
-    $roaming = Join-Path $env:APPDATA "AgentStudios"
-    $local = Join-Path $env:LOCALAPPDATA "AgentStudios"
+    $roaming = Join-Path $AppDataRoot "AgentStudios"
+    $local = Join-Path $LocalAppDataRoot "AgentStudios"
     if (Test-Path $roaming) { Remove-Item -Recurse -Force $roaming }
     if (Test-Path $local) { Remove-Item -Recurse -Force $local }
     Write-Host "Purged user configuration and local state directories."

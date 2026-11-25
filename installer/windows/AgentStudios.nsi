@@ -1,8 +1,8 @@
-; Agent Studios Windows x64 NSIS Installer Script (Unsigned RC1 Blueprint)
-; Targets Windows 11 x64 with bundled agsd.exe, ags.exe, Code-OSS extension (.vsix), and canonical paths.
+; Agent Studios Windows x64 NSIS Installer Script (Unsigned RC2 Blueprint)
+; Targets Windows 11 x64 with bundled agsd.exe, ags.exe, AgentStudios.exe, Code-OSS extension (.vsix), and canonical paths.
 
 !define APP_NAME "Agent Studios"
-!define APP_VERSION "1.0.0-rc1"
+!define APP_VERSION "1.0.0-rc2"
 !define PUBLISHER "Agent Studios Contributors"
 !define INSTALL_DIR "$LOCALAPPDATA\Programs\AgentStudios"
 
@@ -20,9 +20,10 @@ Section "Core Binaries & Extension" SecCore
   SetOutPath "$INSTDIR\bin"
   File "bin\agsd.exe"
   File "bin\ags.exe"
+  File "bin\AgentStudios.exe"
 
   SetOutPath "$INSTDIR\extension"
-  File "extension\agent-studios-vscode-0.1.0.vsix"
+  File "extension\agent-studios-vscode-1.0.0-rc2.vsix"
 
   SetOutPath "$INSTDIR\config"
   File "config\product.json"
@@ -48,7 +49,8 @@ SectionEnd
 Section "Uninstall"
   Delete "$INSTDIR\bin\agsd.exe"
   Delete "$INSTDIR\bin\ags.exe"
-  Delete "$INSTDIR\extension\agent-studios-vscode-0.1.0.vsix"
+  Delete "$INSTDIR\bin\AgentStudios.exe"
+  Delete "$INSTDIR\extension\agent-studios-vscode-1.0.0-rc2.vsix"
   Delete "$INSTDIR\config\product.json"
   Delete "$INSTDIR\config\config.default.toml"
   Delete "$INSTDIR\Uninstall.exe"
