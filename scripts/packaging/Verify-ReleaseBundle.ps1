@@ -47,7 +47,7 @@ foreach ($line in $lines) {
     }
     $actualHash = (Get-FileHash -Path $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -ne $expectedHash) {
-        throw "Checksum mismatch for $relPath: expected $expectedHash, got $actualHash"
+        throw "Checksum mismatch for ${relPath}: expected $expectedHash, got $actualHash"
     }
 }
 Write-Host "    Verified $($lines.Count) SHA-256 checksums cleanly."
