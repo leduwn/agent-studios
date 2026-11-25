@@ -1,0 +1,147 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-11-25T20:16:00+07:00",
+  "reference_codex_extension": {
+    "id": "openai.chatgpt",
+    "display_name": "Codex - OpenAI's coding agent",
+    "version": "26.1117.41037",
+    "bundled_codex_cli_version": "0.171.0-alpha.13",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "agent_studios_target": {
+    "extension": "apps/agent-studios-vscode",
+    "upstream_sync_target_sha": "44dd77b71e88c78295736bffd3dc3b684c13be6d",
+    "previous_upstream_sha": "d25c114d494ddb693290b76bf5e5f64ecbdb38fc"
+  },
+  "status_taxonomy": [
+    "FULLY_VERIFIED",
+    "PARTIAL",
+    "BACKEND_ONLY",
+    "UI_ONLY",
+    "MOCK_ONLY",
+    "NOT_WIRED",
+    "BLOCKED",
+    "MISSING",
+    "DEFERRED_BY_OPERATOR"
+  ],
+  "features": [
+    {
+      "id": "EXT-01",
+      "category": "Sidebar & Activity Bar",
+      "feature": "Single Activity Bar container ('agent-studios-activitybar') + sidebar chat + tree views",
+      "codex_reference": "openai.chatgpt package.json: single codexViewContainer/codexSecondaryViewContainer + chatgpt.sidebarView",
+      "baseline_status": "FULLY_VERIFIED",
+      "target_wave": "Wave 4",
+      "acceptance_test": "Rc2ExtensionProductCompletion.test.ts + Extension Host activation"
+    },
+    {
+      "id": "EXT-02",
+      "category": "Conversation Layout & Thread Management",
+      "feature": "Create, list, switch, rename, archive, pin, search, fork, interrupt/steer, queue follow-up, retry, compaction tracking synced with agsd",
+      "codex_reference": "openai.chatgpt chatgpt.newChat + ThreadList/ThreadFork + followUpQueueMode",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Daemon IPC fork_studio, live interrupt/steer/retry sync across host reload & daemon restart",
+      "target_wave": "Wave 4",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey D)"
+    },
+    {
+      "id": "EXT-03",
+      "category": "Prompt Composer",
+      "feature": "Provider, model, runtime selectors + reasoning effort + permission mode + queue/steer + file/folder/selection/symbol/diagnostics/git/terminal attachments + slash commands + context preview",
+      "codex_reference": "openai.chatgpt webview composer + chatgpt.composerEnterBehavior + chatgpt.addToThread/addFileToThread",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Reasoning effort & permission mode composer controls, ContextEngine provenance preview wired into ChatWebviewViewProvider",
+      "target_wave": "Wave 4",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey B, F)"
+    },
+    {
+      "id": "EXT-04",
+      "category": "Editor Integration",
+      "feature": "Inline edit, inline completion with debounce/cancellation/stale-epoch rejection, fixDiagnostics code action, explain/refactor/generateTests, diff preview",
+      "codex_reference": "openai.chatgpt chatgpt.implementTodo + chatgpt.commentCodeLensEnabled",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "SuggestCompletion used hardcoded stub on offline; needs real debounce + cancellation + epoch + fail-closed disconnected policy",
+      "target_wave": "Wave 7",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey G)"
+    },
+    {
+      "id": "EXT-05",
+      "category": "Context Engine & Memory",
+      "feature": "Unbounded incremental workspace/symbol indexing, hybrid lexical+path ranking, SHA-256 deduplication, local-first project memory (.agent-studios/memory.json), context provenance wired to runtime request",
+      "codex_reference": "codex-rs file-search/context-fragments/memories + Continue/Aider repo map",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Capped at 40 files, no symbol extraction, no persistent memory, not wired into ChatWebviewViewProvider send path",
+      "target_wave": "Wave 7",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey B)"
+    },
+    {
+      "id": "EXT-06",
+      "category": "Multi-Provider BYOK Management",
+      "feature": "12 provider families (OpenAI, Anthropic, Gemini, DeepSeek, Groq, OpenRouter, 9Router, LiteLLM, Ollama, LM Studio, vLLM, Custom), SecretStorage + SecretReference, authoritative IPC Upsert/Remove/Discover/Test",
+      "codex_reference": "Agent Studios differentiator (Codex defaults to OpenAI login / gateway OAuth)",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Hardcoded CATALOG_MODELS fallback, globalState-only profile storage, missing litellm/vllm builtin definitions, missing IPC mutation/discovery commands",
+      "target_wave": "Wave 5",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey A, F)"
+    },
+    {
+      "id": "EXT-07",
+      "category": "Multi-Runtime & Multi-Agent Orchestration",
+      "feature": "Internal Codex Engine (4 patches) + Claude Code + OpenCode runtime adapters, DAG coordinator, physical Git worktrees, leases, approvals",
+      "codex_reference": "codex-rs AgentControl + Agent Studios ControlPlane + WorktreeOrchestrator",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Authoritative IPC CreateStudio/ForkStudio & approval wiring in bridge without regressing read-only guard tests",
+      "target_wave": "Wave 6",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey C)"
+    },
+    {
+      "id": "EXT-08",
+      "category": "Mission Control 9-Tab Workbench",
+      "feature": "Overview, Agents Fleet, Tasks & DAG (pan/zoom/fit/minimap/keyboard/filter/follow), Run Inspector, Activity Timeline, Review, Approvals, Providers & Usage, Diagnostics",
+      "codex_reference": "Agent Studios differentiator over Codex sidebar-only UX",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Verify & complete all interactive DAG controls (pan, zoom, fit, minimap, keyboard nav, follow-execution)",
+      "target_wave": "Wave 6",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey C) + unit DAG tests"
+    },
+    {
+      "id": "EXT-09",
+      "category": "Diff Review & Git Workflow",
+      "feature": "Per-file diff preview, hunk-level accept/reject, stale-base conflict detection, pre-apply checkpoints, safe revert, Git staging & worktree inspection",
+      "codex_reference": "vscode.diff + Agent Studios DiffParser/HunkReviewManager",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Git staging & branch/worktree status helpers wired with HunkReviewManager",
+      "target_wave": "Wave 7",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey B, G)"
+    },
+    {
+      "id": "EXT-10",
+      "category": "Skills, MCP, Plugins, Hooks & Instructions",
+      "feature": "Unified daemon IPC ListExtensibility + HTTP/Stdio MCP initialize/tools/resources/prompts + secret redaction + hierarchical AGENTS.md/CLAUDE.md",
+      "codex_reference": "codex-rs skills/hooks/rmcp-client/core-plugins + agent-studios-extensibility",
+      "baseline_status": "PARTIAL",
+      "missing_behaviors": "Daemon IPC command exposing SkillRegistry/McpRegistry/InstructionResolver directly to extension bridge",
+      "target_wave": "Wave 8",
+      "acceptance_test": "ExtensionFirstJourneysAcceptanceE2E.test.ts (Journey E)"
+    },
+    {
+      "id": "EXT-11",
+      "category": "VSIX Self-Contained Distribution & Embedded Daemon Auto-Start",
+      "feature": "Bundled bin/win32-x64/{agsd.exe,ags.exe} + SHA256SUMS.txt + EmbeddedDaemonSupervisor auto-spawning agsd inside clean VS Code profile",
+      "codex_reference": "openai.chatgpt bin/windows-x86_64/codex.exe bundled layout",
+      "baseline_status": "MISSING",
+      "missing_behaviors": "EmbeddedDaemonSupervisor in extension + Build-ExtensionFirstBundle.ps1 packaging binaries into VSIX",
+      "target_wave": "Wave 11",
+      "acceptance_test": "Build-ExtensionFirstBundle.ps1 + clean-profile code.cmd --install-extension smoke test"
+    },
+    {
+      "id": "DSK-01",
+      "category": "Standalone Desktop Distribution & NSIS Installer",
+      "feature": "Standalone Code-OSS desktop distribution, Electron/Chromium bundle, Windows standalone installer & auto-updater",
+      "codex_reference": "Deferred by operator in MASTER MISSION 04",
+      "baseline_status": "DEFERRED_BY_OPERATOR",
+      "target_wave": "Deferred",
+      "acceptance_test": "Preserved untouched in crates/desktop & installer/windows (RC2 SHA-256 archived)"
+    }
+  ]
+}
