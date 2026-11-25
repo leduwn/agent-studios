@@ -5,7 +5,8 @@ This document catalogs all intentional, minimal patches maintained inside the `c
 ## Upstream Baseline
 
 - **Upstream Repository**: https://github.com/openai/codex
-- **Baseline Commit**: `d25c114d494ddb693290b76bf5e5f64ecbdb38fc`
+- **Initial Baseline Commit**: `d25c114d494ddb693290b76bf5e5f64ecbdb38fc`
+- **Current Synchronized Commit**: `44dd77b71e88c78295736bffd3dc3b684c13be6d` (revalidated via 3-way snapshot sync)
 - **Lock Reference**: `upstream/codex.lock.json`
 
 ---

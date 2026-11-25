@@ -4,6 +4,7 @@ Agent Studios is derived from the open-source OpenAI Codex project.
 
 - **Upstream**: https://github.com/openai/codex
 - **Initial imported baseline**: `d25c114d494ddb693290b76bf5e5f64ecbdb38fc`
+- **Current synchronized baseline**: `44dd77b71e88c78295736bffd3dc3b684c13be6d` (26 upstream commits across 152 files synced cleanly in MASTER MISSION 04 Wave 2)
 - **Baseline date**: 2026-10-02
 - **Synchronization strategy**: Snapshot-based upstream synchronization
 
