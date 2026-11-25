@@ -87,3 +87,10 @@
   - `Build-WindowsReleaseBundle.ps1 -Profile release` (`2m 02s` incremental) + `Verify-ReleaseBundle.ps1`: **`exit 0`** (`9` SHA-256 checksums, `--release` `ags.exe --version`, `ags.exe doctor --json`, `-DryRun` installer/uninstaller, and ZIP checksum all passed)
   - `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`
   - `RELEASE_MANIFEST.json`: `profile: "release"`, `source_commit: "41480cfa025e41df105a3c01ecda2307b51fb180"`, `signing_status: "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"`
+
+### 6. Wave 8 Merge & Cleanup + Post-RC1 Baseline Check (`00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`)
+- **GitHub Actions on Final Merge Commit `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`**: Run `45597809243` (`pull_request`) verified green on Ubuntu and Windows.
+- **Main Convergence (`task-797`)**: Fast-forwarded `origin/integration/m15-unified-codebase` and `origin/main` + local `main` to `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`.
+- **RC1 Integrity Re-Verification (`task-819` & `task-828`)**:
+  - `Verify-ReleaseBundle.ps1` passed cleanly after freeing `+96.85 GB` across Drives `C:` and `D:`.
+  - `AgentStudios-v1.0.0-rc1-win-x64.zip` actual SHA-256 confirmed identical: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`.

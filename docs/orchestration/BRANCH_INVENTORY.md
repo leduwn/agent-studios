@@ -1,27 +1,28 @@
 # Branch & Worktree Inventory (`BRANCH_INVENTORY.md`)
 
-> **Verified At**: 2026-11-25T00:45:00+07:00
+> **Verified Post-RC1 Cleanup**: 2026-11-25T18:33:00+07:00
+> **Canonical `main` HEAD**: `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`
 
-## 1. Active & Preserved Local Worktrees
+## 1. Retained Local Worktrees (4 Total — 279 Temp Entries & 7 Merged Worktrees Pruned)
 
 | Worktree Directory | Checked-Out Branch | HEAD SHA | Status / Disposition |
 |---|---|---|---|
-| `D:\Projects\agent-studios` | `integration/m15-unified-codebase` | `8525ec228c` | **CANONICAL ROOT (PROTECTED)** — has 5 untracked recovery/inventory artifacts |
-| `D:\Projects\agent-studios-active\m15-1-joint-validation` | `integration/m15-1-joint-validation` | `5f7b5f525b` | **ACTIVE INTEGRATION WORKTREE** — supersedes PR #31/#33/#34 + cache policy |
-| `D:\Projects\agent-studios-active\ci-repair` | `fix/m15-unified-cross-platform-ci` | `65397d709d` | **PR #33** — fully merged into `integration/m15-1-joint-validation` |
-| `D:\Projects\agent-studios-active\m15-1-backend` | `feat/m15-1-provider-cli-unification` | `c98a8a3572` | **PR #31** — fully merged into `integration/m15-1-joint-validation` |
-| `D:\Projects\agent-studios-active\m15-ui-06` | `feat/m15-ui-06-agent-ide-continuity` | `f57bc20c74` | **PR #34** — fully merged into `integration/m15-1-joint-validation` |
-| `D:\Projects\agent-studios-ags-cli` | `feat/provider-management-v1` | `a98129ef7e` | **PRESERVED** — historical PR #20 CLI/provider origin |
-| `D:\Projects\agent-studios-ide-ui` | `feat/m15-real-agent-execution-ui` | `3de7c85a96` | **HOLD** — PR #27 tip |
-| `D:\Projects\agent-studios-m15-04` | `feat/m15-04-durable-state-recovery` | `cf1e6c0f98` | **HOLD** — PR #30 tip |
-| `D:\Projects\agent-studios-mission-control` | `feat/m14-mission-control-workbench` | `3ee485cacd` | **HOLD (DIVERGENT COMMITS)** |
-| `D:\Projects\agent-studios-unified-staging` | detached HEAD | `843be62033` | **PRESERVED** |
+| `D:\Projects\agent-studios` | `integration/m15-unified-codebase` | `8525ec228c` | **CANONICAL ROOT (PROTECTED)** — preserves 5 untracked recovery/inventory docs |
+| `D:\Projects\agent-studios-active\m15-1-joint-validation` | `feat/rc2-product-completion` (from `main`) | `00e5c862b8` | **ACTIVE RC2 DEVELOPMENT WORKTREE** — isolated from `main` |
+| `D:\Projects\agent-studios-ags-cli` | `feat/provider-management-v1` | `a98129ef7e` | **`HOLD` / NON-ANCESTOR** — 15 unique commits (`PR #20`) preserved for Phase A/D review |
+| `D:\Projects\agent-studios-mission-control` | `feat/m14-mission-control-workbench` | `3ee485cacd` | **`HOLD`** — 3 commits (all patch-equivalent `(-)` via rebase) retained under `HOLD` policy |
 
-## 2. Recommended PR Merge Sequence (Operator Sign-off)
+## 2. Origin Remote Branches Status
 
-1. **PR #33** (`fix/m15-unified-cross-platform-ci` `65397d709d` → `integration/m15-unified-codebase`)
-2. **PR #31** (`feat/m15-1-provider-cli-unification` `c98a8a3572` → `integration/m15-unified-codebase`)
-3. **PR #34** (`feat/m15-ui-06-agent-ide-continuity` `f57bc20c74` → `integration/m15-unified-codebase`)
-4. **PR #32** (`integration/m15-unified-codebase` / `integration/m15-1-joint-validation` → `main`)
+| Branch | SHA | Ancestry vs `main` | Disposition |
+|---|---|---|---|
+| `origin/main` | `00e5c862b8` | `HEAD` | Canonical protected release baseline |
+| `origin/integration/m15-unified-codebase` | `00e5c862b8` | Ancestor (equal) | Converged with `main` |
+| `origin/integration/m15-1-joint-validation` | `00e5c862b8` | Ancestor (equal) | Converged with `main` |
+| `origin/feat/m12-claude-code-runtime` | `3207b7462f` | Non-ancestor (`7` commits) | Open `PR #15`; kept for provenance |
+| `origin/feat/ags-cli-tui-foundation` | `29865add12` | Non-ancestor (`11` commits) | Open `PR #16`; kept for provenance |
+| `origin/feat/provider-management-v1` | `a98129ef7e` | Non-ancestor (`15` commits) | Open `PR #20`; kept for provenance |
+| `origin/feat/m14-mission-control-workbench` | `3ee485cacd` | Patch-equivalent (`3` `(-)` commits) | Retained for `HOLD` worktree safety |
+| `origin/feat/provider-discovery-v1.2-wip` | `96dfb4946e` | Non-ancestor (`8` commits) | Operator WIP discovery snapshot |
 
-*(Note: All commits from #33, #31, #34, and `chore/dev-build-cache-policy` are already consolidated in `integration/m15-1-joint-validation`.)*
+- **Deleted 18 Merged Remote Branches**: All 18 strictly ancestor feature/fix/chore branches were tagged under `archive/v1.0.0-rc1/*` and deleted cleanly from `origin` during Wave 8 cleanup.

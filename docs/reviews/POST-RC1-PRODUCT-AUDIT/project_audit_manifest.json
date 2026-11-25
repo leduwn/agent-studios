@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-11-25T18:35:00+07:00",
+  "baseline": {
+    "repository": "https://github.com/leduwn/agent-studios",
+    "branch": "main",
+    "sha": "00e5c862b8173cb29914a4ff8dfe4dbb1147e03c",
+    "ci_run_id": 45597809243,
+    "ci_code_run_ids": [45590072851, 45590064391],
+    "ci_status": "success"
+  },
+  "rc1_artifact": {
+    "bundle_dir": "C:\\AgentStudiosBuild\\release-bundle\\AgentStudios-v1.0.0-rc1-win-x64",
+    "archive_zip": "C:\\AgentStudiosBuild\\release-bundle\\AgentStudios-v1.0.0-rc1-win-x64.zip",
+    "sha256": "3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9",
+    "source_commit": "41480cfa025e41df105a3c01ecda2307b51fb180",
+    "signed": false
+  },
+  "codebase_inventory": {
+    "custom_rust_crates": 19,
+    "custom_rust_files": 275,
+    "custom_rust_lines": 109030,
+    "vscode_ts_files": 150,
+    "vscode_ts_lines": 48890,
+    "codex_rs_crates": 162,
+    "codex_lock_commit": "d25c114d494ddb693290b76bf5e5f64ecbdb38fc",
+    "codex_last_internal_commit": "1f042241ce",
+    "todo_fixme_unimplemented_count": 0
+  },
+  "verified_test_evidence": {
+    "rust_workspace_tests_at_402312516a": { "targets": 114, "passed": 1014, "failed": 0, "ignored": 0 },
+    "rust_thread_e2e_default_stack_at_ace0f6b026": { "passed": 7, "failed": 0 },
+    "ts_unit_at_41480cfa02": { "passed": 700, "failed": 0 },
+    "ts_e2e_at_41480cfa02": { "passed": 84, "failed": 0 },
+    "ts_extension_host_at_41480cfa02": { "passed": 25, "failed": 0 },
+    "eslint_errors": 0,
+    "eslint_preexisting_warnings": 352
+  },
+  "critical_product_gaps": [
+    "No compiled standalone AgentStudios.exe desktop host / daemon supervisor",
+    "Missing VS Code daily coding Groups 1-6 (inline completion, inline editing, context engine, hunk review/revert, interactive providers, skills/MCP UI)",
+    "MCP HTTP transport unimplemented in crates/extensibility/src/mcp.rs (lines 260, 342)",
+    "Release bundler defaults debug, uses hardcoded paths, overwrites bundle dir, and only DryRun-tested installer"
+  ],
+  "gates": {
+    "GATE-01": "resolved",
+    "GATE-02": "completed_for_wave_8_hold_worktrees_preserved",
+    "GATE-03": "active_zero_billable_invariant",
+    "GATE-04": "active_unsigned_requires_authenticode_cert"
+  }
+}
