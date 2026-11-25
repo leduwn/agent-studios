@@ -3,50 +3,58 @@
   "baseline_branch": "main",
   "baseline_sha": "00e5c862b8173cb29914a4ff8dfe4dbb1147e03c",
   "feature_branch": "feat/rc2-product-completion",
+  "verified_code_sha": "6a867172a8bf30cfac941391c88513579f22d6e7",
   "worktree_path": "D:\\Projects\\agent-studios-active\\m15-1-joint-validation",
   "cargo_target_dir": "C:\\AgentStudiosBuild\\cargo-target-rc2",
   "rc1_preserved_zip": "C:\\AgentStudiosBuild\\release-bundle\\AgentStudios-v1.0.0-rc1-win-x64.zip",
   "rc1_preserved_sha256": "3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9",
+  "rc2_bundle_zip": "C:\\AgentStudiosBuild\\release-bundle\\AgentStudios-v1.0.0-rc2-6a867172a8-win-x64.zip",
+  "rc2_bundle_sha256": "49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda",
   "tasks": [
     {
       "id": "RC2-W1",
       "wave": 1,
       "title": "Post-RC1 forensic audit (16 files + sanitized ZIP) & orchestration sync",
-      "agent": "Agent A",
+      "agent": "Orchestrator",
       "dependencies": [],
-      "status": "in_progress"
+      "status": "done",
+      "commit": "00cb6a58b31bb006a4ab31e51d49b2803f38b79b"
     },
     {
       "id": "RC2-W2",
       "wave": 2,
       "title": "Standalone AgentStudios.exe desktop binary, daemon supervisor, Code-OSS profile launcher (crates/desktop)",
-      "agent": "Agent B & Agent D",
+      "agent": "Orchestrator",
       "dependencies": ["RC2-W1"],
-      "status": "pending"
+      "status": "done",
+      "commit": "ce6ddbce27"
     },
     {
       "id": "RC2-W4",
       "wave": 4,
       "title": "VS Code extension product completion (Groups 1-6: conversations, inline edit/completion, context engine, hunk review, interactive providers, extensibility)",
-      "agent": "Agent C & Agent F",
+      "agent": "Orchestrator",
       "dependencies": ["RC2-W1"],
-      "status": "pending"
+      "status": "done",
+      "commit": "33af678578"
     },
     {
       "id": "RC2-W5",
       "wave": 5,
       "title": "Complete MCP HTTP+Stdio JSON-RPC engine, resources/prompts, and LiveAcceptanceHarness ($0.00 default)",
-      "agent": "Agent E & Agent G",
+      "agent": "Orchestrator",
       "dependencies": ["RC2-W1"],
-      "status": "pending"
+      "status": "done",
+      "commit": "a54fc1cf19"
     },
     {
       "id": "RC2-W7",
       "wave": 7,
       "title": "Repair RC2 release pipeline, execute real sandbox installation/upgrade/uninstall tests, full gates, and RC2 final report",
-      "agent": "Agent H & Agent I",
+      "agent": "Orchestrator",
       "dependencies": ["RC2-W2", "RC2-W4", "RC2-W5"],
-      "status": "pending"
+      "status": "done",
+      "commit": "6a867172a8bf30cfac941391c88513579f22d6e7"
     }
   ]
 }

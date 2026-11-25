@@ -94,3 +94,24 @@
 - **RC1 Integrity Re-Verification (`task-819` & `task-828`)**:
   - `Verify-ReleaseBundle.ps1` passed cleanly after freeing `+96.85 GB` across Drives `C:` and `D:`.
   - `AgentStudios-v1.0.0-rc1-win-x64.zip` actual SHA-256 confirmed identical: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`.
+
+### 7. MASTER MISSION 03 — RC2 Product Completion Gates (`feat/rc2-product-completion`, Verified SHA `6a867172a8`)
+- **Shared Target Directory**: `C:\AgentStudiosBuild\cargo-target-rc2` (`$0.00` live spend guard preserved)
+- **Rust Quality & Workspace Verification (`task-1146` / `task-1158`)**:
+  - `cargo fmt --check`: `exit 0`
+  - `cargo clippy --workspace --all-targets -- -D warnings`: `exit 0` (`0` warnings)
+  - `cargo test --workspace`: `exit 0` — **`119 test binaries: 1021 passed, 0 failed, 0 ignored`**
+  - `AgentStudios.exe --headless-check --json`: `exit 0` (live process telemetry verified)
+  - `agent-studios-extensibility`: **`5 passed; 0 failed`** (includes `wiremock` Streamable HTTP MCP handshake + tools/resources/prompts + secret redaction)
+  - `agent-studios-cli-client`: **`30 passed; 0 failed`** across 6 test suites (includes 3 `$0.00`-guarded `live_harness_tests`)
+- **Frontend Extension Verification (`task-1052`, `task-1100`, commit `33af678578`)**:
+  - `npm run lint`: `exit 0` (`0` errors)
+  - `npm run typecheck` & `npm run build`: `exit 0`
+  - `npm run test:unit`: `exit 0` — **`706 passing`**
+  - `npm run test:e2e`: `exit 0` — **`84 passing`** (with `AGSD_BIN_PATH=C:\AgentStudiosBuild\cargo-target-rc2\debug\agsd.exe`)
+  - `npm run test:integration`: `exit 0` — **`25 passing`** in real VS Code Extension Host
+- **RC2 Release Bundle & Real Sandbox Install/Upgrade/Uninstall (`task-1158`)**:
+  - `Build-WindowsReleaseBundle.ps1 -Profile release -Version 1.0.0-rc2`: `exit 0`
+  - Packaged `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc2-6a867172a8-win-x64` (`AgentStudios-v1.0.0-rc2-6a867172a8-win-x64.zip`, `22,624,975` bytes, SHA-256 `49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`)
+  - `Verify-ReleaseBundle.ps1`: `exit 0` — verified 13 `SHA256SUMS.txt` hashes + ZIP checksum + `--release` `ags.exe doctor --json` + `AgentStudios.exe --headless-check --json` + real isolated temp sandbox install -> custom `config.toml` upgrade preservation -> installed `AgentStudios.exe` execution -> uninstall/purge
+  - Preserved RC1 `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256 re-confirmed unchanged: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`
