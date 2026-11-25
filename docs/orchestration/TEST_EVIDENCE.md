@@ -42,3 +42,26 @@
     - `ags.exe doctor --json` -> passed (`>= 8` diagnostic checks)
     - `Install-AgentStudios.ps1 -DryRun` & `Uninstall-AgentStudios.ps1 -DryRun` -> passed
   - `RELEASE_MANIFEST.json`: `version: "1.0.0-rc1"`, `target: "win32-x64"`, `signed: false`, `signing_status: "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"`, `source_commit: "58293983af34ccf46ac44f2b44e224a33af31ba8"`
+
+### 4. Wave 6 Verification (`ace0f6b02628b796d5051ef8d8a660cbbfb6fd81`)
+- **Self-Contained Windows Stack Hardening (`task-593`)**:
+  - `cargo test -p agent-studios-runtime-session --test thread_e2e_tests` (**without** `RUST_MIN_STACK`): `exit 0` — **`7 passed; 0 failed` (`7.89s`)** using `run_with_large_stack` (8 MB worker stack).
+- **Daemon-Connected TUI & Targeted Rust Gates (`task-624`)**:
+  - `cargo fmt --check`: `exit 0`
+  - `cargo clippy -p agent-studios-cli -p agent-studios-runtime-session --all-targets -- -D warnings`: `exit 0`
+  - `cargo test -p agent-studios-cli`: `exit 0` — `6 passed` (`ags` unit tests) + `7 passed` (`cli_acceptance_tests`)
+- **Full Frontend & Real VS Code Extension Host Suite (`task-630`, with `LocalizationManager` wired in `extension.ts`)**:
+  - `npm run lint`: `exit 0` (`0 errors`, `352` pre-existing warnings)
+  - `npm run typecheck`: `exit 0`
+  - `npm run build`: `exit 0`
+  - `npm run test:unit`: `exit 0` — **`699 passing (2s)`**
+  - `npm run test:e2e`: `exit 0` — **`84 passing (5s)`** (live `agsd.exe`)
+  - `npm run test:integration` (real VS Code Extension Development Host GUI process): `exit 0` — **`25 passing (14s)`**
+- **Release Profile (`--release`) Bundle & ZIP Distribution (`task-641`)**:
+  - `Build-WindowsReleaseBundle.ps1 -Profile release`: `exit 0`; built optimized `--release` `agsd.exe` and `ags.exe` (`10m 26s`), packaged `agent-studios-vscode-0.1.0.vsix` (`91 files, 270.86 KB`), created `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64.zip`.
+  - `Verify-ReleaseBundle.ps1`: `exit 0`:
+    - Verified `9` SHA-256 checksums in `SHA256SUMS.txt`
+    - `--release` `ags.exe --version` -> `ags 0.1.0` & `ags.exe doctor --json` -> passed
+    - `Install-AgentStudios.ps1 -DryRun` & `Uninstall-AgentStudios.ps1 -DryRun` -> passed
+    - Verified `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256: `c40dbb84726afd01cb97310928ab3905b08cd3afe46f04785ba61653a4698ca`
+  - `RELEASE_MANIFEST.json`: `profile: "release"`, `source_commit: "ace0f6b02628b796d5051ef8d8a660cbbfb6fd81"`, `signing_status: "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"`

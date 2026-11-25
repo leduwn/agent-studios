@@ -1,16 +1,16 @@
 # Agent Studios — Master Orchestration State (`MASTER_STATE.md`)
 
-> **Last Updated**: 2026-11-25T10:50:00+07:00
-> **Active Milestone**: Wave 1–5 Complete (Release Candidate Ready Pending Human Approval Gates)
+> **Last Updated**: 2026-11-25T11:38:30+07:00
+> **Active Milestone**: Wave 1–6 Complete (Release Candidate `--release` + `.zip` Verified; Ready for Push & Human Approval Gates)
 > **Active Isolated Worktree**: `D:\Projects\agent-studios-active\m15-1-joint-validation`
 > **Active Integration Branch**: `integration/m15-1-joint-validation`
 > **Baseline Merge Commit SHA**: `5f7b5f525b7b5a56bccac2ea3cfd149d809e3f6c`
 > **Wave 1 Orchestration Commit SHA**: `d7e0b00103198fa4cecbba79de1d842b4f761f39`
 > **Wave 2–5 Implementation Commit SHA**: `402312516a56912f10db2cf9163f486e80877fc9`
-> **Verified RC1 Source Commit SHA**: `58293983af34ccf46ac44f2b44e224a33af31ba8`
+> **Wave 6 Verified RC1 Code Commit SHA**: `ace0f6b02628b796d5051ef8d8a660cbbfb6fd81`
 > **Canonical Root (Untouched / Clean Safety Gate)**: `D:\Projects\agent-studios` (`integration/m15-unified-codebase` at `8525ec228c37e38c35ee514dc886af295fbc4e00`)
 > **Build Cache Target Dir**: `C:\AgentStudiosBuild\worktrees\m15-1-joint-validation`
-> **Windows RC1 Staged Bundle**: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64`
+> **Windows RC1 Staged Bundle & Archive**: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64` (`AgentStudios-v1.0.0-rc1-win-x64.zip`)
 
 ---
 
@@ -35,13 +35,13 @@ All active development branches (`PR #33` tip `65397d709d`, `PR #31` tip `c98a8a
 | M16 Extensibility (`agent-studios-extensibility`: Skills, MCP, Hooks, Hierarchical Instructions + `ags` CLI) | `VERIFIED_IMPLEMENTED` | `crates/extensibility` & `crates/cli/src/commands/extensibility.rs` (`extensibility_tests` passed, `clippy -D warnings` clean) |
 | VS Code Extension, 9-Tab Mission Control & Mode Continuity (`apps/agent-studios-vscode`) | `VERIFIED_IMPLEMENTED` | `lint` 0 errors, `typecheck` 0 errors, `build` 0 errors, `699` unit tests passed, `84` E2E tests passed with live `agsd.exe` |
 | M17/M19 Localization (`en-US` / `vi-VN` parity + UI/agent decoupling) & Canonical Windows Paths | `VERIFIED_IMPLEMENTED` | `LocalizationManager.ts`, `CanonicalPaths.ts`, `LocalizationAndPaths.test.ts` included in `699` passing unit tests |
-| M17/M19 Windows RC1 Standalone Bundle, Installer Scripts & Release Docs | `VERIFIED_IMPLEMENTED` | Staged at `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64`; `Verify-ReleaseBundle.ps1` passed (`9` SHA-256 checksums, `ags --version`, `ags doctor --json`, `-DryRun`); unsigned RC1 |
-| VS Code Extension Host GUI Suite (`npm run test:integration`) | `IMPLEMENTED_NOT_VERIFIED` | Not executed in headless automation turn; covered by CI workflow matrix |
+| M17/M19 Windows RC1 Standalone Bundle, Installer Scripts & Release Docs | `VERIFIED_IMPLEMENTED` | Built `--release` binaries and staged `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64` + `AgentStudios-v1.0.0-rc1-win-x64.zip` (`c40dbb84726afd01cb97310928ab3905b08cd3afe46f04785ba61653a4698ca`); `Verify-ReleaseBundle.ps1` passed (`9` SHA-256 checksums, ZIP checksum, `--release` `ags --version`/`ags doctor --json`, `-DryRun`); unsigned RC1 |
+| VS Code Extension Host GUI Suite (`npm run test:integration`) | `VERIFIED_IMPLEMENTED` | Executed in real VS Code Extension Development Host (`@vscode/test-electron`): **`25 passing (14s)`**, exit `0` |
 | Live Billable Cloud LLM Acceptance (`$1`–`$5` spend) & Production Authenticode Signing | `BLOCKED` | Blocked behind `GATE-03` (billable credentials/spend cap) and `GATE-04` (production code-signing certificate) |
 
 ## 3. Task Execution Summary
 
-- **Completed Tasks**: `W1-T1`, `W1-T2`, `W2-T1`, `W2-T2`, `W2-T3`, `W3-T1`, `W4-T1`, `W4-T2`, `W4-T3`, `W5-T1` (offline technical scope).
+- **Completed Tasks**: `W1-T1`, `W1-T2`, `W2-T1`, `W2-T2`, `W2-T3`, `W3-T1`, `W4-T1`, `W4-T2`, `W4-T3`, `W5-T1` (offline technical scope + Wave 6 verification).
 
 ## 4. Human Approval Gates Required (`GATE-01`..`GATE-04`)
 
@@ -52,4 +52,4 @@ All active development branches (`PR #33` tip `65397d709d`, `PR #31` tip `c98a8a
 
 ## 5. Exact Next Action
 
-Operator review of `integration/m15-1-joint-validation` (commit `58293983af` + docs commit) and staged bundle `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64` to approve `GATE-01`..`GATE-04`.
+Operator review of `integration/m15-1-joint-validation` (code commit `ace0f6b026` + docs commit pushed to `origin`) and staged `--release` bundle/ZIP `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64` to approve `GATE-01`..`GATE-04`.

@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "baseline_branch": "integration/m15-1-joint-validation",
   "baseline_sha": "5f7b5f525b7b5a56bccac2ea3cfd149d809e3f6c",
-  "code_commit_sha": "58293983af34ccf46ac44f2b44e224a33af31ba8",
+  "code_commit_sha": "ace0f6b02628b796d5051ef8d8a660cbbfb6fd81",
   "worktree_path": "D:\\Projects\\agent-studios-active\\m15-1-joint-validation",
   "tasks": [
     {
