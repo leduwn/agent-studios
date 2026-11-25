@@ -65,3 +65,25 @@
     - `Install-AgentStudios.ps1 -DryRun` & `Uninstall-AgentStudios.ps1 -DryRun` -> passed
     - Verified `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256: `c40dbb84726afd01cb97310928ab3905b08cd3afe46f04785ba61653a4698ca`
   - `RELEASE_MANIFEST.json`: `profile: "release"`, `source_commit: "ace0f6b02628b796d5051ef8d8a660cbbfb6fd81"`, `signing_status: "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"`
+
+### 5. Wave 7 Cross-Platform CI Fix & Green Matrix Verification (`41480cfa025e41df105a3c01ecda2307b51fb180`)
+- **Frontend Local Verification (`task-727`, post-`AgsdBinaryResolver.ts` Windows `path.win32` fix)**:
+  - `npm run lint`: `exit 0` (`0` errors, `352` pre-existing warnings)
+  - `npm run typecheck`: `exit 0`
+  - `npm run build`: `exit 0`
+  - Direct helper check: `WIN_NORM=d:\projects\agent-studios\agent-studios-rs\target\debug\agsd.exe`, `WIN_SUB=true`, `WIN_SIBLING=false`
+  - `npm run test:unit`: `exit 0` — **`700 passing (3s)`**
+  - `npm run test:e2e`: `exit 0` — **`84 passing (7s)`** (live `agsd.exe`)
+  - `npm run test:integration` (real VS Code Extension Development Host GUI): `exit 0` — **`25 passing (19s)`**
+- **GitHub Actions Remote Cross-Platform CI (`41480cfa025e41df105a3c01ecda2307b51fb180`)**:
+  - **Run `45590072851`** (`pull_request`, https://github.com/leduwn/agent-studios/actions/runs/45590072851): **`completed / success`**
+    - `Unified CI (windows-latest)`: **`completed / success`** (`job/139121602810`)
+    - `Unified CI (ubuntu-latest)`: **`completed / success`** (`job/139121603348`)
+  - **Run `45590064391`** (`push`, https://github.com/leduwn/agent-studios/actions/runs/45590064391): **`completed / success`**
+    - `Unified CI (ubuntu-latest)`: **`completed / success`** (`job/139121568833`)
+    - `Unified CI (windows-latest)`: **`completed / success`** (`job/139121569523`)
+  - **PR `#35`**: `state=open`, `draft=True`, `mergeable=True`, `mergeable_state=clean`
+- **Final Release Profile (`--release`) Bundle Rebuild (`task-753`, pinned to green CI commit `41480cfa02`)**:
+  - `Build-WindowsReleaseBundle.ps1 -Profile release` (`2m 02s` incremental) + `Verify-ReleaseBundle.ps1`: **`exit 0`** (`9` SHA-256 checksums, `--release` `ags.exe --version`, `ags.exe doctor --json`, `-DryRun` installer/uninstaller, and ZIP checksum all passed)
+  - `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`
+  - `RELEASE_MANIFEST.json`: `profile: "release"`, `source_commit: "41480cfa025e41df105a3c01ecda2307b51fb180"`, `signing_status: "UNSIGNED_RC1_REQUIRES_OPERATOR_CERT"`

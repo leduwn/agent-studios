@@ -35,20 +35,26 @@
   - `cargo build --release --bin agsd --bin ags`: exit `0`.
 
 ### Frontend (`apps/agent-studios-vscode`)
-- Wave 6 (`ace0f6b026`): `npm run lint` (`0` errors), `npm run typecheck` (`0` errors), `npm run build` (`0` errors), `npm run test:unit` (`699 passing`), `npm run test:e2e` with live `agsd.exe` (`84 passing`), and real VS Code Extension Development Host GUI `npm run test:integration` (`25 passing (14s)`).
-- Wave 7 CI Fix: `AgsdBinaryResolver.ts` (`normalizePathForComparison` / `isSubpathOrEqual`) updated to select `path.win32` when `isWindows === true`, eliminating the `Unified CI (ubuntu-latest)` Step 19 unit failure observed on Run `45548370010` (where `Unified CI (windows-latest)` already passed).
+- Wave 7 (`41480cfa02`): `npm run lint` (`0` errors), `npm run typecheck` (`0` errors), `npm run build` (`0` errors), `npm run test:unit` (**`700 passing (3s)`**), `npm run test:e2e` with live `agsd.exe` (**`84 passing (7s)`**), and real VS Code Extension Development Host GUI `npm run test:integration` (**`25 passing (19s)`**).
+- Wave 7 CI Fix: `AgsdBinaryResolver.ts` (`normalizePathForComparison` / `isSubpathOrEqual`) updated to select `path.win32` when `isWindows === true`, eliminating the `Unified CI (ubuntu-latest)` Step 19 unit failure observed on Run `45548370010`.
 
 ### Windows x64 RC1 Release Bundle (`scripts/packaging/`)
 - Output directory: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64`
-- Distributable archive: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64.zip`
-- Includes `--release` `agsd.exe` and `ags.exe`, `agent-studios-vscode-0.1.0.vsix`, canonical `product.json` / `config.default.toml`, `AgentStudios.nsi`, `Install-AgentStudios.ps1`, `Uninstall-AgentStudios.ps1`, `RELEASE_MANIFEST.json`, and `SHA256SUMS.txt` (`9` verified file checksums + `.zip.sha256`).
+- Distributable archive: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64.zip` (`SHA-256: 3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`)
+- Includes `--release` `agsd.exe` and `ags.exe` (source commit `41480cfa025e41df105a3c01ecda2307b51fb180`), `agent-studios-vscode-0.1.0.vsix`, canonical `product.json` / `config.default.toml`, `AgentStudios.nsi`, `Install-AgentStudios.ps1`, `Uninstall-AgentStudios.ps1`, `RELEASE_MANIFEST.json`, and `SHA256SUMS.txt` (`9` verified file checksums + `.zip.sha256`).
 
 ---
 
 ## 3. Cross-Platform GitHub Actions CI Status
 
 - **Run `45548370010` (`2777c3d465`)**: `Unified CI (windows-latest)` = `success`; `Unified CI (ubuntu-latest)` = `failure` at Step 19 (`AgsdBinaryResolver.test.ts` Windows path normalization on Linux).
-- **Wave 7 Fix Verification Run**: *(To be populated immediately once Wave 7 CI run on `origin/integration/m15-1-joint-validation` finishes).*
+- **Run `45590072851` (`pull_request` on `41480cfa02`, https://github.com/leduwn/agent-studios/actions/runs/45590072851)**:
+  - `Unified CI (windows-latest)`: **`completed / success`** (`job/139121602810`)
+  - `Unified CI (ubuntu-latest)`: **`completed / success`** (`job/139121603348`)
+- **Run `45590064391` (`push` on `41480cfa02`, https://github.com/leduwn/agent-studios/actions/runs/45590064391)**:
+  - `Unified CI (ubuntu-latest)`: **`completed / success`** (`job/139121568833`)
+  - `Unified CI (windows-latest)`: **`completed / success`** (`job/139121569523`)
+- **PR `#35` Status**: `state=open`, `draft=True`, `mergeable=True`, `mergeable_state=clean`.
 
 ---
 
