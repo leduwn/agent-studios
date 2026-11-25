@@ -70,6 +70,17 @@ describe('AgsdBinaryResolver Provenance Tests (M15 UI-06 Hardening)', () => {
 
       const outsideBinary = 'D:/OtherProjects/agent-studios-rs/target/debug/agsd.exe';
       assert.strictEqual(isSubpathOrEqual(outsideBinary, workspace, true), false);
+
+      const siblingPrefixBinary = 'd:\\projects\\agent-studios-evil\\agsd.exe';
+      assert.strictEqual(isSubpathOrEqual(siblingPrefixBinary, workspace, true), false);
+    });
+
+    it('verifies POSIX subpath containment and sibling-prefix rejection cleanly', () => {
+      const posixWorkspace = '/workspace/repo';
+      const validPosixBinary = '/workspace/repo/agent-studios-rs/target/debug/agsd';
+      const siblingPosixBinary = '/workspace/repo-evil/agent-studios-rs/target/debug/agsd';
+      assert.strictEqual(isSubpathOrEqual(validPosixBinary, posixWorkspace, false), true);
+      assert.strictEqual(isSubpathOrEqual(siblingPosixBinary, posixWorkspace, false), false);
     });
   });
 

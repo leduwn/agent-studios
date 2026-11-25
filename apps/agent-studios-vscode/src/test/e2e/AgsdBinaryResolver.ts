@@ -44,8 +44,9 @@ export function isStaleHistoricalPath(filePath: string): boolean {
  * On Windows, handles case-insensitivity (drive letters, folders) and forward/backward slashes.
  */
 export function normalizePathForComparison(filePath: string, isWindows: boolean): string {
-  const resolved = path.resolve(filePath);
-  const normalized = path.normalize(resolved);
+  const pathImpl = isWindows ? path.win32 : path;
+  const resolved = pathImpl.resolve(filePath);
+  const normalized = pathImpl.normalize(resolved);
   return isWindows ? normalized.toLowerCase() : normalized;
 }
 
@@ -53,6 +54,7 @@ export function normalizePathForComparison(filePath: string, isWindows: boolean)
  * Checks whether `targetPath` is identical to or located inside `parentDir`.
  */
 export function isSubpathOrEqual(targetPath: string, parentDir: string, isWindows: boolean): boolean {
+  const pathImpl = isWindows ? path.win32 : path;
   const normTarget = normalizePathForComparison(targetPath, isWindows);
   const normParent = normalizePathForComparison(parentDir, isWindows);
 
@@ -60,8 +62,8 @@ export function isSubpathOrEqual(targetPath: string, parentDir: string, isWindow
     return true;
   }
 
-  const relative = path.relative(normParent, normTarget);
-  return !relative.startsWith('..') && !path.isAbsolute(relative);
+  const relative = pathImpl.relative(normParent, normTarget);
+  return !relative.startsWith('..') && !pathImpl.isAbsolute(relative);
 }
 
 /**
