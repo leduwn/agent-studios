@@ -1,30 +1,31 @@
 # Agent Studios — Master Orchestration State (`MASTER_STATE.md`)
 
-> **Last Updated**: 2026-11-25T19:46:00+07:00
-> **Active Milestone**: MASTER MISSION 03 — Complete (`feat/rc2-product-completion` Ready for Operator Review)
+> **Last Updated**: 2026-11-25T21:54:00+07:00
+> **Active Milestone**: MASTER MISSION 04 — Extension-First Complete (`feat/extension-first-product-completion` Ready for Operator Review)
 > **Canonical `main` Baseline SHA**: `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c` (protected; not auto-merged)
-> **Feature Branch Code/Packaging Verified SHA**: `6a867172a8bf30cfac941391c88513579f22d6e7`
+> **Verified Code & Packaging SHA**: `2e3195367f5365953fc34a905a9afa32c93f17ca`
 > **Active Isolated Worktree**: `D:\Projects\agent-studios-active\m15-1-joint-validation`
-> **Shared RC2 Cargo Target Dir**: `C:\AgentStudiosBuild\cargo-target-rc2`
+> **Shared Cargo Target Dir**: `C:\AgentStudiosBuild\cargo-target-rc2`
 > **Preserved RC1 Bundle (Immutable)**: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc1-win-x64.zip` (`SHA-256: 3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`)
-> **Staged & Verified RC2 Bundle**: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc2-6a867172a8-win-x64.zip` (`SHA-256: 49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`)
+> **Preserved RC2 Bundle**: `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc2-6a867172a8-win-x64.zip` (`SHA-256: 49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`)
+> **Packaged Extension-First VSIX (`v1.1.0`)**: `C:\AgentStudiosBuild\release-bundle\agent-studios-vscode-1.1.0-win32-x64.vsix` (`SHA-256: c5d33695419db6028a35adc9ece00d939185d36806e306596b473ce4a560a622`)
 
 ---
 
 ## 1. Completed Gates & Release Posture
 
-- **RC1 Consolidation Preserved**: `main`, `integration/m15-unified-codebase`, and `integration/m15-1-joint-validation` remain cleanly at `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`; RC1 ZIP hash verified unchanged.
+- **RC1 & RC2 Preserved**: `main` remains at `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`; RC1 and RC2 ZIP hashes re-verified unchanged.
+- **Standalone Desktop Priority Adjustment**: Standalone Code-OSS desktop distribution (`crates/desktop`, `installer/windows/*`, NSIS installer, desktop auto-updater) marked `DEFERRED_BY_OPERATOR` in MASTER MISSION 04 and preserved in-tree.
 - **Human Approval Gates**:
   - `GATE-01` & `GATE-02`: **RESOLVED**.
-  - `GATE-03` (`$0.00` live LLM billable spend cap) and `GATE-04` (production Authenticode certificate + NSIS compiler host) remain **ACTIVE** by design.
+  - `GATE-03` (`$0.00` live LLM billable spend cap) and `GATE-04` (production Authenticode signing certificate) remain **ACTIVE** by design.
 
-## 2. RC2 Engineering Completion Matrix (Waves 0–10)
+## 2. Extension-First Engineering Completion Matrix (Waves 0–12)
 
 | Wave | Scope | Commit SHA | Status |
 |---|---|---|---|
-| Wave 0–1 | Post-RC1 Forensic Audit (`docs/reviews/POST-RC1-PRODUCT-AUDIT/`, 16 files + sanitized ZIP) & orchestration sync | `00cb6a58b3` | `done` |
-| Wave 2–3 | Standalone Desktop Executable (`crates/desktop` → `AgentStudios.exe`), daemon lifecycle supervisor with crash respawn, isolated Code-OSS launcher | `ce6ddbce27` | `done` |
-| Wave 4 | VS Code Extension Product Completion (Groups 1–6: `ConversationManager`, `EditorIntelligenceProvider`, `ContextEngine`, `HunkReviewManager`, `ProviderManagementCommands`, `ExtensibilityCommands`, v`1.0.0`) | `33af678578` | `done` |
-| Wave 5–6 | Complete MCP Engine (`initialize` handshake, Streamable HTTP + `resources/*` + `prompts/*` in `crates/extensibility/src/mcp.rs`) & `LiveAcceptanceHarness` (`$0.00` gated in `crates/cli-client/src/live_harness.rs`) | `a54fc1cf19` | `done` |
-| Wave 7–8 | RC2 Packaging & Real Sandbox Install/Upgrade/Execute/Uninstall Verification (`Build-WindowsReleaseBundle.ps1`, `Verify-ReleaseBundle.ps1`, `Install-AgentStudios.ps1`, `Uninstall-AgentStudios.ps1`) + full Rust/TS gates | `5d2d5ae451`, `6a867172a8` | `done` |
-| Wave 9–10 | `docs/reviews/RC2-PRODUCT-COMPLETION/MASTER_REPORT.md`, orchestration sync, sanitized handoff archive, push `feat/rc2-product-completion` | Closeout commit | `done` |
+| Wave 0–1 | Parity Audit against `openai.chatgpt` `26.1117.41037` / `codex.exe` `0.171.0-alpha.13`, traceability & OSS research (`docs/reviews/EXTENSION-FIRST-PRODUCT-COMPLETION/`) | `8beed235ee` | `done` |
+| Wave 2 | Upstream `codex-rs` sync (`d25c114d49` -> `44dd77b71e`, 26 commits / 152 files, 4 patches preserved) | `cf223bd286` | `done` |
+| Wave 3–6 (Backend) | 12-provider catalog (`litellm`, `vllm` added) & authoritative IPC commands (`UpsertProvider`, `RemoveProvider`, `DiscoverModels`, `TestProviderConnection`, `ForkStudio`, `ListExtensibility`) | `04a3457578` | `done` |
+| Wave 4–10 (Frontend & E2E) | `EmbeddedDaemonSupervisor`, auto-start wiring, composer controls, `ContextEngine` provenance, zero-stub inline completion, `HunkReviewManager`, Mission Control `#dag-viewport-group` + DAG controls, Journeys A–G E2E & `Build-ExtensionFirstBundle.ps1` | `2e3195367f` | `done` |
+| Wave 11–12 | Full Rust (`120 suites: 1022 passed`) + TS (`706 unit`, `89 E2E`, `25 integration`) gates, self-contained `v1.1.0` VSIX + clean-profile VS Code install smoke test, closeout report & handoff ZIP | Closeout commit | `done` |

@@ -115,3 +115,21 @@
   - Packaged `C:\AgentStudiosBuild\release-bundle\AgentStudios-v1.0.0-rc2-6a867172a8-win-x64` (`AgentStudios-v1.0.0-rc2-6a867172a8-win-x64.zip`, `22,624,975` bytes, SHA-256 `49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`)
   - `Verify-ReleaseBundle.ps1`: `exit 0` — verified 13 `SHA256SUMS.txt` hashes + ZIP checksum + `--release` `ags.exe doctor --json` + `AgentStudios.exe --headless-check --json` + real isolated temp sandbox install -> custom `config.toml` upgrade preservation -> installed `AgentStudios.exe` execution -> uninstall/purge
   - Preserved RC1 `AgentStudios-v1.0.0-rc1-win-x64.zip` SHA-256 re-confirmed unchanged: `3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`
+
+### 8. MASTER MISSION 04 — Extension-First Product Completion Gates (`feat/extension-first-product-completion`, Verified SHA `2e3195367f`)
+- **Upstream Sync Verification (`cf223bd286`)**: `codex-rs/` synced `d25c114d49` -> `44dd77b71e` (26 commits / 152 files, Patches `001`–`004` preserved); `cargo check --workspace --all-targets`: `exit 0`.
+- **Rust Quality & Workspace Verification (`task-1676` & `task-1744`)**:
+  - `cargo fmt --check`: `exit 0`
+  - `cargo clippy --workspace --all-targets -- -D warnings`: `exit 0`
+  - `cargo test --workspace -j 1` (with `CARGO_INCREMENTAL=0`, `RUST_MIN_STACK=8388608`, `$0.00` live spend guard): `exit 0` — **`120 suites: 1022 passed, 0 failed, 0 ignored`** (includes `rc3_extension_first_ipc_tests` verifying `UpsertProvider`, HTTP `/v1/models` `DiscoverModels`, `TestProviderConnection`, `ForkStudio`, `ListExtensibility`, `RemoveProvider`)
+- **Frontend Extension Verification (`task-1665`, with `AGSD_BIN_PATH=C:\AgentStudiosBuild\cargo-target-rc2\debug\agsd.exe`)**:
+  - `npm run lint`: `exit 0` (`0` errors)
+  - `npm run typecheck`: `exit 0`
+  - `npm run build`: `exit 0`
+  - `npm run test:unit`: `exit 0` — **`706 passing`**
+  - `npm run test:e2e`: `exit 0` — **`89 passing`** (includes **Journeys A–G** against real `agsd.exe` + `$0.00` HTTP `/v1/models` mock + SQLite WAL restart durability)
+  - `npm run test:integration`: `exit 0` — **`25 passing`** in real VS Code Extension Host
+- **Self-Contained VSIX `v1.1.0` Packaging & Clean-Profile Smoke Test (`task-1750`)**:
+  - `Build-ExtensionFirstBundle.ps1 -Profile release -Version 1.1.0`: `exit 0` — packaged `C:\AgentStudiosBuild\release-bundle\agent-studios-vscode-1.1.0-win32-x64.vsix` (`17.67 MB`, `101` files, SHA-256 `c5d33695419db6028a35adc9ece00d939185d36806e306596b473ce4a560a622`) bundling `bin/win32-x64/agsd.exe` (`2b1dd9e541652c9853d1a2d0e17d2c61cbe28eecf8ef979e74c87c7737d7a3c4`), `bin/win32-x64/ags.exe` (`df127c8286e25e6f6126f80643ff9fbaae8f3ad8ed7961ed213d4d8d1088f48c`), and `SHA256SUMS.txt`.
+  - Clean VS Code profile smoke install (`code.cmd --user-data-dir <temp> --extensions-dir <temp> --install-extension ... --force`): installed `agent-studios.agent-studios-vscode@1.1.0`, verified `agsd.exe`, `ags.exe`, `SHA256SUMS.txt` extracted inside `bin\win32-x64\` and `ags.exe --version` -> `ags 0.1.0`.
+  - Re-verified preserved immutable archives: RC1 (`3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`) and RC2 (`49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`).

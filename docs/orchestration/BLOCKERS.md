@@ -1,6 +1,6 @@
 # Blockers & Human Approval Gates (`BLOCKERS.md`)
 
-> **Updated Post-RC1**: 2026-11-25T18:33:00+07:00 (`feat/rc2-product-completion` branched from `main` at `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`)
+> **Updated Post-Extension-First**: 2026-11-25T21:54:00+07:00 (`feat/extension-first-product-completion` branched from `feat/rc2-product-completion`; `main` untouched at `00e5c862b8173cb29914a4ff8dfe4dbb1147e03c`)
 
 ## Resolved Gates
 
