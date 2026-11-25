@@ -20,3 +20,8 @@
 - **Date**: 2026-11-25
 - **Context**: Upstream `codex-rs` provides foundational primitives; Agent Studios needs scoped discovery/enforcement (`~/.agent-studios/`, `<repo>/.agent-studios/`), progressive disclosure, hook execution policies, MCP secret redaction, and worktree-contained `AGENTS.md`/`CLAUDE.md` resolution exposed via `ags` CLI and Control Plane.
 - **Decision**: Implement `crates/extensibility` (`agent-studios-extensibility`) aligned strictly with `SKILLS_MCP_PLUGINS.md` and `AGS_CLI_TUI_SPEC.md`, without modifying `codex-rs/`.
+
+## DEC-005: Native Internal Codex Engine & Vault Provisioning in `agsd` (MM05)
+- **Date**: 2026-11-26
+- **Context**: `v1.1.0` lacked real `CodexThread` execution inside `agsd.exe`, leaving VS Code chat turns routed to non-executing task records and `SecretStorage` API keys disconnected from daemon provider discovery/inference.
+- **Decision**: Embed `CodexStudioEngine` and `InternalCodexAgentRuntime` (`codex_runtime.rs`) inside `agent-studios-ipc-transport` with `DaemonSecretVault` (`SetProviderSecret`/`DeleteProviderSecret`), `ExecuteChatTurn`, `InterruptChatTurn`, `GetStudioTranscript`, `ForkStudio` transcript cloning, `ExecuteMultiAgentGoal` worktree DAG execution, and `PermissionProfile::Disabled` (for workspace-write/full-access modes) paired with `ReadOnlyToolGuardContributor` for `read-only` mode.

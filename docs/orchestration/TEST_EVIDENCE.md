@@ -133,3 +133,19 @@
   - `Build-ExtensionFirstBundle.ps1 -Profile release -Version 1.1.0`: `exit 0` — packaged `C:\AgentStudiosBuild\release-bundle\agent-studios-vscode-1.1.0-win32-x64.vsix` (`17.67 MB`, `101` files, SHA-256 `c5d33695419db6028a35adc9ece00d939185d36806e306596b473ce4a560a622`) bundling `bin/win32-x64/agsd.exe` (`2b1dd9e541652c9853d1a2d0e17d2c61cbe28eecf8ef979e74c87c7737d7a3c4`), `bin/win32-x64/ags.exe` (`df127c8286e25e6f6126f80643ff9fbaae8f3ad8ed7961ed213d4d8d1088f48c`), and `SHA256SUMS.txt`.
   - Clean VS Code profile smoke install (`code.cmd --user-data-dir <temp> --extensions-dir <temp> --install-extension ... --force`): installed `agent-studios.agent-studios-vscode@1.1.0`, verified `agsd.exe`, `ags.exe`, `SHA256SUMS.txt` extracted inside `bin\win32-x64\` and `ags.exe --version` -> `ags 0.1.0`.
   - Re-verified preserved immutable archives: RC1 (`3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`) and RC2 (`49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`).
+
+### 9. MASTER MISSION 05 — Real Coding Execution & Parity (`fix/extension-real-execution-and-parity`, Verified SHA `f87e284915`)
+- **Rust Quality & Workspace Verification (`task-2489`, `$0.00` live spend guard)**:
+  - `cargo fmt --check`: `exit 0`
+  - `cargo clippy -j 1 --workspace --all-targets -- -D warnings`: `exit 0`
+  - `cargo test --workspace -j 1`: `exit 0` — **`121 suites: 1026 passed, 0 failed, 0 ignored`** (includes `real_codex_ipc_execution_tests`: `4/4` passed)
+  - `cargo build --release --bin agsd --bin ags -j 1`: `exit 0`
+- **Frontend Extension Verification (`task-2452`, `AGSD_BIN_PATH=C:\AgentStudiosBuild\cargo-target-rc2\release\agsd.exe`)**:
+  - `npm run typecheck`, `npm run lint`, `npm run build`: `exit 0`
+  - `npm run test:unit`: `exit 0` — **`706 passing (3s)`**
+  - `npm run test:e2e`: `exit 0` — **`93 passing (23s)`** (includes `RealCodexExecutionAcceptanceE2E` `J1`–`J4` against release `agsd.exe` + `DeterministicInferenceServer`)
+  - `npm run test:integration`: `exit 0` — **`25 passing (14s)`** in real VS Code Extension Host
+- **Self-Contained VSIX `v1.1.1-f87e284915` & Clean Isolated Profile Extension Host Acceptance (`task-2504`, `task-2525`)**:
+  - `Build-ExtensionFirstBundle.ps1 -Profile release -Version 1.1.1 -SkipCargoBuild`: `exit 0` — packaged `C:\AgentStudiosBuild\release-bundle\agent-studios-vscode-1.1.1-f87e284915-win32-x64.vsix` (`71.08 MB`, `101 files`, SHA-256 `1da4a7ac5d393768c3ae391df8a5e9e0bb5d0b76d9e56c6fcb3fc42bdef23e51`).
+  - Clean isolated VS Code profile + Extension Host (`AGSD_BIN_PATH` unset): installed `agent-studios.agent-studios-vscode@1.1.1`, resolved bundled `bin/win32-x64/agsd.exe`, booted daemon, rejected 401 wrong key, discovered `codex-clean-vsix` via 200 `/v1/models`, and completed streaming Codex chat turn (`ThreadId 01a21425-1a25-71c1-9e40-6c1495fe7211`) with `AGENTS.md` and `$audit` `SKILL.md` verified in HTTP request payload (`exit 0`).
+  - Preserved artifact SHA-256 hashes re-confirmed unchanged: RC1 (`3ce6d4e8fd307c78042bb297171af0c174382ef01f88435dd11c483e4c8c3eb9`), RC2 (`49a7a6c45affb88e5f3f11cba43b3f36a392af9b617ecc0df50cd5e31425dbda`), and `v1.1.0` VSIX (`c5d33695419db6028a35adc9ece00d939185d36806e306596b473ce4a560a622`).
