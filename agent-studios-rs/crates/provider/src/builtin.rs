@@ -76,12 +76,33 @@ pub fn builtin_definitions() -> Vec<ProviderDefinition> {
         .expect("valid definition")
         .with_documentation_url("https://ollama.com"),
         ProviderDefinition::new(
+            ProviderId::new("litellm").expect("valid id"),
+            "LiteLLM",
+            vec![
+                ProtocolFamily::OpenAiChatCompletions,
+                ProtocolFamily::OpenAiResponses,
+                ProtocolFamily::AnthropicMessages,
+            ],
+        )
+        .expect("valid definition")
+        .with_documentation_url("https://docs.litellm.ai"),
+        ProviderDefinition::new(
             ProviderId::new("lm-studio").expect("valid id"),
             "LM Studio",
             vec![ProtocolFamily::OpenAiChatCompletions],
         )
         .expect("valid definition")
         .with_documentation_url("https://lmstudio.ai"),
+        ProviderDefinition::new(
+            ProviderId::new("vllm").expect("valid id"),
+            "vLLM",
+            vec![
+                ProtocolFamily::OpenAiChatCompletions,
+                ProtocolFamily::OpenAiResponses,
+            ],
+        )
+        .expect("valid definition")
+        .with_documentation_url("https://docs.vllm.ai"),
         ProviderDefinition::new(
             ProviderId::new("custom").expect("valid id"),
             "Custom Provider",
@@ -113,6 +134,8 @@ mod tests {
         assert!(ids.contains(&"google-gemini"));
         assert!(ids.contains(&"openrouter"));
         assert!(ids.contains(&"9router"));
+        assert!(ids.contains(&"litellm"));
+        assert!(ids.contains(&"vllm"));
         assert!(ids.contains(&"custom"));
     }
 }

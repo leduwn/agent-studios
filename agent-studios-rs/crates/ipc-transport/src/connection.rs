@@ -20,7 +20,10 @@ use agent_studios_protocol::run::{RunRecord, RunState};
 use agent_studios_protocol::studio::Studio;
 use agent_studios_protocol::task::{BatchTaskSpec, TaskRecord, TaskState};
 use agent_studios_protocol::worktree::WorktreeState;
-use agent_studios_provider::{ModelDescriptor, ProviderInstance, ProviderInstanceId};
+use agent_studios_provider::{
+    DefaultSecretResolver, ModelDescriptor, ModelDiscoveryClient, ProviderConnectionReport,
+    ProviderInstance, ProviderInstanceId,
+};
 use agent_studios_workspace::capture::parse_git_diff_summary;
 
 use crate::error::TransportError;
@@ -135,9 +138,32 @@ pub enum IpcCommand {
     GetProvider {
         provider_id: ProviderInstanceId,
     },
+    UpsertProvider {
+        provider: ProviderInstance,
+        #[serde(default)]
+        models: Vec<ModelDescriptor>,
+    },
+    RemoveProvider {
+        provider_id: ProviderInstanceId,
+    },
+    DiscoverModels {
+        provider_id: ProviderInstanceId,
+    },
+    TestProviderConnection {
+        provider_id: ProviderInstanceId,
+    },
     ListModels {
         #[serde(default)]
         instance_id: Option<ProviderInstanceId>,
+    },
+    ForkStudio {
+        source_studio_id: StudioId,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    ListExtensibility {
+        #[serde(default)]
+        workspace_root: Option<String>,
     },
     GetExecutionReadiness,
     ListTaskArtifacts {
@@ -229,8 +255,27 @@ pub enum IpcResponse {
     Provider {
         provider: Option<ProviderInstance>,
     },
+    ProviderUpserted {
+        provider: ProviderInstance,
+    },
+    ProviderRemoved {
+        provider_id: ProviderInstanceId,
+        removed: bool,
+    },
     Models {
         models: Vec<ModelDescriptor>,
+    },
+    ModelsDiscovered {
+        provider_id: ProviderInstanceId,
+        models: Vec<ModelDescriptor>,
+    },
+    ProviderConnectionTested {
+        report: ProviderConnectionReport,
+    },
+    ExtensibilityListed {
+        skills: Vec<serde_json::Value>,
+        mcp_servers: Vec<serde_json::Value>,
+        instructions: Vec<serde_json::Value>,
     },
     ExecutionReadiness {
         readiness: ExecutionReadinessReport,
@@ -1456,6 +1501,235 @@ async fn run_command_loop<R: AsyncRead + Unpin>(
                     tx.send(IpcResponse::Provider { provider })
                         .await
                         .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::UpsertProvider { provider, models } => {
+                    let upsert_res: Result<ProviderInstance, String> = {
+                        let mut catalog = server_state.provider_catalog.write().await;
+                        let exists = catalog.get_provider_instance(&provider.id).is_some();
+                        let res = if exists {
+                            catalog.update_provider_instance(provider.clone())
+                        } else {
+                            catalog.register_provider_instance(provider.clone())
+                        };
+                        match res {
+                            Ok(()) => {
+                                for mut model in models {
+                                    model.provider_instance_id = provider.id;
+                                    let _ = catalog.register_model(model);
+                                }
+                                Ok(provider)
+                            }
+                            Err(e) => Err(e.to_string()),
+                        }
+                    };
+                    match upsert_res {
+                        Ok(provider) => {
+                            let _ = server_state.emit_event(
+                                "provider_upserted",
+                                serde_json::json!({
+                                    "instance_id": provider.id,
+                                    "provider_id": provider.provider_id,
+                                }),
+                            );
+                            tx.send(IpcResponse::ProviderUpserted { provider })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(msg) => {
+                            tx.send(IpcResponse::Error { message: msg })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::RemoveProvider { provider_id } => {
+                    let removed = {
+                        let mut catalog = server_state.provider_catalog.write().await;
+                        catalog
+                            .remove_provider_instance_cascade(&provider_id)
+                            .is_ok()
+                    };
+                    tx.send(IpcResponse::ProviderRemoved {
+                        provider_id,
+                        removed,
+                    })
+                    .await
+                    .map_err(|_| TransportError::ConnectionClosed)?;
+                }
+                IpcCommand::DiscoverModels { provider_id } => {
+                    let instance_opt = {
+                        let catalog = server_state.provider_catalog.read().await;
+                        catalog.get_provider_instance(&provider_id).cloned()
+                    };
+                    match instance_opt {
+                        None => {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Unknown provider instance: {provider_id}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Some(instance) => {
+                            let discovery = ModelDiscoveryClient::new(
+                                Arc::new(DefaultSecretResolver::default()),
+                                std::time::Duration::from_secs(10),
+                                std::time::Duration::from_secs(300),
+                            );
+                            match discovery.discover_models(&instance).await {
+                                Ok(discovered) => {
+                                    {
+                                        let mut catalog =
+                                            server_state.provider_catalog.write().await;
+                                        for model in &discovered {
+                                            let _ = catalog.register_model(model.clone());
+                                        }
+                                    }
+                                    tx.send(IpcResponse::ModelsDiscovered {
+                                        provider_id,
+                                        models: discovered,
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                }
+                                Err(e) => {
+                                    tx.send(IpcResponse::Error {
+                                        message: format!(
+                                            "Model discovery failed for {provider_id}: {e}"
+                                        ),
+                                    })
+                                    .await
+                                    .map_err(|_| TransportError::ConnectionClosed)?;
+                                }
+                            }
+                        }
+                    }
+                }
+                IpcCommand::TestProviderConnection { provider_id } => {
+                    let instance_opt = {
+                        let catalog = server_state.provider_catalog.read().await;
+                        catalog.get_provider_instance(&provider_id).cloned()
+                    };
+                    match instance_opt {
+                        None => {
+                            tx.send(IpcResponse::Error {
+                                message: format!("Unknown provider instance: {provider_id}"),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Some(instance) => {
+                            let discovery = ModelDiscoveryClient::new(
+                                Arc::new(DefaultSecretResolver::default()),
+                                std::time::Duration::from_secs(10),
+                                std::time::Duration::from_secs(60),
+                            );
+                            let report = discovery.test_connection(&instance).await;
+                            tx.send(IpcResponse::ProviderConnectionTested { report })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::ForkStudio {
+                    source_studio_id,
+                    name,
+                } => {
+                    let (res, envelopes) =
+                        {
+                            let mut cp = server_state.control_plane.write().await;
+                            if let Some(source) = cp.get_studio(source_studio_id).cloned() {
+                                let fork_name =
+                                    name.unwrap_or_else(|| format!("{} (Fork)", source.name));
+                                let r = cp.create_studio(fork_name);
+                                let envs = if r.is_ok() {
+                                    cp.drain_committed_events()
+                                } else {
+                                    Vec::new()
+                                };
+                                (r, envs)
+                            } else {
+                                (
+                                Err(agent_studios_control_plane::ControlPlaneError::StudioNotFound(
+                                    source_studio_id,
+                                )),
+                                Vec::new(),
+                            )
+                            }
+                        };
+
+                    match res {
+                        Ok(studio) => {
+                            let _ = server_state.publish_control_plane_events(envelopes);
+                            tx.send(IpcResponse::StudioCreated { studio })
+                                .await
+                                .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                        Err(e) => {
+                            tx.send(IpcResponse::Error {
+                                message: e.to_string(),
+                            })
+                            .await
+                            .map_err(|_| TransportError::ConnectionClosed)?;
+                        }
+                    }
+                }
+                IpcCommand::ListExtensibility { workspace_root } => {
+                    let global_home = crate::daemon::DaemonConfig::default_state_dir();
+                    let proj_root = workspace_root
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                        .or_else(|| server_state.default_repo_path.clone());
+
+                    let mut skill_reg = agent_studios_extensibility::SkillRegistry::new(
+                        &global_home,
+                        proj_root.clone(),
+                    );
+                    let _ = skill_reg.discover();
+                    let skills: Vec<serde_json::Value> = skill_reg
+                        .summaries()
+                        .into_iter()
+                        .filter_map(|s| serde_json::to_value(s).ok())
+                        .collect();
+
+                    let mcp_servers = agent_studios_extensibility::McpRegistry::load_from_paths(
+                        &global_home,
+                        proj_root.as_deref(),
+                    )
+                    .map(|m| m.redacted_server_summaries())
+                    .unwrap_or_default();
+
+                    let instructions: Vec<serde_json::Value> = if let Some(ref proj) = proj_root {
+                        agent_studios_extensibility::InstructionResolver::resolve(
+                            Some(&global_home),
+                            proj,
+                            proj,
+                        )
+                        .map(|r| {
+                            r.entries
+                                .into_iter()
+                                .map(|e| {
+                                    serde_json::json!({
+                                        "kind": e.kind,
+                                        "scope": e.scope,
+                                        "path": e.path.to_string_lossy(),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+
+                    tx.send(IpcResponse::ExtensibilityListed {
+                        skills,
+                        mcp_servers,
+                        instructions,
+                    })
+                    .await
+                    .map_err(|_| TransportError::ConnectionClosed)?;
                 }
                 IpcCommand::ListModels { instance_id } => {
                     let models = {
