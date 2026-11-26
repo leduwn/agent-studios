@@ -4,7 +4,6 @@
  */
 
 export * from './models/types';
-export * from './fixtures/missionControlFixtures';
 export * from './state/MissionControlProjection';
 export * from './MissionControlHtmlBuilder';
 export * from './MissionControlPanel';

@@ -2,7 +2,7 @@
   "name": "agent-studios-vscode",
   "displayName": "Agent Studios",
   "description": "Code-OSS native AI Agents Workbench extension for Agent Studios",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "agent-studios",
   "license": "Apache-2.0",
   "repository": {
@@ -42,31 +42,37 @@
         {
           "type": "webview",
           "id": "agent-studios.chat",
-          "name": "Chat & Assistant"
+          "name": "Chat"
         },
         {
           "id": "agent-studios.session",
-          "name": "Current Session"
+          "name": "Session",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         },
         {
           "id": "agent-studios.tasks",
-          "name": "Tasks"
+          "name": "Tasks",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         },
         {
           "id": "agent-studios.approvals",
-          "name": "Approvals"
+          "name": "Approvals",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         },
         {
           "id": "agent-studios.artifacts",
-          "name": "Artifacts"
+          "name": "Artifacts",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         },
         {
           "id": "agent-studios.timeline",
-          "name": "Timeline & Activity"
+          "name": "Timeline",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         },
         {
           "id": "agent-studios.providers",
-          "name": "Providers (Read-Only)"
+          "name": "Providers",
+          "when": "config.agentStudios.showWorkbenchTreeViews"
         }
       ]
     },
@@ -151,10 +157,16 @@
         "category": "Agent Studios"
       },
       {
-        "command": "agent-studios.toggleFixturePreview",
-        "title": "Agent Studios: Toggle Developer Fixture Preview",
+        "command": "agent-studios.openSettings",
+        "title": "Agent Studios: Open Providers & Models Settings",
         "category": "Agent Studios",
-        "icon": "$(beaker)"
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "agent-studios.newChat",
+        "title": "Agent Studios: New Chat",
+        "category": "Agent Studios",
+        "icon": "$(add)"
       },
       {
         "command": "agent-studios.refreshViews",
@@ -290,8 +302,8 @@
           "group": "navigation@1"
         },
         {
-          "view": "agent-studios.session",
-          "command": "agent-studios.toggleFixturePreview",
+          "view": "agent-studios.providers",
+          "command": "agent-studios.openSettings",
           "group": "navigation@1"
         },
         {
@@ -339,10 +351,10 @@
           "default": "",
           "description": "Optional override path to the agsd daemon executable"
         },
-        "agentStudios.previewMode": {
+        "agentStudios.showWorkbenchTreeViews": {
           "type": "boolean",
           "default": false,
-          "description": "Enable developer fixture preview mode (shows mock data with clear indicator)"
+          "description": "Show auxiliary sidebar tree views (Session, Tasks, Approvals, Artifacts, Timeline, Providers) below Chat"
         },
         "agentStudios.logLevel": {
           "type": "string",
@@ -383,6 +395,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build": "tsc -p ./",
+    "build:prod": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\" && tsc -p tsconfig.prod.json",
     "typecheck": "tsc --noEmit -p ./",
     "lint": "eslint src --ext ts",
     "test": "node out/test/unit/runner.js",

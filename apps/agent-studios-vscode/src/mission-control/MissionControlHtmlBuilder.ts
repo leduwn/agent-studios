@@ -289,6 +289,13 @@ export class MissionControlHtmlBuilder {
         });
       };
 
+      // Open Provider & Model Settings
+      window.openSettings = function() {
+        vscode.postMessage({
+          type: 'openSettings'
+        });
+      };
+
       // Timeline filtering
       window.filterTimeline = function(eventType) {
         document.querySelectorAll('.pill-btn').forEach(btn => {

@@ -205,6 +205,10 @@ export class MissionControlPanel implements vscode.Disposable {
         await this._projection.refresh();
         break;
 
+      case 'openSettings':
+        await vscode.commands.executeCommand('agent-studios.openSettings');
+        break;
+
       case 'approveAction':
       case 'denyAction':
         vscode.window.showWarningMessage(

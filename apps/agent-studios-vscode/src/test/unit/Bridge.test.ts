@@ -1,8 +1,8 @@
 import * as assert from 'assert';
 import { BridgeDisconnectedError } from '../../bridge/AgentStudiosBridge';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
-import { TimelineEvent } from '../../bridge/types';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
+import { ApprovalRequest, ChatStreamChunk, TimelineEvent } from '../../bridge/types';
 
 describe('Bridge Pure Unit Tests', () => {
   describe('DisconnectedBridge', () => {
@@ -158,7 +158,7 @@ describe('Bridge Pure Unit Tests', () => {
       const approvalId = pending[0].id;
 
       const receivedEvents: TimelineEvent[] = [];
-      const sub = bridge.onEvent((e) => receivedEvents.push(e));
+      const sub = bridge.onEvent((e: TimelineEvent) => receivedEvents.push(e));
 
       const result = await bridge.requestApprovalDecision(approvalId, 'approved');
       assert.strictEqual(result.applied, true);
@@ -187,7 +187,7 @@ describe('Bridge Pure Unit Tests', () => {
 
     it('FixtureBridge createSession creates new mock session and fires event', async () => {
       const receivedEvents: TimelineEvent[] = [];
-      const sub = bridge.onEvent((e) => receivedEvents.push(e));
+      const sub = bridge.onEvent((e: TimelineEvent) => receivedEvents.push(e));
 
       const newSession = await bridge.createSession('Build new feature');
       assert.ok(newSession.id.startsWith('session-preview-'));
@@ -227,7 +227,7 @@ describe('Bridge Pure Unit Tests', () => {
     });
 
     it('FixtureBridge sendMessage in ask mode streams text_delta and tool_call', async () => {
-      const chunks: unknown[] = [];
+      const chunks: ChatStreamChunk[] = [];
       const msg = await bridge.sendMessage(
         {
           message: 'Explain architecture',
@@ -240,7 +240,7 @@ describe('Bridge Pure Unit Tests', () => {
             },
           ],
         },
-        (chunk) => chunks.push(chunk)
+        (chunk: ChatStreamChunk) => chunks.push(chunk)
       );
 
       assert.strictEqual(msg.role, 'assistant');
@@ -250,66 +250,66 @@ describe('Bridge Pure Unit Tests', () => {
       assert.strictEqual(msg.toolCalls[0].name, 'read_file');
 
       // Verify streamed chunks
-      assert.ok(chunks.some((c: any) => c.type === 'tool_call'));
-      assert.ok(chunks.some((c: any) => c.type === 'text_delta'));
-      assert.ok(chunks.some((c: any) => c.type === 'done'));
+      assert.ok(chunks.some((c) => c.type === 'tool_call'));
+      assert.ok(chunks.some((c) => c.type === 'text_delta'));
+      assert.ok(chunks.some((c) => c.type === 'done'));
 
       // Check in-memory history
       assert.strictEqual(bridge.chatMessages.length, 3); // initial + user + assistant
     });
 
     it('FixtureBridge sendMessage in plan mode streams task_progress and plan steps', async () => {
-      const chunks: unknown[] = [];
+      const chunks: ChatStreamChunk[] = [];
       const msg = await bridge.sendMessage(
         {
           message: 'Plan M14 features',
           mode: 'plan',
         },
-        (chunk) => chunks.push(chunk)
+        (chunk: ChatStreamChunk) => chunks.push(chunk)
       );
 
       assert.strictEqual(msg.role, 'assistant');
       assert.strictEqual(msg.mode, 'plan');
       assert.ok(msg.content.includes('Proposed Execution Plan'));
 
-      assert.ok(chunks.some((c: any) => c.type === 'task_progress'));
-      assert.ok(chunks.some((c: any) => c.type === 'tool_call'));
-      assert.ok(chunks.some((c: any) => c.type === 'text_delta'));
-      assert.ok(chunks.some((c: any) => c.type === 'done'));
+      assert.ok(chunks.some((c) => c.type === 'task_progress'));
+      assert.ok(chunks.some((c) => c.type === 'tool_call'));
+      assert.ok(chunks.some((c) => c.type === 'text_delta'));
+      assert.ok(chunks.some((c) => c.type === 'done'));
     });
 
     it('FixtureBridge sendMessage in agent mode executes tools and generates approval request', async () => {
-      const chunks: unknown[] = [];
+      const chunks: ChatStreamChunk[] = [];
       const msg = await bridge.sendMessage(
         {
           message: 'Execute build and apply patch',
           mode: 'agent',
         },
-        (chunk) => chunks.push(chunk)
+        (chunk: ChatStreamChunk) => chunks.push(chunk)
       );
 
       assert.strictEqual(msg.role, 'assistant');
       assert.strictEqual(msg.mode, 'agent');
       assert.ok(msg.approvalId !== undefined);
 
-      assert.ok(chunks.some((c: any) => c.type === 'approval_required'));
-      assert.ok(chunks.some((c: any) => c.type === 'tool_call'));
-      assert.ok(chunks.some((c: any) => c.type === 'done'));
+      assert.ok(chunks.some((c) => c.type === 'approval_required'));
+      assert.ok(chunks.some((c) => c.type === 'tool_call'));
+      assert.ok(chunks.some((c) => c.type === 'done'));
 
       // Approval should be in pending approvals
       const pending = await bridge.listPendingApprovals();
-      assert.ok(pending.some((a) => a.id === msg.approvalId));
+      assert.ok(pending.some((a: ApprovalRequest) => a.id === msg.approvalId));
     });
 
     it('FixtureBridge cancelCurrentRun aborts active message execution', async () => {
-      const chunks: unknown[] = [];
+      const chunks: ChatStreamChunk[] = [];
       // Cancel immediately before or during
       const sendPromise = bridge.sendMessage(
         {
           message: 'Long running task',
           mode: 'ask',
         },
-        (chunk) => {
+        (chunk: ChatStreamChunk) => {
           chunks.push(chunk);
           bridge.cancelCurrentRun();
         }
@@ -317,7 +317,7 @@ describe('Bridge Pure Unit Tests', () => {
 
       const msg = await sendPromise;
       assert.ok(msg.content.includes('[Execution cancelled by user]'));
-      assert.ok(chunks.some((c: any) => c.type === 'error'));
+      assert.ok(chunks.some((c) => c.type === 'error'));
     });
   });
 });

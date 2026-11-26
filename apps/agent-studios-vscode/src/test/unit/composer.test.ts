@@ -1,11 +1,11 @@
 /**
- * Agent Studios — Composer & Context Attachment Pure Unit Tests
+ * Agent Studios â€” Composer & Context Attachment Pure Unit Tests
  * Milestone M14-UI-01: Professional AI Coding Assistant Experience
  */
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
 import { ContextAttachment, SlashCommandContext } from '../../bridge/types';
 import { SlashCommandRegistry } from '../../composer/SlashCommandRegistry';

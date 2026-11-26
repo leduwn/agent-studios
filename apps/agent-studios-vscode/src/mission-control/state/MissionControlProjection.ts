@@ -32,7 +32,6 @@ import {
   QueryErrors,
   TimelineEventRecord,
 } from '../models/types';
-import { createPreviewMissionControlState } from '../fixtures/missionControlFixtures';
 
 export class MissionControlProjection implements vscode.Disposable {
   private readonly _onDidChangeState = new vscode.EventEmitter<MissionControlState>();
@@ -125,20 +124,6 @@ export class MissionControlProjection implements vscode.Disposable {
     }
 
     const currentGeneration = ++this._refreshGeneration;
-
-    if (this._bridgeManager.isPreviewMode) {
-      const preview = createPreviewMissionControlState();
-      preview.activeTab = this._activeTab;
-      preview.selectedAgentId = this._selectedAgentId ?? preview.selectedAgentId;
-      preview.selectedTaskId = this._selectedTaskId ?? preview.selectedTaskId;
-      preview.selectedRunId = this._selectedRunId ?? preview.selectedRunId;
-      if (this._isDisposed || currentGeneration !== this._refreshGeneration) {
-        return;
-      }
-      this._currentState = preview;
-      this._onDidChangeState.fire(this._currentState);
-      return;
-    }
 
     const bridge = this._bridgeManager.bridge;
     const connState = bridge.connectionState;
@@ -272,9 +257,6 @@ export class MissionControlProjection implements vscode.Disposable {
   }
 
   private buildInitialState(): MissionControlState {
-    if (this._bridgeManager.isPreviewMode) {
-      return createPreviewMissionControlState();
-    }
     return this.buildDisconnectedState();
   }
 
@@ -306,8 +288,8 @@ export class MissionControlProjection implements vscode.Disposable {
           {
             id: 'att-disconnected',
             severity: 'warning',
-            title: 'Agent Studios Daemon Disconnected',
-            description: 'No active connection to agsd daemon. Enable Developer Preview Mode or connect daemon.',
+            title: 'Agent Studios Offline',
+            description: 'Connect the background engine or click Refresh to view live activity.',
             targetTab: 'diagnostics',
             timestamp: Date.now(),
           },

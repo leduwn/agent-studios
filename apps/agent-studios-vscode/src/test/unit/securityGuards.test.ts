@@ -253,5 +253,21 @@ describe('ChatSecurityGuards Unit Tests', () => {
         assert.strictEqual(ChatSecurityGuards.verifyWorkspaceTrust(cmd), true);
       }
     });
+
+    it('enforces openFile path traversal rejection and sendPrompt text bounds', () => {
+      const traversalRes = ChatSecurityGuards.validateWebviewMessage({
+        command: 'openFile',
+        filePath: '../../etc/passwd',
+      });
+      assert.strictEqual(traversalRes.valid, false);
+      assert.ok(traversalRes.error?.includes('path traversal'));
+
+      const oversizeRes = ChatSecurityGuards.validateWebviewMessage({
+        command: 'sendPrompt',
+        text: 'x'.repeat(200 * 1024),
+      });
+      assert.strictEqual(oversizeRes.valid, false);
+      assert.ok(oversizeRes.error?.includes('exceeds limit'));
+    });
   });
 });

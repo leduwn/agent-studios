@@ -6,7 +6,6 @@
 import * as vscode from 'vscode';
 import { BridgeManager } from '../bridge/BridgeManager';
 import { DisconnectedBridge } from '../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../bridge/FixtureBridge';
 import { EditorActionRequest } from '../bridge/types';
 import {
   ApprovalsTreeProvider,
@@ -18,6 +17,7 @@ import {
 } from '../views';
 import { SessionDetailWebview } from '../webviews/SessionDetailWebview';
 import { TaskGraphWebview } from '../webviews/TaskGraphWebview';
+import { ProviderSettingsPanel } from '../webviews/ProviderSettingsPanel';
 
 export interface ViewProviders {
   session?: SessionTreeProvider;
@@ -32,6 +32,8 @@ export interface ViewProviders {
 export interface WebviewManagers {
   openSession?: () => void | Promise<void>;
   showTaskGraph?: () => void | Promise<void>;
+  openSettings?: () => void | Promise<void>;
+  newChat?: () => void | Promise<void>;
 }
 
 /**
@@ -243,30 +245,29 @@ export function registerAllCommands(
     })
   );
 
-  // 7. agent-studios.toggleFixturePreview: toggles preview mode between DisconnectedBridge and FixtureBridge. Shows visible notification!
+  // 7. agent-studios.openSettings: opens interactive Providers & Models settings panel
   disposables.push(
-    vscode.commands.registerCommand('agent-studios.toggleFixturePreview', async () => {
-      const currentlyPreview = bridgeManager.isPreviewMode;
-      const nextIsPreview = !currentlyPreview;
+    vscode.commands.registerCommand('agent-studios.openSettings', async () => {
+      if (webviews.openSettings) {
+        await webviews.openSettings();
+        return;
+      }
+      ProviderSettingsPanel.createOrShow(context, () => bridgeManager.bridge, () => {
+        views.providers?.refresh?.();
+        views.refreshAll?.();
+      });
+    })
+  );
 
-      if (nextIsPreview) {
-        bridgeManager.setBridge(new FixtureBridge());
-        vscode.window.showInformationMessage(
-          'Agent Studios developer preview mode enabled (Fixture Bridge).'
-        );
+  // 7b. agent-studios.newChat: starts a fresh clean conversation in Chat view
+  disposables.push(
+    vscode.commands.registerCommand('agent-studios.newChat', async () => {
+      if (webviews.newChat) {
+        await webviews.newChat();
       } else {
-        bridgeManager.setBridge(new DisconnectedBridge());
-        vscode.window.showInformationMessage(
-          'Agent Studios developer preview mode disabled (Disconnected).'
-        );
+        await vscode.commands.executeCommand('agent-studios.newConversation');
       }
-
-      const config = vscode.workspace.getConfiguration('agentStudios');
-      if (config.get<boolean>('previewMode') !== nextIsPreview) {
-        await config.update('previewMode', nextIsPreview, vscode.ConfigurationTarget.Global);
-      }
-
-      await vscode.commands.executeCommand('agent-studios.refreshViews');
+      await vscode.commands.executeCommand('agent-studios.chat.focus');
     })
   );
 

@@ -1,12 +1,12 @@
 /**
- * Agent Studios — Card Components & Diff Review Unit Tests
+ * Agent Studios â€” Card Components & Diff Review Unit Tests
  * Milestone M14-UI-01: In-Conversation Activities & Diff Review
  */
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { DiffDocumentProvider } from '../../bridge/DiffDocumentProvider';
 import {
   ApprovalCardData,
@@ -27,7 +27,7 @@ import {
 
 describe('M14-UI-01: Card Components & Diff Review Tests', () => {
 
-  describe('CardRenderer — Monochrome Styling Tokens', () => {
+  describe('CardRenderer â€” Monochrome Styling Tokens', () => {
     it('generates monochrome VS Code CSS tokens', () => {
       const styles = CardRenderer.getStyles();
       assert.ok(styles.includes('--vscode-badge-background'));
@@ -41,7 +41,7 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
     });
   });
 
-  describe('ToolCallCard — Tools, Status Badges & XSS Sanitization', () => {
+  describe('ToolCallCard â€” Tools, Status Badges & XSS Sanitization', () => {
     const supportedTools: SupportedTool[] = [
       'read_file',
       'edit_file',
@@ -169,7 +169,7 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
     });
   });
 
-  describe('ApprovalCard — States, Risk Badges, Modal Warning & Fail-Closed', () => {
+  describe('ApprovalCard â€” States, Risk Badges, Modal Warning & Fail-Closed', () => {
     let bridge: FixtureBridge;
 
     beforeEach(() => {
@@ -363,7 +363,7 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
     });
   });
 
-  describe('TaskProgressCard — Active Agent, Progress & DAG Trigger', () => {
+  describe('TaskProgressCard â€” Active Agent, Progress & DAG Trigger', () => {
     it('displays coordinator and active agent progress with task count and bar', () => {
       const data: TaskProgressCardData = {
         coordinatorName: 'Agent Studios Coordinator',
@@ -400,7 +400,7 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
     });
   });
 
-  describe('ChangedFilesCard — Additions/Deletions & Diff Inspection Trigger', () => {
+  describe('ChangedFilesCard â€” Additions/Deletions & Diff Inspection Trigger', () => {
     it('summarizes modified files with +X and -Y counts and diff trigger button', () => {
       const cardData: ChangedFilesCardData = {
         title: 'Session Artifact Diff',
@@ -437,7 +437,7 @@ describe('M14-UI-01: Card Components & Diff Review Tests', () => {
     });
   });
 
-  describe('DiffReviewManager — Native Diff Inspection & Safe Review', () => {
+  describe('DiffReviewManager â€” Native Diff Inspection & Safe Review', () => {
     let bridge: FixtureBridge;
     let diffProvider: DiffDocumentProvider;
     let reviewManager: DiffReviewManager;

@@ -1,5 +1,5 @@
 /**
- * Agent Studios — Capability Matrix Truthfulness Unit Tests
+ * Agent Studios â€” Capability Matrix Truthfulness Unit Tests
  * Milestone M14 Final Freeze & Capability Synchronization
  *
  * Asserts strict truthfulness between CapabilityMatrix, BridgeManager, and DaemonConnectedBridge:
@@ -17,7 +17,7 @@ import {
   CAPABILITY_REGISTRY,
 } from '../../bridge/ipc/CapabilityMatrix';
 import { BridgeManager } from '../../bridge/BridgeManager';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
 import { DaemonConnectedBridge } from '../../bridge/DaemonConnectedBridge';
 
@@ -77,11 +77,11 @@ describe('Capability Matrix Truthfulness & Synchronization', () => {
       manager.dispose();
     });
 
-    it('reports simulated capabilities when in developer FixtureBridge preview mode', () => {
+    it('reports enabled capabilities only when active bridge reports connected', () => {
       const fixtureBridge = new FixtureBridge();
       const manager = new BridgeManager(fixtureBridge);
 
-      assert.strictEqual(manager.isPreviewMode, true);
+      assert.strictEqual(manager.isConnected, true);
       assert.strictEqual(manager.isCapabilityEnabled('approval.resolve'), true);
       assert.strictEqual(manager.isCapabilityEnabled('task.cancel'), true);
 

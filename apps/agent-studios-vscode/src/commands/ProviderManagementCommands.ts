@@ -95,6 +95,9 @@ const DEFAULT_ENV_VARS: Record<SupportedProviderKind, string> = {
 
 export function looksLikePlaintextSecret(value: string): boolean {
   const trimmed = value.trim();
+  if (trimmed.startsWith('agentStudios.secret.')) {
+    return false;
+  }
   return (
     trimmed.startsWith('sk-') ||
     trimmed.startsWith('AIza') ||

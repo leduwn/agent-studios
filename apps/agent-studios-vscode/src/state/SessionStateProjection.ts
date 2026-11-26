@@ -16,6 +16,7 @@ import {
 } from '../bridge/types';
 import { OperatorConfirmationManager } from '../bridge/ipc/CapabilityMatrix';
 import { TaskExecutionStore } from './TaskExecutionStore';
+import { isKnownTestOrFixtureRecord } from './UserStateMigration';
 
 export interface SequenceGapDetails {
   expected: number;
@@ -183,8 +184,10 @@ export class SessionStateProjection implements vscode.Disposable {
       this._bridge.listArtifacts(),
     ]);
 
-    this._session = session;
-    this._activeSessionId = session?.id ?? null;
+    const isRealDaemon = this._bridge && 'transport' in this._bridge;
+    const cleanSession = isRealDaemon && isKnownTestOrFixtureRecord(session) ? null : session;
+    this._session = cleanSession;
+    this._activeSessionId = cleanSession?.id ?? null;
     this._tasks = [...tasks];
     this._approvals = [...approvals];
     this._artifacts = [...artifacts];

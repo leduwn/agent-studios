@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { TimelineEvent } from '../../bridge/types';
 import { SequenceGapDetails, SessionStateProjection } from '../../state/SessionStateProjection';
 

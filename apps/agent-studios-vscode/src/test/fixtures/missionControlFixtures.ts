@@ -17,7 +17,7 @@ import {
   ApprovalRecord,
   ProviderUsageSummary,
   DiagnosticsRecord,
-} from '../models/types';
+} from '../../mission-control/models/types';
 
 export const FIXTURE_FLEET: AgentFleetMember[] = [
   {

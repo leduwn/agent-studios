@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 export const ALLOWED_WEBVIEW_COMMANDS = new Set([
+  'sendPrompt',
   'sendMessage',
   'submitTask',
   'cancelTask',
@@ -19,7 +20,10 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'approveAction',
   'denyAction',
   'openDiff',
+  'viewDiff',
   'viewTaskDiff',
+  'applyDiff',
+  'revertDiff',
   'openArtifactReview',
   'attachContext',
   'removeAttachment',
@@ -27,18 +31,25 @@ export const ALLOWED_WEBVIEW_COMMANDS = new Set([
   'switchTask',
   'switchProviderModel',
   'switchSession',
+  'switchConversation',
   'newSession',
+  'newChat',
   'openTaskGraph',
   'saveDraft',
-  'enablePreviewMode',
   'connectDaemon',
+  'retryConnection',
   'dismissOnboarding',
   'openInIde',
   'openMissionControl',
+  'openSettings',
+  'openFolder',
+  'openFile',
+  'copyCode',
   'continueSession',
   'switchReasoningEffort',
   'switchPermissionMode',
   'switchFollowUpMode',
+  'switchRuntime',
   'forkSession',
 ] as const);
 
@@ -161,6 +172,7 @@ export class ChatSecurityGuards {
    */
   public static validateCommandSchema(command: string, record: Record<string, unknown>): ValidationResult {
     switch (command) {
+      case 'sendPrompt':
       case 'sendMessage': {
         if (record.text !== undefined) {
           if (typeof record.text !== 'string') {
@@ -226,7 +238,11 @@ export class ChatSecurityGuards {
         return { valid: true };
       }
 
-      case 'openDiff': {
+      case 'openDiff':
+      case 'viewDiff':
+      case 'applyDiff':
+      case 'revertDiff':
+      case 'openFile': {
         if (record.artifactId !== undefined && (typeof record.artifactId !== 'string' || record.artifactId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: "Invalid 'artifactId' parameter." };
         }
@@ -279,6 +295,7 @@ export class ChatSecurityGuards {
       }
 
       case 'switchSession':
+      case 'switchConversation':
       case 'continueSession': {
         if (record.sessionId !== undefined && (typeof record.sessionId !== 'string' || record.sessionId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: `Command '${command}' requires a valid string 'sessionId'.` };
@@ -372,6 +389,25 @@ export class ChatSecurityGuards {
       case 'forkSession': {
         if (record.sessionId !== undefined && (typeof record.sessionId !== 'string' || record.sessionId.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
           return { valid: false, error: "Invalid 'sessionId' parameter." };
+        }
+        return { valid: true };
+      }
+
+      case 'copyCode': {
+        if (record.text !== undefined) {
+          if (typeof record.text !== 'string') {
+            return { valid: false, error: "Field 'text' must be a string." };
+          }
+          if (record.text.length > SECURITY_LIMITS.MAX_TEXT_LENGTH) {
+            return { valid: false, error: `Field 'text' exceeds limit of ${SECURITY_LIMITS.MAX_TEXT_LENGTH} chars.` };
+          }
+        }
+        return { valid: true };
+      }
+
+      case 'switchRuntime': {
+        if (record.runtime !== undefined && (typeof record.runtime !== 'string' || record.runtime.length > SECURITY_LIMITS.MAX_ID_LENGTH)) {
+          return { valid: false, error: "Invalid 'runtime' parameter." };
         }
         return { valid: true };
       }
@@ -520,11 +556,16 @@ export class ChatSecurityGuards {
    */
   public static verifyWorkspaceTrust(command: string): boolean {
     const mutatingCommands = new Set([
+      'sendPrompt',
       'sendMessage',
+      'submitTask',
       'approveAction',
       'denyAction',
+      'applyDiff',
+      'revertDiff',
       'attachContext',
       'newSession',
+      'newChat',
     ]);
 
     if (!mutatingCommands.has(command)) {

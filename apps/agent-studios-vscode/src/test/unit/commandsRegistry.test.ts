@@ -1,5 +1,5 @@
 /**
- * Agent Studios — Commands Registry & Bridge Manager Unit Tests
+ * Agent Studios â€” Commands Registry & Bridge Manager Unit Tests
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { BridgeManager } from '../../bridge/BridgeManager';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import {
   registerAllCommands,
   ViewProviders,
@@ -64,11 +64,11 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
   describe('BridgeManager', () => {
     it('initializes with provided bridge and exposes state projection', () => {
       assert.ok(bridgeManager.bridge instanceof FixtureBridge);
-      assert.strictEqual(bridgeManager.isPreviewMode, true);
+      assert.strictEqual(bridgeManager.isConnected, true);
       assert.ok(bridgeManager.stateProjection !== undefined);
     });
 
-    it('updates bridge, fires onBridgeChanged, and updates isPreviewMode', () => {
+    it('updates bridge and fires onBridgeChanged', () => {
       let firedBridge: any = null;
       bridgeManager.onBridgeChanged((b) => {
         firedBridge = b;
@@ -78,7 +78,7 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
       bridgeManager.setBridge(disconnected);
 
       assert.strictEqual(bridgeManager.bridge, disconnected);
-      assert.strictEqual(bridgeManager.isPreviewMode, false);
+      assert.strictEqual(bridgeManager.isConnected, false);
       assert.strictEqual(firedBridge, disconnected);
     });
 
@@ -96,7 +96,7 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
   });
 
   describe('Workbench Commands', () => {
-    it('registers all required workbench and editor commands', () => {
+    it('registers all required workbench and editor commands without removed preview commands', () => {
       const required = [
         'agent-studios.openAgents',
         'agent-studios.openSession',
@@ -104,7 +104,8 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
         'agent-studios.showApprovals',
         'agent-studios.connectDaemon',
         'agent-studios.disconnectDaemon',
-        'agent-studios.toggleFixturePreview',
+        'agent-studios.openSettings',
+        'agent-studios.newChat',
         'agent-studios.refreshViews',
         'agent-studios.explainSelection',
         'agent-studios.refactorSelection',
@@ -114,6 +115,11 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
       for (const cmd of required) {
         assert.ok(registeredCommands.has(cmd), `Command ${cmd} should be registered`);
       }
+      assert.strictEqual(
+        registeredCommands.has('agent-studios.toggleFixturePreview'),
+        false,
+        'toggleFixturePreview must NOT be registered in production'
+      );
     });
 
     it('executes agent-studios.openAgents and invokes workbench focus command', async () => {
@@ -138,7 +144,7 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
       await vscode.commands.executeCommand('agent-studios.disconnectDaemon');
 
       assert.ok(bridgeManager.bridge instanceof DisconnectedBridge);
-      assert.strictEqual(bridgeManager.isPreviewMode, false);
+      assert.strictEqual(bridgeManager.isConnected, false);
       assert.ok(
         mockWindowMessages.info.some((msg) =>
           msg.includes('disconnected from daemon')
@@ -146,24 +152,9 @@ describe('CommandsRegistry & BridgeManager Tests', () => {
       );
     });
 
-    it('executes agent-studios.toggleFixturePreview and toggles bridge mode', async () => {
-      assert.strictEqual(bridgeManager.isPreviewMode, true);
-
-      await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
-      assert.strictEqual(bridgeManager.isPreviewMode, false);
-      assert.ok(
-        mockWindowMessages.info.some((msg) =>
-          msg.includes('preview mode disabled')
-        )
-      );
-
-      await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
-      assert.strictEqual(bridgeManager.isPreviewMode, true);
-      assert.ok(
-        mockWindowMessages.info.some((msg) =>
-          msg.includes('preview mode enabled')
-        )
-      );
+    it('executes agent-studios.openSettings without throwing', async () => {
+      await vscode.commands.executeCommand('agent-studios.openSettings');
+      assert.ok(true);
     });
 
     it('executes agent-studios.refreshViews and calls refresh on views', async () => {

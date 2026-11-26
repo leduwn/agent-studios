@@ -731,6 +731,8 @@ describe('Tier 3: Real Agent Execution & Runtime E2E Suite', function () {
     it('21. spawns real agsd.exe daemon with isolated temporary bootstrap and named pipe', async () => {
       const isWindows = process.platform === 'win32';
       const spawnArgs = [
+        '--state-dir',
+        tempDir,
         '--runtime-info-path',
         runtimePath,
         '--admin-runtime-info-path',

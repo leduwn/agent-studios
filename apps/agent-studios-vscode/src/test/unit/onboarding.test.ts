@@ -1,62 +1,60 @@
 /**
- * Agent Studios — Onboarding & Truthful Interaction Unit Tests
- * Milestone M14-UI-02: Extension Hardening & User Experience Assurance
+ * Agent Studios — Clean First-Run Onboarding Unit Tests
  */
 
 import * as assert from 'assert';
 import { OnboardingWorkflow } from '../../chat/OnboardingWorkflow';
 
 describe('OnboardingWorkflow Unit Tests', () => {
-  it('renders disconnected onboarding card with retry and preview mode actions', () => {
-    const html = OnboardingWorkflow.renderOnboardingCard({
+  it('renders clean offline onboarding card with Connect CTA and zero developer preview jargon', () => {
+    const html = OnboardingWorkflow.renderBanner({
       isConnected: false,
-      isPreview: false,
-      hasSeenOnboarding: false,
-      daemonEndpoint: 'ipc://agent-studios.sock',
+      connectionState: 'disconnected',
+      hasProviders: false,
+      hasWorkspace: false,
+      hasDismissed: false,
     });
 
-    assert.ok(html.includes('Agent Studios Daemon Offline'), 'Should indicate daemon is offline');
-    assert.ok(html.includes('Enable Developer Preview'), 'Should offer preview mode action');
-    assert.ok(html.includes('Retry Connection'), 'Should offer connection retry');
-    assert.ok(html.includes('ipc://agent-studios.sock'), 'Should include configured daemon endpoint');
-    // Security check: must NEVER contain password or raw API key input fields
-    assert.ok(!html.includes('<input type="password"'), 'Must never solicit password in webview');
-    assert.ok(!html.includes('name="apiKey"'), 'Must never solicit API key in webview');
-    assert.ok(html.includes('Security Notice'), 'Must display security notice regarding keys');
+    assert.ok(html.includes('Engine is offline'), 'Should indicate engine is offline cleanly');
+    assert.ok(html.includes('Connect'), 'Should offer Connect action');
+    assert.ok(!html.includes('Developer Preview'), 'Must NEVER mention Developer Preview');
+    assert.ok(!html.includes('ipc://'), 'Must NEVER expose raw IPC paths');
+    assert.ok(!html.includes('<input type="password"'), 'Must never embed password input in chat onboarding');
   });
 
-  it('renders developer preview onboarding card with clear fixture explanation', () => {
-    const html = OnboardingWorkflow.renderOnboardingCard({
+  it('renders provider configuration onboarding card when engine is connected but no provider configured', () => {
+    const html = OnboardingWorkflow.renderBanner({
       isConnected: true,
-      isPreview: true,
-      hasSeenOnboarding: false,
-      daemonEndpoint: 'ipc://agent-studios.sock',
+      connectionState: 'connected',
+      hasProviders: false,
+      hasWorkspace: true,
+      hasDismissed: false,
     });
 
-    assert.ok(html.includes('Developer Preview Mode Active'), 'Should state preview mode is active');
-    assert.ok(html.includes('fixtures without modifying your workspace files'), 'Should explain safe fixture boundary');
-    assert.ok(html.includes('Connect to Daemon'), 'Should provide action to connect to daemon');
-    assert.ok(html.includes('Security Note'), 'Should display security boundary note');
+    assert.ok(html.includes('Add a model provider'), 'Should ask user to add a provider');
+    assert.ok(html.includes('Configure Provider'), 'Should include Configure Provider CTA');
+    assert.ok(!html.includes('Developer Preview'));
   });
 
-  it('renders connected onboarding card for first run', () => {
-    const html = OnboardingWorkflow.renderOnboardingCard({
+  it('returns empty string when engine is connected and provider is configured', () => {
+    const html = OnboardingWorkflow.renderBanner({
       isConnected: true,
-      isPreview: false,
-      hasSeenOnboarding: false,
-      activeSessionId: 'session-m14-prod',
+      connectionState: 'connected',
+      hasProviders: true,
+      hasWorkspace: true,
+      hasDismissed: false,
     });
 
-    assert.ok(html.includes('Connected to Agent Studios Daemon'), 'Should indicate connected state');
-    assert.ok(html.includes('session-m14-prod'), 'Should include session identifier');
-    assert.ok(html.includes('Get Started'), 'Should include getting started button');
+    assert.strictEqual(html, '');
   });
 
-  it('returns empty string when onboarding has been dismissed and daemon is connected in normal mode', () => {
-    const html = OnboardingWorkflow.renderOnboardingCard({
-      isConnected: true,
-      isPreview: false,
-      hasSeenOnboarding: true,
+  it('returns empty string when onboarding has been dismissed', () => {
+    const html = OnboardingWorkflow.renderBanner({
+      isConnected: false,
+      connectionState: 'disconnected',
+      hasProviders: false,
+      hasWorkspace: false,
+      hasDismissed: true,
     });
 
     assert.strictEqual(html, '');

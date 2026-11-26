@@ -1,5 +1,5 @@
 /**
- * Agent Studios — Cross-View Execution State Consistency Unit Tests
+ * Agent Studios â€” Cross-View Execution State Consistency Unit Tests
  * Milestone M15 UI-01.2: Real Rust Execution Integration & Final Safety Gates
  *
  * Verifies that Chat and Mission Control views consume one single authoritative
@@ -16,7 +16,7 @@ import * as vscode from 'vscode';
 import { TaskExecutionStore } from '../../state/TaskExecutionStore';
 import { SessionStateProjection } from '../../state/SessionStateProjection';
 import { BridgeManager } from '../../bridge/BridgeManager';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { MissionControlProjection } from '../../mission-control/state/MissionControlProjection';
 import { ChatWebviewViewProvider } from '../../chat/ChatWebviewViewProvider';
 import { MockWebviewView, resetMockState } from './vscodeMock';

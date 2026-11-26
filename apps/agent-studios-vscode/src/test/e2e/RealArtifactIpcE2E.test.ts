@@ -102,6 +102,8 @@ describe('Tier 3: Real Artifact IPC Integration (REAL_AGSD_READ_ONLY_IPC & IN_PR
 
     // Spawn daemon process
     const spawnArgs = [
+      '--state-dir',
+      tempDir,
       '--runtime-info-path',
       runtimePath,
       '--admin-runtime-info-path',

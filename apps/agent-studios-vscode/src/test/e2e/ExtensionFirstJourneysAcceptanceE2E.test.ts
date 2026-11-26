@@ -1,5 +1,5 @@
 /**
- * Agent Studios — Extension-First End-to-End Acceptance Suite (Journeys A-G)
+ * Agent Studios â€” Extension-First End-to-End Acceptance Suite (Journeys A-G)
  *
  * Verifies all 7 operator journeys end-to-end against real `agsd.exe` spawned by
  * `EmbeddedDaemonSupervisor` + local `$0.00` zero-billable HTTP `/v1/models` mock server:
@@ -24,7 +24,7 @@ import { BridgeManager } from '../../bridge/BridgeManager';
 import { DaemonConnectedBridge } from '../../bridge/DaemonConnectedBridge';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
 import { EmbeddedDaemonSupervisor } from '../../bridge/EmbeddedDaemonSupervisor';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { NativeIpcTransport } from '../../bridge/ipc/NativeIpcTransport';
 import { HunkReviewManager } from '../../cards/HunkReviewManager';
 import {

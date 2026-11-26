@@ -558,6 +558,8 @@ describe('Tier 2: Mock Daemon Mission Control Projection E2E (MOCK_PROJECTED_TAS
     const realDaemon = childProcess.spawn(
       agsdBin,
       [
+        '--state-dir',
+        realTempDir,
         '--runtime-info-path',
         realRuntimePath,
         '--admin-runtime-info-path',

@@ -6,7 +6,7 @@
 import { MissionControlState } from '../models/types';
 
 export function renderDiagnosticsView(state: MissionControlState): string {
-  const { diagnostics, connectionState, isPreview, version } = state;
+  const { diagnostics, connectionState, version } = state;
 
   const connBadgeClass =
     connectionState === 'connected'
@@ -37,7 +37,7 @@ export function renderDiagnosticsView(state: MissionControlState): string {
           </div>
           <div class="diag-prop">
             <span class="diag-label">Execution Mode:</span>
-            <span>${isPreview ? 'Developer Preview (Fixtures)' : 'Live Daemon Connected'}</span>
+            <span>${connectionState === 'connected' ? 'Live Engine Connected' : 'Disconnected'}</span>
           </div>
           <div class="diag-prop">
             <span class="diag-label">IPC Endpoint:</span>

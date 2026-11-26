@@ -1,11 +1,11 @@
 /**
- * Agent Studios — Webviews & Layout Unit Tests
+ * Agent Studios â€” Webviews & Layout Unit Tests
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { TaskGraph, TaskNode } from '../../bridge/types';
 import {
   computeTopologicalLayout,
@@ -17,7 +17,7 @@ import { SessionDetailWebview } from '../../webviews/SessionDetailWebview';
 import { TaskGraphWebview } from '../../webviews/TaskGraphWebview';
 
 describe('Webviews & Graph Layout Tests', () => {
-  describe('graphLayout — Cycle Detection & Layout', () => {
+  describe('graphLayout â€” Cycle Detection & Layout', () => {
     const createMockNode = (id: string, dependencies: string[] = []): TaskNode => ({
       id,
       runId: 'run-1',
@@ -158,7 +158,7 @@ describe('Webviews & Graph Layout Tests', () => {
     });
   });
 
-  describe('markdownRenderer — Safe Markdown & XSS Sanitization', () => {
+  describe('markdownRenderer â€” Safe Markdown & XSS Sanitization', () => {
     it('escapes dangerous HTML characters', () => {
       assert.strictEqual(escapeHtml('<script>alert("xss")</script>'), '&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;');
       assert.strictEqual(escapeHtml('foo & bar \'baz\''), 'foo &amp; bar &#39;baz&#39;');
@@ -204,7 +204,7 @@ describe('Webviews & Graph Layout Tests', () => {
     });
   });
 
-  describe('TaskGraphWebview — WebviewPanel Management & Interactivity', () => {
+  describe('TaskGraphWebview â€” WebviewPanel Management & Interactivity', () => {
     const extensionUri = vscode.Uri.file('/test/extension');
     let bridge: FixtureBridge;
 
@@ -297,7 +297,7 @@ describe('Webviews & Graph Layout Tests', () => {
     });
   });
 
-  describe('SessionDetailWebview — Deep Session Overview & Metrics', () => {
+  describe('SessionDetailWebview â€” Deep Session Overview & Metrics', () => {
     const extensionUri = vscode.Uri.file('/test/extension');
     let bridge: FixtureBridge;
 

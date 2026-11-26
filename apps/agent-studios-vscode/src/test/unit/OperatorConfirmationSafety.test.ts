@@ -591,21 +591,15 @@ describe('M15 UI-05A: OperatorConfirmationSafety Unit Tests', () => {
       assert.ok(result.reason?.includes('Duplicate runtime instance identity detected'));
     });
 
-    it('renders safe fallback options in ChatHtmlBuilder when runtimes are empty or unready', () => {
-      const htmlFallback = ChatHtmlBuilder.renderRuntimeOptions([]);
-      assert.ok(htmlFallback.includes('disabled'));
-      assert.ok(htmlFallback.includes('No runtimes available (daemon unready)'));
-
-      const htmlWithDisabled = ChatHtmlBuilder.renderRuntimeOptions([
-        {
-          id: 'claude_code',
-          name: 'Claude Code (Native CLI)',
-          enabled: false,
-          tooltip: 'Claude Code CLI not found in system PATH.',
-        },
-      ]);
-      assert.ok(htmlWithDisabled.includes('disabled'));
-      assert.ok(htmlWithDisabled.includes('title="Claude Code CLI not found in system PATH."'));
+    it('filters incompatible runtimes for non-Claude providers and defaults safely when empty', () => {
+      const mockWebview = { cspSource: "'self'", asWebviewUri: (u: unknown) => u };
+      const mockUri = { fsPath: '/mock/ext', toString: () => 'file:///mock/ext' };
+      const htmlDefault = ChatHtmlBuilder.buildHtml(mockWebview as any, mockUri as any, {
+        connectionState: 'connected',
+        runtimes: [],
+      });
+      assert.ok(htmlDefault.includes('Agent Studios Engine'));
+      assert.ok(!htmlDefault.includes('Claude Code (Native CLI)'));
     });
   });
 

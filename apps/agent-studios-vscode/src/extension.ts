@@ -6,13 +6,13 @@
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from './bridge/AgentStudiosBridge';
 import { BridgeManager } from './bridge/BridgeManager';
-import { DisconnectedBridge } from './bridge/DisconnectedBridge';
-import { FixtureBridge } from './bridge/FixtureBridge';
 import {
   registerAllCommands,
   ViewProviders,
   WebviewManagers,
 } from './commands/CommandsRegistry';
+import { runUserStateMigration } from './state/UserStateMigration';
+import { ProviderSettingsPanel } from './webviews/ProviderSettingsPanel';
 import { registerApprovalCommands } from './commands/ApprovalCommands';
 import { registerArtifactCommands } from './commands/ArtifactCommands';
 import {
@@ -58,7 +58,10 @@ function normalizeAgentResponseLanguage(raw: string): AgentResponseLanguage {
  * Extension activation lifecycle entry point.
  */
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-  // 0. Initialize bilingual UI localization decoupled from agent response language
+  // 0a. Run idempotent v2 user-state migration (clears legacy preview/fixture/E2E-leaked entries safely)
+  await runUserStateMigration(context);
+
+  // 0b. Initialize bilingual UI localization decoupled from agent response language
   const initialConfig = vscode.workspace.getConfiguration('agentStudios');
   localizationManager = new LocalizationManager({
     displayLanguage: initialConfig.get<string>('displayLanguage', 'en-US'),
@@ -134,6 +137,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         bridgeManager.bridge
       );
     },
+    openSettings: async () => {
+      ProviderSettingsPanel.createOrShow(context, () => bridgeManager.bridge, async () => {
+        providersView.refresh();
+        await chatProvider.refresh();
+      });
+    },
+    newChat: async () => {
+      await chatProvider.startNewChat();
+    },
   };
 
   // Dynamic bridge proxy ensuring commands always dispatch against current active bridge
@@ -187,6 +199,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const contextEngine = new ContextEngine();
   chatProvider.setContextEngine(contextEngine);
   chatProvider.setConversationManager(conversationManager);
+  chatProvider.setExtensionContext(context);
 
   const hunkReviewManager = new HunkReviewManager();
   context.subscriptions.push(hunkReviewManager);
@@ -205,33 +218,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(statusBarItem);
 
   const updateStatusBar = () => {
-    const isPreview = bridgeManager.isPreviewMode;
     const connState = bridgeManager.bridge.connectionState;
     const session = bridgeManager.stateProjection.session;
     const agentCount = session?.activeAgentCount ?? 0;
-    const previewBadge = isPreview ? ' [Preview]' : '';
 
     if (connState === 'connected') {
-      statusBarItem.text = `$(hubot) Agent Studios: ${agentCount} active${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Connected (${agentCount} active agents)${previewBadge}`;
+      statusBarItem.text =
+        agentCount > 0
+          ? `$(hubot) Agent Studios: ${agentCount} active`
+          : `$(hubot) Agent Studios`;
+      statusBarItem.tooltip = `Agent Studios: Ready (${agentCount} active agents)`;
     } else if (connState === 'connecting' || connState === 'reconnecting') {
-      statusBarItem.text = `$(sync~spin) Agent Studios: Connecting...${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Connecting to daemon...${previewBadge}`;
+      statusBarItem.text = `$(sync~spin) Agent Studios: Connecting…`;
+      statusBarItem.tooltip = `Agent Studios: Connecting to background engine…`;
     } else if (connState === 'authenticating') {
-      statusBarItem.text = `$(key) Agent Studios: Authenticating...${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Authenticating with daemon credentials...${previewBadge}`;
+      statusBarItem.text = `$(key) Agent Studios: Authenticating…`;
+      statusBarItem.tooltip = `Agent Studios: Authenticating with background engine…`;
     } else if (connState === 'degraded') {
-      statusBarItem.text = `$(warning) Agent Studios: Degraded${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Daemon connection degraded${previewBadge}`;
+      statusBarItem.text = `$(warning) Agent Studios: Reconnecting`;
+      statusBarItem.tooltip = `Agent Studios: Engine connection degraded`;
     } else if (connState === 'auth_required' || connState === 'authentication_failed') {
-      statusBarItem.text = `$(error) Agent Studios: Auth Failed${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Authentication failed. Please verify credentials.${previewBadge}`;
+      statusBarItem.text = `$(error) Agent Studios: Auth Error`;
+      statusBarItem.tooltip = `Agent Studios: Authentication failed.`;
     } else if (connState === 'incompatible' || connState === 'unsupported_protocol') {
-      statusBarItem.text = `$(error) Agent Studios: Incompatible Protocol${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Incompatible protocol version with daemon.${previewBadge}`;
+      statusBarItem.text = `$(error) Agent Studios: Version Mismatch`;
+      statusBarItem.tooltip = `Agent Studios: Incompatible protocol version with engine.`;
     } else {
-      statusBarItem.text = `$(circle-slash) Agent Studios: Disconnected${previewBadge}`;
-      statusBarItem.tooltip = `Agent Studios: Disconnected. Click to open Agents Workbench.${previewBadge}`;
+      statusBarItem.text = `$(circle-slash) Agent Studios: Offline`;
+      statusBarItem.tooltip = `Agent Studios: Offline. Click to open Chat.`;
     }
     statusBarItem.show();
   };
@@ -243,11 +257,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     bridgeManager.stateProjection.onSessionChanged(() => updateStatusBar())
   );
 
-  // Auto-start bundled agsd when configured and not in developer preview mode
-  if (
-    !initialConfig.get<boolean>('previewMode', false) &&
-    initialConfig.get<boolean>('autoStartDaemon', true)
-  ) {
+  // Auto-start bundled agsd when configured
+  if (initialConfig.get<boolean>('autoStartDaemon', true)) {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     void bridgeManager
       .connectDaemon(undefined, {
@@ -256,7 +267,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         autoStart: true,
       })
       .catch(() => {
-        // Stay fail-closed in DisconnectedBridge until user/workspace provides agsd or triggers connectDaemon
+        // Stay fail-closed in DisconnectedBridge until user connects engine
       });
   }
 
@@ -276,18 +287,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             langConfig.get<string>('agentResponseLanguage', 'auto')
           )
         );
-        updateStatusBar();
-      }
-      if (e.affectsConfiguration('agentStudios.previewMode')) {
-        const config = vscode.workspace.getConfiguration('agentStudios');
-        const isPreview = config.get<boolean>('previewMode', false);
-        if (isPreview && !bridgeManager.isPreviewMode) {
-          bridgeManager.setBridge(new FixtureBridge());
-          vscode.commands.executeCommand('agent-studios.refreshViews');
-        } else if (!isPreview && bridgeManager.isPreviewMode) {
-          bridgeManager.setBridge(new DisconnectedBridge());
-          vscode.commands.executeCommand('agent-studios.refreshViews');
-        }
         updateStatusBar();
       }
     })

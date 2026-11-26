@@ -31,7 +31,8 @@ describe('Extension Host: Activation & Commands Integration Tests', () => {
       'agent-studios.denyAction',
       'agent-studios.connectDaemon',
       'agent-studios.disconnectDaemon',
-      'agent-studios.toggleFixturePreview',
+      'agent-studios.openSettings',
+      'agent-studios.newChat',
       'agent-studios.refreshViews',
       'agent-studios.explainSelection',
       'agent-studios.refactorSelection',
@@ -48,31 +49,22 @@ describe('Extension Host: Activation & Commands Integration Tests', () => {
         `Command ${cmd} should be registered in real VS Code commands registry`
       );
     }
+    assert.strictEqual(
+      commands.includes('agent-studios.toggleFixturePreview'),
+      false,
+      'toggleFixturePreview must not be present in production build'
+    );
   });
 
   it('verifies default extension settings schema in vscode.workspace', async () => {
-    // Reset any persisted previewMode setting to default
-    const resetConfig = vscode.workspace.getConfiguration('agentStudios');
-    await resetConfig.update('previewMode', undefined, vscode.ConfigurationTarget.Global);
-
     const config = vscode.workspace.getConfiguration('agentStudios');
     assert.strictEqual(config.get('daemonEndpoint'), 'ipc://agent-studios.sock');
-    assert.strictEqual(config.get('previewMode'), false);
+    assert.strictEqual(config.get('showWorkbenchTreeViews'), false);
     assert.strictEqual(config.get('logLevel'), 'info');
   });
 
-  it('executes agent-studios.toggleFixturePreview command and toggles preview mode', async () => {
-    const initialConfig = vscode.workspace.getConfiguration('agentStudios');
-    const initialMode = initialConfig.get<boolean>('previewMode', false);
-
-    // Execute toggle command
-    await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
-
-    const updatedConfig = vscode.workspace.getConfiguration('agentStudios');
-    const toggledMode = updatedConfig.get<boolean>('previewMode');
-    assert.strictEqual(toggledMode, !initialMode, 'Preview mode setting should be inverted');
-
-    // Revert to initial state
-    await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
+  it('executes agent-studios.openSettings cleanly in real extension host', async () => {
+    await vscode.commands.executeCommand('agent-studios.openSettings');
+    assert.ok(true);
   });
 });

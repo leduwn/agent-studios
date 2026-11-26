@@ -60,8 +60,8 @@ $vsixPath = Join-Path $OutputBase "agent-studios-vscode-$Version-$shortSha-win32
 $vsixShaPath = "$vsixPath.sha256"
 $manifestPath = Join-Path $OutputBase "EXTENSION_MANIFEST_$Version-$shortSha.json"
 
-if ($Version -eq "1.1.0") {
-    throw "Refusing to overwrite preserved v1.1.0 VSIX baseline."
+if ($Version -eq "1.1.0" -or $Version -eq "1.1.1") {
+    throw "Refusing to overwrite preserved v1.1.0 / v1.1.1 VSIX baseline."
 }
 
 $pkgJsonPath = Join-Path $vscodeDir "package.json"
@@ -90,15 +90,67 @@ try {
     $sumsContent = "$agsdHash  agsd.exe`n$agsHash  ags.exe`n"
     [System.IO.File]::WriteAllText((Join-Path $platformBinDir "SHA256SUMS.txt"), $sumsContent, [System.Text.UTF8Encoding]::new($false))
 
-    Write-Host "==> Compiling TypeScript and packaging self-contained VSIX to $vsixPath..."
+    Write-Host "==> Compiling production TypeScript (excluding tests/fixtures) and packaging VSIX to $vsixPath..."
     Push-Location $vscodeDir
     try {
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
+        & npm run build:prod
+        if ($LASTEXITCODE -ne 0) { throw "npm run build:prod failed with exit code $LASTEXITCODE" }
         & npx @vscode/vsce package --no-dependencies --out $vsixPath
         if ($LASTEXITCODE -ne 0) { throw "vsce package failed with exit code $LASTEXITCODE" }
     } finally {
         Pop-Location
+    }
+
+    Write-Host "==> Running Production VSIX Hygiene Audit..."
+    $auditDir = Join-Path $env:TEMP ("ags-vsix-audit-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $auditDir | Out-Null
+    try {
+        $auditZip = Join-Path $auditDir "inspect.zip"
+        Copy-Item -Force $vsixPath $auditZip
+        Expand-Archive -Path $auditZip -DestinationPath (Join-Path $auditDir "unpacked") -Force
+        $extRoot = Join-Path $auditDir "unpacked\extension"
+        $leakedTestDir = Join-Path $extRoot "out\test"
+        if (Test-Path $leakedTestDir) {
+            throw "VSIX HYGIENE FAILURE: extension/out/test was packaged into production VSIX!"
+        }
+        $forbiddenMarkers = @(
+            "FixtureBridge",
+            "missionControlFixtures",
+            "session-m14-fixture",
+            "Developer Preview Mode",
+            "PREVIEW FIXTURE",
+            "agent-studios-ide-ui",
+            "toggleFixturePreview",
+            "E2E Genuine Verification Studio",
+            "Host Modal Gate (HMAC-SHA256)",
+            "Dynamic Provider Discovery pending"
+        )
+        $migrationScrubberMarkers = @(
+            "session-m14-fixture",
+            "agent-studios-ide-ui",
+            "E2E Genuine Verification Studio"
+        )
+        $inspectFiles = @(Get-ChildItem -Path (Join-Path $extRoot "out") -Recurse -File -ErrorAction SilentlyContinue)
+        if (Test-Path (Join-Path $extRoot "package.json")) {
+            $inspectFiles += (Get-Item (Join-Path $extRoot "package.json"))
+        }
+        foreach ($f in $inspectFiles) {
+            $content = Get-Content -Raw -Path $f.FullName -ErrorAction SilentlyContinue
+            if (-not $content) { continue }
+            $isMigrationFile = $f.FullName.EndsWith("out\state\UserStateMigration.js", [System.StringComparison]::OrdinalIgnoreCase)
+            foreach ($marker in $forbiddenMarkers) {
+                if ($isMigrationFile -and ($migrationScrubberMarkers -contains $marker)) { continue }
+                if ($content.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    throw "VSIX HYGIENE FAILURE: Forbidden marker '$marker' found in packaged file $($f.FullName)"
+                }
+            }
+        }
+        Write-Host "==> Production VSIX Hygiene Audit PASSED (0 test/fixture markers in $($inspectFiles.Count) packaged files)."
+    } catch {
+        if (Test-Path $vsixPath) { Remove-Item -Force $vsixPath -ErrorAction SilentlyContinue }
+        throw
+    } finally {
+        if (Test-Path $auditDir) { Remove-Item -Recurse -Force $auditDir -ErrorAction SilentlyContinue }
     }
 
     $vsixHash = (Get-FileHash -Algorithm SHA256 $vsixPath).Hash.ToLowerInvariant()

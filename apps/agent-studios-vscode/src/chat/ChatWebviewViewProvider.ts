@@ -1,17 +1,15 @@
 /**
  * Agent Studios — Chat WebviewView Provider
- * Milestone M14-UI-01: Professional AI Coding Assistant Experience
- *
- * Implements vscode.WebviewViewProvider for the 'agent-studios.chat' view.
- * Handles lifecycle resolution, bidirectional messaging between Webview and daemon/fixture bridge,
- * streaming chunk updates, context attachments, mode/model switching, session history,
- * and composer draft persistence.
+ * Implements the primary conversation-first Chat view ('agent-studios.chat')
+ * with unified Ask/Plan/Agent send routing, real ProviderProfileManager merging,
+ * inline recovery actions, grouped tool activity, diff review, and progressive multi-agent disclosure.
  */
 
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import { BridgeManager } from '../bridge/BridgeManager';
 import { CapabilityMatrix } from '../bridge/ipc/CapabilityMatrix';
+import { RustExecutionReadinessReport } from '../bridge/ipc/RustIpcProtocolTypes';
 import {
   AgentMode,
   ApprovalDecisionResult,
@@ -20,32 +18,31 @@ import {
   ChatSendRequest,
   ChatStreamChunk,
   ContextAttachment,
+  ProviderSummary,
+  SessionSummary,
   TimelineEvent,
 } from '../bridge/types';
+import { ProviderProfileManager } from '../commands/ProviderManagementCommands';
+import { ContextEngine } from '../context/ContextEngine';
+import { AGENT_STUDIOS_PROVIDER_MODEL_KEY } from '../controls/ProviderModelSelector';
 import { OperatorConfirmationModal } from '../security/OperatorConfirmationModal';
 import { WorkspaceVerification } from '../security/WorkspaceVerification';
 import { SessionStateProjection } from '../state/SessionStateProjection';
 import { TaskExecutionStore } from '../state/TaskExecutionStore';
-import { ChatHtmlBuilder, RuntimeOption } from './ChatHtmlBuilder';
+import { isKnownTestOrFixtureRecord } from '../state/UserStateMigration';
+import { ChatHtmlBuilder, ChatHtmlInitialState, RuntimeOption } from './ChatHtmlBuilder';
+import {
+  filterCompatibleRuntimes,
+  pickDefaultRuntime,
+  resolveSendReadiness,
+  resolveUiConnectionStatus,
+} from './ChatPresenter';
 import { ChatSecurityGuards } from './ChatSecurityGuards';
-import { RustExecutionReadinessReport } from '../bridge/ipc/RustIpcProtocolTypes';
-import { ContextEngine } from '../context/ContextEngine';
 import { ConversationManager } from './ConversationManager';
 
 export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   public static readonly viewType = 'agent-studios.chat';
 
-  /**
-   * Constructs typed runtime options and authoritative selection from daemon readiness.
-   * Enforces:
-   * - Distinct selectable identity for every instance (${instance_id}|${implementation}).
-   * - Unhealthy, unknown or duplicate runtime identities disabled.
-   * - If multiple instances exist, never silently chooses first (selectedRuntime = '').
-   * - If configured default valid, selects exact default instance.
-   * - Truthful unavailable state if no healthy instances discovered.
-   * - No hardcoded OpenCode, Claude Code or Codex fallback.
-   * - Never enables native Claude Code or Codex unless backend explicitly reports verified adapter.
-   */
   public static buildRuntimeOptions(
     readiness: RustExecutionReadinessReport | null | undefined
   ): { runtimeOptions: RuntimeOption[]; selectedRuntime: string } {
@@ -96,11 +93,9 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           : isNativeUnverified
             ? ' [Unverified Adapter]'
             : '';
-      const name = `${inst.implementation} (${inst.instance_id})${suffix}`;
-
       runtimeOptions.push({
         id: compositeId,
-        name,
+        name: `${inst.implementation} (${inst.instance_id})${suffix}`,
         enabled: isEnabled,
         tooltip,
         instanceId: inst.instance_id,
@@ -108,23 +103,20 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       });
     }
 
-    // Include registered but undiscovered runtimes as visibly disabled options
     if (readiness.registered_runtimes) {
       for (const reg of readiness.registered_runtimes) {
-        const hasInstance = instances.some((i) => i.implementation === reg);
-        if (!hasInstance) {
+        if (!instances.some((i) => i.implementation === reg)) {
           runtimeOptions.push({
             id: `unregistered|${reg}`,
             name: `${reg} (Registered, no discovered instance)`,
             enabled: false,
-            tooltip: 'Adapter registered in backend but no active instance discovered',
+            tooltip: 'Registered adapter has no discovered running instance',
             implementation: reg,
           });
         }
       }
     }
 
-    // Determine default selection
     let selectedRuntime = '';
     const configuredId = readiness.defaults?.configured_instance_id;
     if (configuredId && configuredId.trim().length > 0) {
@@ -133,16 +125,12 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         selectedRuntime = matched.id;
       }
     }
-
-    // If no configured default, and exactly one healthy instance exists, select it
     if (!selectedRuntime) {
       const healthy = runtimeOptions.filter((r) => r.enabled);
       if (healthy.length === 1) {
         selectedRuntime = healthy[0].id;
       }
-      // If multiple healthy instances exist, leave selectedRuntime = '' (never silently pick first)
     }
-
     if (runtimeOptions.length === 0) {
       runtimeOptions.push({
         id: '',
@@ -158,9 +146,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private _bridgeManager?: BridgeManager;
   private _bridge: AgentStudiosBridge;
   private _stateProjection?: SessionStateProjection;
+  private _extensionContext?: vscode.ExtensionContext;
   private _view?: vscode.WebviewView;
   private _composerDraft: string = '';
-  private _activeMode: AgentMode = 'agent';
+  private _activeMode: AgentMode = 'ask';
   private _reasoningEffort: 'low' | 'medium' | 'high' = 'medium';
   private _permissionMode: 'read-only' | 'auto-edit' | 'full-access' = 'auto-edit';
   private _followUpQueueMode: 'queue' | 'steer' = 'queue';
@@ -168,9 +157,11 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
   private _conversationManager?: ConversationManager;
   private _selectedModelId?: string;
   private _selectedProviderId?: string;
+  private _selectedRuntime?: string;
   private _attachments: ContextAttachment[] = [];
   private _messages: ChatMessage[] = [];
   private _hasSeenOnboarding = false;
+  private _isRunning = false;
   private readonly _disposables: vscode.Disposable[] = [];
   private _isDisposed = false;
 
@@ -193,7 +184,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       this._disposables.push(
         bridgeOrManager.onBridgeChanged((newBridge) => {
           this._bridge = newBridge;
-          void this.syncState();
+          void this.refresh();
         })
       );
     } else {
@@ -204,39 +195,32 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     if (this._stateProjection) {
       this._disposables.push(
         this._stateProjection.onSessionChanged(() => {
-          void this.syncState();
+          void this.refresh();
         })
       );
     }
 
     this._disposables.push(
       TaskExecutionStore.instance.onDidChangeExecutionState((state) => {
-        void this.postMessage({
-          type: 'executionStateChanged',
-          executionState: state,
-        });
+        const running =
+          state.status === 'submitting' ||
+          state.status === 'queued' ||
+          state.status === 'running';
+        this._isRunning = running;
+        void this.postMessage({ type: 'runState', isRunning: running });
+        void this.postMessage({ type: 'executionStateChanged', executionState: state });
       })
     );
 
     this._disposables.push(
       TaskExecutionStore.instance.onDidStreamChunk((chunk) => {
-        void this.postMessage({
-          type: 'streamChunk',
-          chunk,
-        });
+        void this.postMessage({ type: 'streamChunk', chunk });
       })
     );
   }
 
   public get bridge(): AgentStudiosBridge {
     return this._bridgeManager ? this._bridgeManager.bridge : this._bridge;
-  }
-
-  public get isPreview(): boolean {
-    if (this._bridgeManager) {
-      return this._bridgeManager.isPreviewMode;
-    }
-    return Boolean((this._bridge as { isPreview?: boolean }).isPreview);
   }
 
   public get composerDraft(): string {
@@ -263,106 +247,69 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     this._conversationManager = conversationManager;
   }
 
-  /**
-   * Resolves the WebviewView when it becomes visible.
-   */
+  public setExtensionContext(context: vscode.ExtensionContext): void {
+    this._extensionContext = context;
+    const savedSelection = context.globalState.get<{ instanceId?: string; modelId?: string }>(
+      AGENT_STUDIOS_PROVIDER_MODEL_KEY
+    );
+    if (savedSelection?.instanceId) {
+      this._selectedProviderId = savedSelection.instanceId;
+    }
+    if (savedSelection?.modelId) {
+      this._selectedModelId = savedSelection.modelId;
+    }
+  }
+
+  public async startNewChat(): Promise<void> {
+    await this._handleNewSession();
+  }
+
+  public async refresh(): Promise<void> {
+    if (!this._view || this._isDisposed) {
+      return;
+    }
+    const state = await this._collectState();
+    this._view.webview.html = ChatHtmlBuilder.buildHtml(
+      this._view.webview,
+      this._extensionUri,
+      state
+    );
+  }
+
   public async resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ): Promise<void> {
     this._view = webviewView;
-
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this._extensionUri],
     };
 
-    const session = await this.bridge.getCurrentSession().catch(() => null);
-    const sessions = await this.bridge.listSessions().catch(() => []);
-    const providers = await this.bridge.listProviderSummaries().catch(() => []);
-    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-
-    if (
-      session &&
-      this._messages.length === 0 &&
-      typeof this.bridge.getSessionTranscript === 'function'
-    ) {
-      this._messages = await this.bridge.getSessionTranscript(session.id).catch(() => []);
-    }
-
-    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
-      ? await this.bridge.getExecutionReadiness().catch(() => null)
-      : null;
-
-    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
-
-    let studioOptions: { id: string; name: string }[] | undefined;
-    if (sessions && sessions.length > 0) {
-      studioOptions = sessions.map((s) => ({
-        id: s.id,
-        name: s.title ? `${s.title} (${s.id})` : s.id,
-      }));
-    } else if (session) {
-      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
-    }
-    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
-
-    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
-    const workspaceStatus = wsVerification.status;
-    const isWorkspaceMatched = wsVerification.isAuthorized;
-    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
-
-    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
-    const isTaskSubmitEnabled =
-      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
-      isWorkspaceMatched &&
-      hasHealthyRuntime;
-
+    const initialState = await this._collectState();
     webviewView.webview.html = ChatHtmlBuilder.buildHtml(
       webviewView.webview,
       this._extensionUri,
-      {
-        session,
-        sessions,
-        connectionState: this.bridge.connectionState,
-        isPreview: this.isPreview,
-        providers,
-        activeMode: this._activeMode,
-        selectedModelId: this._selectedModelId,
-        selectedProviderId: this._selectedProviderId,
-        composerDraft: this._composerDraft,
-        messages: this._messages,
-        attachments: this._attachments,
-        hasSeenOnboarding: this._hasSeenOnboarding,
-        selectedRuntime,
-        selectedStudioId,
-        runtimes: runtimeOptions,
-        studios: studioOptions,
-        workspacePath: localWorkspace,
-        workspaceStatus,
-        isWorkspaceMatched,
-        workspaceMismatchReason,
-        isTaskSubmitEnabled,
-        executionState: TaskExecutionStore.instance.getState(),
-      }
+      initialState
     );
 
-    // Reconnect state when view becomes visible again
-    webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        void this.syncState();
-      }
-    }, null, this._disposables);
+    webviewView.onDidChangeVisibility(
+      () => {
+        if (webviewView.visible) {
+          void this.refresh();
+        }
+      },
+      null,
+      this._disposables
+    );
 
-    // Handle incoming messages from the webview
     webviewView.webview.onDidReceiveMessage(
       (message) => void this.handleWebviewMessage(message),
       null,
       this._disposables
     );
 
-    // Listen to bridge timeline events
     this._disposables.push(
       this.bridge.onEvent((event) => {
         this._handleTimelineEvent(event);
@@ -370,9 +317,6 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     );
   }
 
-  /**
-   * Dispatches incoming message commands from the webview client.
-   */
   public async handleWebviewMessage(message: {
     command: string;
     text?: string;
@@ -399,38 +343,34 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       return;
     }
 
-    // Security Validation: Prototype pollution, command allowlist, path traversal
     const validation = ChatSecurityGuards.validateWebviewMessage(message);
     if (!validation.valid) {
-      await this.postMessage({
-        type: 'error',
-        error: `Security guard rejected request: ${validation.error}`,
-      });
+      await this._appendSystemMessage(`Request rejected: ${validation.error}`);
       return;
     }
 
-    // Security Validation: Workspace trust enforcement
     if (!ChatSecurityGuards.verifyWorkspaceTrust(message.command)) {
-      await this.postMessage({
-        type: 'error',
-        error: 'Action blocked: This workspace is untrusted. Agent Studios requires workspace trust to execute coordinator commands.',
-      });
+      await this._appendSystemMessage(
+        'This workspace is untrusted. Trust the folder before running editing or terminal tasks.'
+      );
       return;
     }
 
     switch (message.command) {
+      case 'sendPrompt':
       case 'sendMessage':
-        await this._handleSendMessage(message);
+        await this._handleSendPrompt(message);
         break;
 
       case 'submitTask':
-        await this._handleSubmitTask(message);
+        await this._handleSendPrompt({
+          ...message,
+          text: message.prompt || message.text,
+          mode: 'agent',
+        });
         break;
 
       case 'cancelTask':
-        await this._handleCancelTask(message);
-        break;
-
       case 'cancelRun':
         await this._handleCancelRun();
         break;
@@ -444,7 +384,16 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         break;
 
       case 'openDiff':
+      case 'viewDiff':
         await this._handleOpenDiff(message.artifactId, message.filePath);
+        break;
+
+      case 'applyDiff':
+        await this._handleOpenDiff(message.artifactId, message.filePath);
+        break;
+
+      case 'revertDiff':
+        await vscode.commands.executeCommand('agent-studios.revertCheckpoint');
         break;
 
       case 'viewTaskDiff':
@@ -464,40 +413,65 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           this._attachments = this._attachments.filter(
             (a) => (a.uri || a.relativePath) !== message.path
           );
+          await this.refresh();
         }
         break;
 
       case 'switchMode':
         if (message.mode) {
           this._activeMode = message.mode;
-          await this.postMessage({ type: 'modeChanged', mode: this._activeMode });
-        }
-        break;
-
-      case 'switchTask':
-        if (message.taskId) {
-          TaskExecutionStore.instance.switchTask(message.taskId, message.studioId);
+          await this.refresh();
         }
         break;
 
       case 'switchProviderModel':
         this._selectedModelId = message.modelId;
         this._selectedProviderId = message.providerId;
-        await this.postMessage({
-          type: 'modelChanged',
-          modelId: this._selectedModelId,
-          providerId: this._selectedProviderId,
-        });
+        if (this._extensionContext && this._selectedProviderId && this._selectedModelId) {
+          await this._extensionContext.globalState.update(AGENT_STUDIOS_PROVIDER_MODEL_KEY, {
+            instanceId: this._selectedProviderId,
+            modelId: this._selectedModelId,
+          });
+        }
+        await this.refresh();
+        break;
+
+      case 'switchRuntime':
+        if (message.runtime) {
+          this._selectedRuntime = message.runtime;
+        }
         break;
 
       case 'switchSession':
+      case 'switchConversation':
         if (message.sessionId) {
           await this._handleSwitchSession(message.sessionId);
         }
         break;
 
       case 'newSession':
+      case 'newChat':
         await this._handleNewSession();
+        break;
+
+      case 'openSettings':
+        await vscode.commands.executeCommand('agent-studios.openSettings');
+        break;
+
+      case 'openFolder':
+        await vscode.commands.executeCommand('vscode.openFolder');
+        break;
+
+      case 'openFile':
+        if (message.filePath) {
+          await vscode.window.showTextDocument(vscode.Uri.file(message.filePath));
+        }
+        break;
+
+      case 'copyCode':
+        if (typeof message.text === 'string' && vscode.env?.clipboard) {
+          await vscode.env.clipboard.writeText(message.text);
+        }
         break;
 
       case 'openTaskGraph':
@@ -508,12 +482,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
         this._composerDraft = message.draft ?? '';
         break;
 
-      case 'enablePreviewMode':
-        await vscode.commands.executeCommand('agent-studios.toggleFixturePreview');
-        break;
-
       case 'connectDaemon':
+      case 'retryConnection':
         await vscode.commands.executeCommand('agent-studios.connectDaemon');
+        await this.refresh();
         break;
 
       case 'openInIde':
@@ -556,32 +528,132 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
   }
 
-  private async _handleContinueSession(targetSessionId?: string): Promise<void> {
-    try {
-      if (targetSessionId) {
-        await this._handleSwitchSession(targetSessionId);
-        return;
-      }
-      const sessions = await this.bridge.listSessions().catch(() => []);
-      if (sessions && sessions.length > 0) {
-        // Find most recent session
-        const sorted = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-        await this._handleSwitchSession(sorted[0].id);
-      } else {
-        const current = await this.bridge.getCurrentSession().catch(() => null);
-        if (current) {
-          await this._handleSwitchSession(current.id);
+  private async _mergeConfiguredProviders(): Promise<ProviderSummary[]> {
+    const bridgeProviders = await this.bridge.listProviderSummaries().catch(() => []);
+    const merged: ProviderSummary[] = [...bridgeProviders];
+    if (this._extensionContext) {
+      const profiles = new ProviderProfileManager(this._extensionContext).listProfiles();
+      for (const p of profiles) {
+        if (!merged.some((existing) => existing.instanceId === p.instanceId)) {
+          const models =
+            p.discoveredModels && p.discoveredModels.length > 0
+              ? p.discoveredModels
+              : p.defaultModel
+                ? [{ id: p.defaultModel, name: p.defaultModel, contextWindow: 128000, isDefault: true }]
+                : [];
+          merged.push({
+            instanceId: p.instanceId,
+            providerType: p.providerType,
+            displayName: p.displayName,
+            models,
+            status: models.length > 0 ? 'available' : 'unconfigured',
+          });
         }
       }
-    } catch (err: unknown) {
-      await vscode.window.showErrorMessage(
-        `Failed to continue session: ${err instanceof Error ? err.message : String(err)}`
-      );
     }
+    return merged;
   }
 
-  private async _handleSendMessage(message: {
+  private async _collectState(): Promise<ChatHtmlInitialState> {
+    const rawSession = await this.bridge.getCurrentSession().catch(() => null);
+    const session = isKnownTestOrFixtureRecord(rawSession) ? null : rawSession;
+    const rawSessions = await this.bridge.listSessions().catch(() => []);
+    const sessions: SessionSummary[] = rawSessions.filter((s) => !isKnownTestOrFixtureRecord(s));
+    const providers = await this._mergeConfiguredProviders();
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+
+    if (
+      session &&
+      this._messages.length === 0 &&
+      typeof this.bridge.getSessionTranscript === 'function'
+    ) {
+      this._messages = await this.bridge.getSessionTranscript(session.id).catch(() => []);
+    }
+
+    const readiness =
+      typeof this.bridge.getExecutionReadiness === 'function'
+        ? await this.bridge.getExecutionReadiness().catch(() => null)
+        : null;
+
+    const { runtimeOptions, selectedRuntime } =
+      ChatWebviewViewProvider.buildRuntimeOptions(readiness);
+
+    const selectedProviderId =
+      this._selectedProviderId || providers[0]?.instanceId || '';
+    const activeProvider = providers.find((p) => p.instanceId === selectedProviderId) || providers[0];
+    const selectedModelId =
+      this._selectedModelId ||
+      activeProvider?.models.find((m) => m.isDefault)?.id ||
+      activeProvider?.models[0]?.id ||
+      '';
+
+    const compatibleRuntimes = filterCompatibleRuntimes(
+      runtimeOptions,
+      activeProvider?.providerType,
+      selectedModelId
+    );
+    const resolvedRuntime = pickDefaultRuntime(
+      compatibleRuntimes,
+      this._selectedRuntime || selectedRuntime,
+      activeProvider?.providerType,
+      selectedModelId
+    );
+
+    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
+    const tasks = await this.bridge.listTasks().catch(() => []);
+    const pendingApprovals = await this.bridge.listPendingApprovals().catch(() => []);
+
+    return {
+      session,
+      sessions,
+      connectionState: this.bridge.connectionState,
+      providers,
+      activeMode: this._activeMode,
+      selectedModelId,
+      selectedProviderId,
+      selectedRuntime: resolvedRuntime,
+      selectedStudioId: session?.id || '',
+      reasoningEffort: this._reasoningEffort,
+      permissionMode: this._permissionMode,
+      followUpQueueMode: this._followUpQueueMode,
+      runtimes: compatibleRuntimes,
+      workspacePath: localWorkspace,
+      workspaceStatus: wsVerification.status,
+      isWorkspaceTrusted: vscode.workspace.isTrusted !== false,
+      isWorkspaceMatched: wsVerification.isAuthorized,
+      workspaceMismatchReason: wsVerification.isAuthorized ? '' : wsVerification.reason,
+      isTaskSubmitEnabled: CapabilityMatrix.isCapabilityEnabled('task.submit'),
+      composerDraft: this._composerDraft,
+      messages: this._messages,
+      attachments: this._attachments,
+      tasks,
+      pendingApprovals,
+      hasSeenOnboarding: this._hasSeenOnboarding,
+      executionState: TaskExecutionStore.instance.getState(),
+    };
+  }
+
+  private async _appendSystemMessage(content: string, actionId?: string): Promise<void> {
+    this._messages.push({
+      id: `msg-sys-${Date.now()}`,
+      role: 'system',
+      content,
+      timestamp: Date.now(),
+      approvalId: actionId,
+    });
+    await this._postRenderedThread();
+  }
+
+  private async _postRenderedThread(): Promise<void> {
+    const tasks = await this.bridge.listTasks().catch(() => []);
+    const approvals = await this.bridge.listPendingApprovals().catch(() => []);
+    const html = ChatHtmlBuilder.renderMessagesHtml(this._messages, tasks, approvals);
+    await this.postMessage({ type: 'renderedThread', html });
+  }
+
+  private async _handleSendPrompt(message: {
     text?: string;
+    prompt?: string;
     mode?: AgentMode;
     attachments?: ContextAttachment[];
     modelId?: string;
@@ -592,17 +664,58 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     permissionMode?: 'read-only' | 'auto-edit' | 'full-access';
     followUpQueueMode?: 'queue' | 'steer';
   }): Promise<void> {
-    const prompt = message.text || '';
-    if (!prompt.trim()) {
+    const prompt = (message.text ?? message.prompt ?? '').trim();
+    if (!prompt) {
       return;
     }
 
-    const mode = message.mode || this._activeMode;
+    const mode: AgentMode = message.mode || this._activeMode;
+    this._activeMode = mode;
+
+    // Attempt quiet auto-connect once if currently offline
+    if (this.bridge.connectionState === 'disconnected' && this._bridgeManager) {
+      try {
+        await this._bridgeManager.connectDaemon(undefined, {
+          extensionPath: this._extensionUri.fsPath,
+          workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          autoStart: true,
+        });
+        this._bridge = this._bridgeManager.bridge;
+      } catch {
+        // Handled cleanly below via resolveSendReadiness
+      }
+    }
+
+    const providers = await this._mergeConfiguredProviders();
+    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+    const uiConn = resolveUiConnectionStatus({
+      connectionState: this.bridge.connectionState,
+      providers,
+      isRunning: this._isRunning,
+    });
+
+    const readiness = resolveSendReadiness({
+      uiStatus: uiConn.status,
+      mode,
+      hasProviders: providers.some((p) => p.status !== 'unconfigured'),
+      hasWorkspace: Boolean(localWorkspace),
+      isWorkspaceTrusted: vscode.workspace.isTrusted !== false,
+      isRunning: this._isRunning,
+    });
+
+    if (!readiness.canSendImmediately && readiness.message) {
+      await this._appendSystemMessage(readiness.message, readiness.action?.id);
+      return;
+    }
+
     const reasoningEffort = message.reasoningEffort || this._reasoningEffort;
-    const permissionMode = message.permissionMode || this._permissionMode;
+    const permissionMode =
+      mode === 'ask' || mode === 'plan'
+        ? 'read-only'
+        : message.permissionMode || this._permissionMode;
     const followUpQueueMode = message.followUpQueueMode || this._followUpQueueMode;
-    const baseAttachments = message.attachments || this._attachments;
-    const attachments: ContextAttachment[] = [...baseAttachments];
+    const attachments: ContextAttachment[] = [...(message.attachments || this._attachments)];
+
     if (this._contextEngine) {
       const repoMap = await this._contextEngine.collectWorkspaceRepoMap(15);
       const packed = this._contextEngine.packWithinBudget(
@@ -620,18 +733,51 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       }
     }
 
+    // Ensure active studio/session exists before Agent mode mutating runs
+    let studioId = message.studioId || this._stateProjection?.session?.id;
+    if (mode === 'agent' && !studioId) {
+      try {
+        const created = await this.bridge.createSession(prompt.slice(0, 60));
+        studioId = created.id;
+        this._stateProjection?.switchSession(created);
+      } catch {
+        // Continue cleanly to sendMessage fallback
+      }
+    }
+
+    // High-risk command confirmation gate when full-access is explicitly requested
+    let confirmedByUser = false;
+    if (mode === 'agent' && permissionMode === 'full-access' && studioId) {
+      const confirmResult = await OperatorConfirmationModal.requestConfirmation({
+        studioId,
+        runtime: message.runtime || this._selectedRuntime || 'internal-codex',
+        runtimeInstanceId: message.runtime || 'internal-codex',
+        prompt,
+        workspacePath: localWorkspace || undefined,
+        modelId: message.modelId || this._selectedModelId,
+        providerId: message.providerId || this._selectedProviderId,
+        actionDescription: 'Full-Access Agent Task Execution',
+      });
+      if (!confirmResult.confirmed) {
+        await this._appendSystemMessage('Action cancelled before running.');
+        return;
+      }
+      confirmedByUser = true;
+    }
+
     const request: ChatSendRequest = {
       message: prompt,
       mode,
-      studioId: message.studioId || this._stateProjection?.session?.id,
-      modelId: message.modelId || this._selectedModelId,
-      providerInstanceId: message.providerId || this._selectedProviderId,
+      studioId,
+      modelId: message.modelId || this._selectedModelId || providers[0]?.models[0]?.id,
+      providerInstanceId: message.providerId || this._selectedProviderId || providers[0]?.instanceId,
       reasoningEffort,
       permissionMode,
       followUpQueueMode,
-      runtime: message.runtime,
-      workspacePath: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || undefined,
+      runtime: message.runtime || this._selectedRuntime,
+      workspacePath: localWorkspace || undefined,
       attachments,
+      confirmedByUser,
     };
 
     const userMsg: ChatMessage = {
@@ -643,36 +789,34 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       attachments: attachments.length > 0 ? [...attachments] : undefined,
     };
     this._messages.push(userMsg);
+    this._isRunning = true;
+    await this._postRenderedThread();
+    await this.postMessage({ type: 'runState', isRunning: true });
 
     try {
       const result = await this.bridge.sendMessage(request, (chunk: ChatStreamChunk) => {
-        void this.postMessage({
-          type: 'streamChunk',
-          chunk,
-        });
+        void this.postMessage({ type: 'streamChunk', chunk });
       });
 
       this._messages.push(result);
-      await this.postMessage({
-        type: 'messageComplete',
-        message: result,
-      });
+      this._isRunning = false;
+      await this.postMessage({ type: 'runState', isRunning: false });
+      await this._postRenderedThread();
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      await this.postMessage({
-        type: 'error',
-        error: errorMsg,
-      });
+      this._isRunning = false;
+      await this.postMessage({ type: 'runState', isRunning: false });
+      await this._appendSystemMessage(err instanceof Error ? err.message : String(err));
     }
   }
 
   private async _handleCancelRun(): Promise<void> {
     try {
       await this.bridge.cancelCurrentRun();
+      this._isRunning = false;
+      await this.postMessage({ type: 'runState', isRunning: false });
       await this.postMessage({ type: 'runCancelled' });
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      await this.postMessage({ type: 'error', error: errorMsg });
+      await this._appendSystemMessage(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -703,15 +847,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           message: res.message,
         });
       } catch (err: unknown) {
-        await this.postMessage({
-          type: 'approvalResult',
-          approvalId,
-          decision: 'approved',
-          applied: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        await this._appendSystemMessage(err instanceof Error ? err.message : String(err));
       }
     }
+    await this._postRenderedThread();
   }
 
   private async _handleDenyAction(approvalId?: string): Promise<void> {
@@ -741,15 +880,10 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           message: res.message,
         });
       } catch (err: unknown) {
-        await this.postMessage({
-          type: 'approvalResult',
-          approvalId,
-          decision: 'denied',
-          applied: false,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        await this._appendSystemMessage(err instanceof Error ? err.message : String(err));
       }
     }
+    await this._postRenderedThread();
   }
 
   private async _handleOpenDiff(artifactId?: string, filePath?: string): Promise<void> {
@@ -761,8 +895,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       if (matched) {
         await vscode.commands.executeCommand('agent-studios.inspectArtifact', matched.id);
       } else {
-        const uri = vscode.Uri.file(filePath);
-        await vscode.window.showTextDocument(uri);
+        await vscode.window.showTextDocument(vscode.Uri.file(filePath));
       }
     }
   }
@@ -772,11 +905,8 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
       const editor = vscode.window.activeTextEditor;
       if (editor) {
         const filePath = editor.document.uri.fsPath || editor.document.uri.path;
-        const relativePath = (vscode.workspace as { asRelativePath?: (u: unknown) => string }).asRelativePath
-          ? (vscode.workspace as { asRelativePath: (u: unknown) => string }).asRelativePath(editor.document.uri)
-          : filePath;
-
-        const attachment: ContextAttachment = {
+        const relativePath = vscode.workspace.asRelativePath(editor.document.uri) || filePath;
+        this._attachments.push({
           type: 'file',
           uri: editor.document.uri.toString(),
           relativePath,
@@ -785,43 +915,43 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
             editor.selection && !editor.selection.isEmpty
               ? editor.document.getText(editor.selection)
               : undefined,
-        };
-
-        this._attachments.push(attachment);
-        await this.postMessage({
-          type: 'contextAttached',
-          attachment,
-          attachments: this._attachments,
         });
+        await this.refresh();
       } else {
         await vscode.window.showInformationMessage('No active editor open to attach.');
       }
       return;
     }
 
-    // Default: file picker dialog
     const uris = await vscode.window.showOpenDialog({
       canSelectMany: true,
-      openLabel: 'Attach to Agent Studios',
+      openLabel: 'Attach to Chat',
     });
-
     if (uris && uris.length > 0) {
       for (const u of uris) {
         const filePath = u.fsPath || u.path;
-        const relativePath = (vscode.workspace as { asRelativePath?: (u: unknown) => string }).asRelativePath
-          ? (vscode.workspace as { asRelativePath: (u: unknown) => string }).asRelativePath(u)
-          : filePath;
-
+        const relativePath = vscode.workspace.asRelativePath(u) || filePath;
         this._attachments.push({
           type: 'file',
           uri: u.toString(),
           relativePath,
         });
       }
-      await this.postMessage({
-        type: 'contextAttached',
-        attachments: this._attachments,
-      });
+      await this.refresh();
+    }
+  }
+
+  private async _handleContinueSession(targetSessionId?: string): Promise<void> {
+    if (targetSessionId) {
+      await this._handleSwitchSession(targetSessionId);
+      return;
+    }
+    const sessions = (await this.bridge.listSessions().catch(() => [])).filter(
+      (s) => !isKnownTestOrFixtureRecord(s)
+    );
+    if (sessions.length > 0) {
+      const sorted = [...sessions].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+      await this._handleSwitchSession(sorted[0].id);
     }
   }
 
@@ -834,373 +964,80 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
           ? await this.bridge.getSessionTranscript(session.id).catch(() => [])
           : [];
       this._messages = transcript;
-      await this.postMessage({
-        type: 'syncState',
-        state: {
-          session,
-          messages: this._messages,
-        },
-      });
+      await this.refresh();
     } catch (err: unknown) {
-      await vscode.window.showErrorMessage(
-        `Failed to switch session: ${err instanceof Error ? err.message : String(err)}`
+      await this._appendSystemMessage(
+        `Failed to switch conversation: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
 
   private async _handleNewSession(): Promise<void> {
     try {
-      const session = await this.bridge.createSession();
-      this._stateProjection?.switchSession(session);
+      if (this.bridge.connectionState === 'connected') {
+        const session = await this.bridge.createSession();
+        this._stateProjection?.switchSession(session);
+      }
       this._messages = [];
       this._attachments = [];
       this._composerDraft = '';
-      await this.postMessage({
-        type: 'syncState',
-        state: {
-          session,
-          messages: [],
-          attachments: [],
-          composerDraft: '',
-        },
-      });
+      await this.refresh();
     } catch (err: unknown) {
-      await vscode.window.showErrorMessage(
-        `Failed to create session: ${err instanceof Error ? err.message : String(err)}`
+      await this._appendSystemMessage(
+        `Failed to create conversation: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
 
   private async _handleForkSession(sourceSessionId?: string): Promise<void> {
-    try {
-      const current = sourceSessionId || this._stateProjection?.session?.id;
-      let forkedSession = current && this.bridge.forkSession
-        ? await this.bridge.forkSession(current)
+    const current = sourceSessionId || this._stateProjection?.session?.id;
+    let forkedSession =
+      current && this.bridge.forkSession
+        ? await this.bridge.forkSession(current).catch(() => undefined)
         : undefined;
-      if (!forkedSession && this._conversationManager && current) {
-        const forkedRec = await this._conversationManager.forkConversation(current);
-        if (forkedRec) {
-          forkedSession = {
-            id: forkedRec.id,
-            workspacePath: this._stateProjection?.session?.workspacePath || '',
-            goalSummary: forkedRec.title,
-            status: forkedRec.status,
-            activeAgentCount: 0,
-            totalAgentCount: 0,
-            completedTasksCount: 0,
-            totalTasksCount: 0,
-            startedAt: forkedRec.createdAt,
-            elapsedMs: 0,
-          };
-        }
+    if (!forkedSession && this._conversationManager && current) {
+      const forkedRec = await this._conversationManager.forkConversation(current);
+      if (forkedRec) {
+        forkedSession = {
+          id: forkedRec.id,
+          workspacePath: this._stateProjection?.session?.workspacePath || '',
+          goalSummary: forkedRec.title,
+          status: forkedRec.status,
+          activeAgentCount: 0,
+          totalAgentCount: 0,
+          completedTasksCount: 0,
+          totalTasksCount: 0,
+          startedAt: forkedRec.createdAt,
+          elapsedMs: 0,
+        };
       }
-      if (!forkedSession) {
-        forkedSession = await this.bridge.createSession('Forked Session');
-      }
+    }
+    if (forkedSession) {
       this._stateProjection?.switchSession(forkedSession);
-      if (typeof this.bridge.getSessionTranscript === 'function') {
-        const transcript = await this.bridge.getSessionTranscript(forkedSession.id).catch(() => null);
-        if (transcript && transcript.length > 0) {
-          this._messages = transcript;
-        }
-      }
-      await this.postMessage({
-        type: 'syncState',
-        state: {
-          session: forkedSession,
-          messages: this._messages,
-          reasoningEffort: this._reasoningEffort,
-          permissionMode: this._permissionMode,
-          followUpQueueMode: this._followUpQueueMode,
-        },
-      });
-    } catch (err: unknown) {
-      await vscode.window.showErrorMessage(
-        `Failed to fork session: ${err instanceof Error ? err.message : String(err)}`
-      );
     }
-  }
-
-  private async _handleSubmitTask(message: {
-    prompt?: string;
-    runtime?: string;
-    studioId?: string;
-    modelId?: string;
-    providerId?: string;
-  }): Promise<void> {
-    const prompt = message.prompt || '';
-    if (!prompt || /^\s*$/.test(prompt)) {
-      await this.postMessage({ type: 'error', error: 'Prompt cannot be empty.' });
-      return;
-    }
-    const promptByteLength = Buffer.byteLength(prompt, 'utf8');
-    if (promptByteLength > 4 * 1024 * 1024) {
-      await this.postMessage({ type: 'error', error: 'Prompt exceeds 4 MiB wire frame limit.' });
-      return;
-    }
-    if (promptByteLength > 100 * 1024) {
-      void vscode.window.showWarningMessage('Prompt size is larger than 100 KB; wire framing limits may apply.');
-    }
-
-    if (!CapabilityMatrix.isCapabilityEnabled('task.submit')) {
-      await this.postMessage({
-        type: 'error',
-        error: 'Task submission is disabled by the capability matrix (task.submit capability is not enabled).',
-      });
-      return;
-    }
-
-    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
-      ? await this.bridge.getExecutionReadiness().catch(() => null)
-      : null;
-
-    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
-    if (!wsVerification.isAuthorized) {
-      await this.postMessage({
-        type: 'error',
-        error: `Workspace mismatch (${wsVerification.status}): ${wsVerification.reason}`,
-      });
-      return;
-    }
-
-    const studioId = message.studioId;
-    if (!studioId || studioId.trim().length === 0) {
-      await this.postMessage({
-        type: 'error',
-        error: 'Active studio identity is required before submitting tasks. Please select or create a studio.',
-      });
-      return;
-    }
-
-    // Revalidate runtime selection against authoritative daemon readiness at dispatch
-    const runtimeValidation = CapabilityMatrix.validateRuntimeInstanceSelection(readiness, {
-      runtime: message.runtime,
-    });
-
-    if (!runtimeValidation.valid || !runtimeValidation.runtimePreference || !runtimeValidation.runtimeInstanceId) {
-      await this.postMessage({
-        type: 'error',
-        error: `Runtime selection rejected: ${runtimeValidation.reason || 'Invalid or unhealthy runtime selection.'}`,
-      });
-      return;
-    }
-
-    const runtime = runtimeValidation.runtimePreference;
-    const runtimeInstanceId = runtimeValidation.runtimeInstanceId;
-
-    // Operator confirmation gate using trusted VS Code native modal dialog
-    const confirmResult = await OperatorConfirmationModal.requestConfirmation({
-      studioId,
-      runtime,
-      runtimeInstanceId,
-      prompt,
-      workspacePath: localWorkspace || undefined,
-      modelId: message.modelId || this._selectedModelId,
-      providerId: message.providerId || this._selectedProviderId,
-      actionDescription: 'Mutating Coding Agent Task Execution',
-    });
-
-    if (!confirmResult.confirmed) {
-      if (confirmResult.cancelledByUser) {
-        await this.postMessage({
-          type: 'streamChunk',
-          chunk: '\n[Operator cancelled task execution confirmation]\n',
-        });
-      } else {
-        await this.postMessage({
-          type: 'error',
-          error: confirmResult.reason || 'Operator confirmation failed or was rejected.',
-        });
-      }
-      return;
-    }
-
-    const store = TaskExecutionStore.instance;
-    store.beginSubmission(studioId, prompt, undefined, runtime, runtimeInstanceId);
-
-    try {
-      if (typeof this.bridge.submitTask === 'function') {
-        const submitResult = await this.bridge.submitTask({
-          studioId,
-          prompt,
-          runtimePreference: runtime,
-          runtimeInstanceId,
-          workspacePath: localWorkspace || undefined,
-          requestedModelId: message.modelId || this._selectedModelId,
-          requestedProviderId: message.providerId || this._selectedProviderId,
-          confirmedByUser: true,
-          confirmationChallenge: confirmResult.challenge,
-          readiness,
-        });
-
-        store.taskSubmitted(submitResult.taskId, studioId);
-        this._stateProjection?.upsertTask({
-          id: submitResult.taskId,
-          title: prompt,
-          status: 'pending',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
-        await this.postMessage({
-          type: 'taskSubmitted',
-          taskId: submitResult.taskId,
-        });
-      } else {
-        throw new Error('Bridge does not support submitTask.');
-      }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      store.completeTask('failed', { message: errorMsg });
-      await this.postMessage({
-        type: 'error',
-        error: `Task submission failed: ${errorMsg}`,
-      });
-    }
-  }
-
-  private async _handleCancelTask(message: {
-    taskId?: string;
-    studioId?: string;
-  }): Promise<void> {
-    if (!CapabilityMatrix.isCapabilityEnabled('task.cancel')) {
-      await this.postMessage({
-        type: 'error',
-        error: 'Task cancellation is disabled by the capability matrix (task.cancel capability is not enabled).',
-      });
-      return;
-    }
-
-    const store = TaskExecutionStore.instance;
-    const taskId = message.taskId || store.getState().activeTaskId;
-    if (!taskId) {
-      await this.postMessage({
-        type: 'error',
-        error: 'Cannot cancel task: No active task ID found.',
-      });
-      return;
-    }
-
-    try {
-      if (typeof this.bridge.cancelTask === 'function') {
-        const result = await this.bridge.cancelTask(taskId, 'Cancelled by user operator');
-        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
-        await this.postMessage({
-          type: 'taskCancelled',
-          taskId,
-          result,
-        });
-      } else {
-        await this.bridge.cancelCurrentRun();
-        store.completeTask('cancelled', { message: 'Cancelled by user operator' });
-        await this.postMessage({
-          type: 'taskCancelled',
-          taskId,
-        });
-      }
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      await this.postMessage({
-        type: 'error',
-        error: `Task cancellation failed: ${errorMsg}`,
-      });
-    }
+    await this.refresh();
   }
 
   private _handleTimelineEvent(event: TimelineEvent): void {
     TaskExecutionStore.instance.consumeDaemonTimelineEvent(event);
-
     if (event.type === 'approval_requested') {
       const approval = event.details as unknown as ApprovalRequest;
       if (approval) {
         void this.postMessage({
           type: 'streamChunk',
-          chunk: {
-            type: 'approval_required',
-            approval,
-          },
+          chunk: { type: 'approval_required', approval },
         });
       }
     } else if (event.type === 'task_started' || event.type === 'task_completed') {
       void this.postMessage({
         type: 'streamChunk',
-        chunk: {
-          type: 'task_progress',
-          taskSummary: event.summary,
-        },
+        chunk: { type: 'task_progress', taskSummary: event.summary },
       });
     }
   }
 
   public async syncState(): Promise<void> {
-    if (!this._view) {
-      return;
-    }
-
-    const session = await this.bridge.getCurrentSession().catch(() => null);
-    const sessions = await this.bridge.listSessions().catch(() => []);
-    const providers = await this.bridge.listProviderSummaries().catch(() => []);
-    const localWorkspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
-
-    if (
-      session &&
-      this._messages.length === 0 &&
-      typeof this.bridge.getSessionTranscript === 'function'
-    ) {
-      this._messages = await this.bridge.getSessionTranscript(session.id).catch(() => []);
-    }
-
-    const readiness = typeof this.bridge.getExecutionReadiness === 'function'
-      ? await this.bridge.getExecutionReadiness().catch(() => null)
-      : null;
-
-    const { runtimeOptions, selectedRuntime } = ChatWebviewViewProvider.buildRuntimeOptions(readiness);
-
-    let studioOptions: { id: string; name: string }[] | undefined;
-    if (sessions && sessions.length > 0) {
-      studioOptions = sessions.map((s) => ({
-        id: s.id,
-        name: s.title ? `${s.title} (${s.id})` : s.id,
-      }));
-    } else if (session) {
-      studioOptions = [{ id: session.id, name: session.goalSummary || session.id }];
-    }
-    const selectedStudioId = session?.id || (studioOptions && studioOptions[0]?.id) || '';
-
-    const wsVerification = WorkspaceVerification.verify(localWorkspace, readiness);
-    const workspaceStatus = wsVerification.status;
-    const isWorkspaceMatched = wsVerification.isAuthorized;
-    const workspaceMismatchReason = wsVerification.isAuthorized ? '' : wsVerification.reason;
-
-    const hasHealthyRuntime = runtimeOptions.some((r) => r.enabled);
-    const isTaskSubmitEnabled =
-      CapabilityMatrix.isCapabilityEnabled('task.submit') &&
-      isWorkspaceMatched &&
-      hasHealthyRuntime;
-
-    await this.postMessage({
-      type: 'syncState',
-      state: {
-        session,
-        sessions,
-        runtimes: runtimeOptions,
-        studios: studioOptions,
-        selectedRuntime,
-        selectedStudioId,
-        connectionState: this.bridge.connectionState,
-        isPreview: this.isPreview,
-        providers,
-        mode: this._activeMode,
-        composerDraft: this._composerDraft,
-        messages: this._messages,
-        attachments: this._attachments,
-        executionState: TaskExecutionStore.instance.getState(),
-        workspaceStatus,
-        isWorkspaceMatched,
-        workspaceMismatchReason,
-        isTaskSubmitEnabled,
-      },
-    });
+    await this.refresh();
   }
 
   public async postMessage(message: unknown): Promise<boolean> {
@@ -1216,8 +1053,7 @@ export class ChatWebviewViewProvider implements vscode.WebviewViewProvider, vsco
     }
     this._isDisposed = true;
     while (this._disposables.length) {
-      const d = this._disposables.pop();
-      d?.dispose();
+      this._disposables.pop()?.dispose();
     }
     this._view = undefined;
   }

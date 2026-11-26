@@ -144,6 +144,8 @@ describe('Tier 3: Real Compiled Rust agsd E2E Test Suite (AUTHENTICATED_RUST_IPC
   it('1. Daemon process startup', async () => {
     const isWindows = process.platform === 'win32';
     const spawnArgs = [
+      '--state-dir',
+      tempDir,
       '--runtime-info-path',
       runtimePath,
       '--admin-runtime-info-path',

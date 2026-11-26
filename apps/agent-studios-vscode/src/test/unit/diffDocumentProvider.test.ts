@@ -6,7 +6,7 @@ import {
   applyPatch,
   extractAffectedPaths,
 } from '../../bridge/DiffDocumentProvider';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { TimelineEvent } from '../../bridge/types';
 
 describe('DiffDocumentProvider Tests', () => {

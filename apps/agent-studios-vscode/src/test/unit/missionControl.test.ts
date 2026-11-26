@@ -1,18 +1,17 @@
 /**
- * Agent Studios — Mission Control Unit Tests
+ * Agent Studios â€” Mission Control Unit Tests
  * Milestone M14 Mission Control Workbench
  */
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { BridgeManager } from '../../bridge/BridgeManager';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { DiffReviewManager } from '../../cards/DiffReviewManager';
 import {
   MissionControlHtmlBuilder,
   MissionControlPanel,
   MissionControlProjection,
-  createPreviewMissionControlState,
   renderAttentionQueue,
   renderAgentInspector,
   renderKanbanBoard,
@@ -23,6 +22,7 @@ import {
   renderDiagnosticsView,
   MissionControlState,
 } from '../../mission-control';
+import { createPreviewMissionControlState } from '../fixtures/missionControlFixtures';
 
 describe('Mission Control Workbench Unit Tests', () => {
   const extensionUri = vscode.Uri.file('/test/extension');
@@ -53,13 +53,13 @@ describe('Mission Control Workbench Unit Tests', () => {
 
       // 8 persona fleet members
       assert.strictEqual(state.fleet.length, 8);
-      const architect = state.fleet.find((a) => a.name === 'Atlas');
+      const architect = state.fleet.find((a: { name: string }) => a.name === 'Atlas');
       assert.ok(architect);
       assert.strictEqual(architect.role, 'Principal Systems Architect');
 
       // 12 tasks across lifecycle states
       assert.strictEqual(state.tasks.length, 12);
-      const states = new Set(state.tasks.map((t) => t.state));
+      const states = new Set(state.tasks.map((t: { state: string }) => t.state));
       assert.ok(states.has('running'));
       assert.ok(states.has('succeeded'));
       assert.ok(states.has('failed'));
@@ -70,7 +70,9 @@ describe('Mission Control Workbench Unit Tests', () => {
 
       // Attention queue generated from failed tasks and approvals
       assert.ok(state.overview.attentionItems.length >= 2);
-      const errorItem = state.overview.attentionItems.find((a) => a.severity === 'error');
+      const errorItem = state.overview.attentionItems.find(
+        (a: { severity: string }) => a.severity === 'error'
+      );
       assert.ok(errorItem);
 
       // Provider summaries with secret scrubbing
@@ -94,14 +96,15 @@ describe('Mission Control Workbench Unit Tests', () => {
   });
 
   describe('MissionControlProjection', () => {
-    it('initializes with preview state when bridge is in preview mode', () => {
+    it('projects live tasks and approvals from active bridge after refresh', async () => {
       const projection = new MissionControlProjection(bridgeManager);
+      await projection.refresh();
       const state = projection.getState();
 
       assert.ok(state);
       assert.strictEqual(state.activeTab, 'overview');
-      assert.strictEqual(state.fleet.length, 8);
-      assert.strictEqual(state.tasks.length, 12);
+      assert.strictEqual(state.isPreview, false);
+      assert.ok(state.tasks.length >= 1);
       projection.dispose();
     });
 

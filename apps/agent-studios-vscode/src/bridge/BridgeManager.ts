@@ -6,7 +6,6 @@
 import * as vscode from 'vscode';
 import { AgentStudiosBridge } from './AgentStudiosBridge';
 import { DisconnectedBridge } from './DisconnectedBridge';
-import { FixtureBridge } from './FixtureBridge';
 import { DaemonConnectedBridge } from './DaemonConnectedBridge';
 import { EmbeddedDaemonSupervisor } from './EmbeddedDaemonSupervisor';
 import { CapabilityMatrix, CapabilityDescriptor, OperatorConfirmationManager } from './ipc/CapabilityMatrix';
@@ -14,7 +13,7 @@ import { SessionStateProjection } from '../state/SessionStateProjection';
 
 /**
  * Manages the active bridge instance and synchronizes with session state projection.
- * Supports switching between DisconnectedBridge, FixtureBridge, and daemon bridges.
+ * Supports switching between DisconnectedBridge and DaemonConnectedBridge (plus injected test bridges).
  */
 export class BridgeManager implements vscode.Disposable {
   private _bridge: AgentStudiosBridge;
@@ -27,13 +26,7 @@ export class BridgeManager implements vscode.Disposable {
   constructor(initialBridge?: AgentStudiosBridge) {
     this._disposables.push(this._onBridgeChanged);
 
-    if (initialBridge) {
-      this._bridge = initialBridge;
-    } else {
-      const config = vscode.workspace.getConfiguration('agentStudios');
-      const isPreview = config.get<boolean>('previewMode', false);
-      this._bridge = isPreview ? new FixtureBridge() : new DisconnectedBridge();
-    }
+    this._bridge = initialBridge ?? new DisconnectedBridge();
 
     this._stateProjection = new SessionStateProjection(this._bridge);
     this._disposables.push(this._stateProjection);
@@ -73,13 +66,6 @@ export class BridgeManager implements vscode.Disposable {
   }
 
   /**
-   * Whether currently running against the developer fixture bridge.
-   */
-  public get isPreviewMode(): boolean {
-    return this._bridge instanceof FixtureBridge;
-  }
-
-  /**
    * Whether currently connected to an active backend bridge.
    */
   public get isConnected(): boolean {
@@ -95,19 +81,10 @@ export class BridgeManager implements vscode.Disposable {
 
   /**
    * Truthfully evaluates if a capability is enabled on the current active bridge.
-   * In developer preview mode (FixtureBridge), mock interactive capabilities may be simulated.
-   * In connected daemon mode (DaemonConnectedBridge) or disconnected mode, capabilities strictly
-   * reflect verified production availability from CapabilityMatrix.
    */
   public isCapabilityEnabled(capabilityId: string): boolean {
     if (!this.isConnected) {
       return false;
-    }
-    if (this.isPreviewMode) {
-      // FixtureBridge simulates approval and cancellation flows locally
-      if (capabilityId === 'approval.resolve' || capabilityId === 'task.cancel') {
-        return true;
-      }
     }
     return CapabilityMatrix.isCapabilityEnabled(capabilityId);
   }
@@ -183,7 +160,8 @@ export class BridgeManager implements vscode.Disposable {
       console.error('[BridgeManager] Failed projection hydration after bridge switch:', err);
     });
 
-    if (oldBridge instanceof DisconnectedBridge || oldBridge instanceof FixtureBridge) {
+    // Dispose old bridge if it is disconnected
+    if (oldBridge instanceof DisconnectedBridge) {
       oldBridge.dispose();
     }
   }

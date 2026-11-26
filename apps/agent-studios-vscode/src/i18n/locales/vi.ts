@@ -1,6 +1,6 @@
 /**
  * Agent Studios — Canonical Vietnamese (vi-VN) UI Localization Catalog
- * Milestone M15.1: First-Class Bilingual English & Vietnamese Localization
+ * Milestone M15.1 + MM07: Bilingual English & Vietnamese Localization
  *
  * Uses natural, professional Vietnamese developer terminology in NFC Unicode.
  */
@@ -21,31 +21,62 @@ export const VI_VN_CATALOG: TranslationCatalog = {
   'mode.openMissionControl': 'Mở Trung tâm Điều hành',
 
   // Agent Mode Startup Screen & Welcome Surface
-  'startup.welcomeTitle': 'Không gian Kỹ thuật AI Ưu tiên Tác tử',
-  'startup.welcomeSubtitle': 'Thiết lập mục tiêu kỹ thuật, điều phối đa tác tử và kiểm duyệt Bản vá (Diff) đã xác thực.',
-  'startup.goalStartersHeading': 'Gợi ý Khởi tạo Mục tiêu',
-  'startup.starterAuditArchitecture': 'Kiểm tra kiến trúc kho mã và xác định các điểm nghẽn phụ thuộc',
-  'startup.starterDiagnoseTests': 'Chẩn đoán các kiểm thử tích hợp bị lỗi và đề xuất bản sửa tối giản',
+  'startup.welcomeTitle': 'Bạn muốn làm gì hôm nay?',
+  'startup.welcomeSubtitle': 'Đặt câu hỏi, lập kế hoạch thay đổi hoặc để Chế độ Tác tử chỉnh sửa và kiểm thử Không gian làm việc.',
+  'startup.goalStartersHeading': 'Gợi ý Bắt đầu',
+  'startup.starterAuditArchitecture': 'Giải thích cấu trúc Không gian làm việc và vị trí logic cốt lõi',
+  'startup.starterDiagnoseTests': 'Xem lại các thay đổi gần đây và tìm các trường hợp biên hoặc kiểm thử còn thiếu',
   'startup.starterImplementFeature': 'Triển khai tính năng với xác thực trên Nhánh công việc (Worktree) cô lập',
-  'startup.activeWorkspaceCard': 'Không gian làm việc Hiện tại',
-  'startup.noWorkspaceSelected': 'Chưa chọn thư mục Không gian làm việc',
-  'startup.sessionContinuityCard': 'Tiếp nối Phiên làm việc',
-  'startup.continuePreviousSession': 'Tiếp tục Phiên làm việc Trước ({sessionId})',
+  'startup.activeWorkspaceCard': 'Không gian làm việc',
+  'startup.noWorkspaceSelected': 'Chưa mở thư mục',
+  'startup.sessionContinuityCard': 'Lịch sử Trò chuyện',
+  'startup.continuePreviousSession': 'Tiếp tục Hội thoại Trước ({sessionId})',
 
-  // Composer & Context Controls
-  'composer.placeholder': 'Mô tả mục tiêu kỹ thuật hoặc tác vụ cho Điều phối viên...',
-  'composer.submitTask': 'Gửi Mục tiêu',
-  'composer.cancelRun': 'Hủy Lượt chạy Hiện tại',
+  // Header, Composer & Context Controls
+  'header.newChat': 'Hội thoại Mới',
+  'header.history': 'Lịch sử',
+  'header.settings': 'Cài đặt Nhà cung cấp & Mô hình',
+  'header.missionControl': 'Trung tâm Điều hành',
+  'composer.placeholder': 'Đặt câu hỏi, lập kế hoạch hoặc mô tả tác vụ…',
+  'composer.submitTask': 'Gửi',
+  'composer.cancelRun': 'Dừng',
   'composer.attachContext': 'Đính kèm Ngữ cảnh',
   'composer.workspaceSelectorLabel': 'Không gian làm việc',
-  'composer.workspaceSelectorTooltip': 'Chọn thư mục gốc Không gian làm việc ({workspace})',
+  'composer.workspaceSelectorTooltip': 'Thư mục gốc Không gian làm việc hiện tại ({workspace})',
   'composer.modelSelectorLabel': 'Mô hình',
-  'composer.modelSelectorTooltip': 'Chọn bộ điều hợp mô hình cho điều phối viên hoặc tác tử',
+  'composer.modelSelectorTooltip': 'Chọn mô hình AI đang sử dụng',
   'composer.runtimeSelectorLabel': 'Môi trường Thực thi',
-  'composer.runtimeSelectorTooltip': 'Chọn nền tảng môi trường thực thi tác tử',
-  'composer.sessionHistoryLabel': 'Lịch sử Phiên làm việc',
-  'composer.sessionHistoryEmpty': 'Chưa có phiên làm việc nào được lưu trong Không gian làm việc này',
-  'composer.sessionHistoryCount': 'Có {count} phiên làm việc đã lưu',
+  'composer.runtimeSelectorTooltip': 'Chọn môi trường thực thi',
+  'composer.reasoningSelectorLabel': 'Suy luận',
+  'composer.sessionHistoryLabel': 'Hội thoại Gần đây',
+  'composer.sessionHistoryEmpty': 'Chưa có hội thoại nào',
+  'composer.sessionHistoryCount': 'Có {count} hội thoại đã lưu',
+  'composer.modeAsk': 'Hỏi đáp',
+  'composer.modePlan': 'Lập kế hoạch',
+  'composer.modeAgent': 'Tác tử',
+
+  // 9 Connection States & Action CTAs
+  'status.notConfigured': 'Thêm nhà cung cấp',
+  'status.starting': 'Đang khởi động…',
+  'status.connecting': 'Đang kết nối…',
+  'status.ready': 'Sẵn sàng',
+  'status.running': 'Đang xử lý…',
+  'status.waitingForApproval': 'Cần phê duyệt',
+  'status.reconnecting': 'Đang kết nối lại…',
+  'status.error': 'Lỗi kết nối',
+  'status.disconnected': 'Ngoại tuyến',
+  'action.configureProvider': 'Cấu hình Nhà cung cấp',
+  'action.openFolder': 'Mở Thư mục',
+  'action.connect': 'Kết nối',
+  'action.retry': 'Thử Kết nối Lại',
+
+  // Providers & Models Settings
+  'settings.title': 'Nhà cung cấp & Mô hình',
+  'settings.subtitle': 'Cấu hình nhà cung cấp đám mây hoặc mô hình cục bộ. Khóa API được lưu an toàn trong VS Code SecretStorage.',
+  'settings.addProvider': 'Thêm Nhà cung cấp',
+  'settings.discoverModels': 'Tìm Mô hình',
+  'settings.testConnection': 'Kiểm tra Kết nối',
+  'settings.saveProvider': 'Lưu Nhà cung cấp',
 
   // Mission Control 9 Canonical Tabs
   'missionControl.title': 'Trung tâm Điều hành',
@@ -67,7 +98,7 @@ export const VI_VN_CATALOG: TranslationCatalog = {
   'missionControl.taskStatusSummary': 'Tác vụ {taskId}: {status}',
 
   // Approval Risk Tiers & 2PC Operator Confirmation Modal
-  'approvals.inboxTitle': 'Hộp thư Chờ Phê duyệt',
+  'approvals.inboxTitle': 'Yêu cầu Chờ Phê duyệt',
   'approvals.emptyInbox': 'Không có yêu cầu Phê duyệt nào đang chờ',
   'approvals.approveAction': 'Phê duyệt',
   'approvals.denyAction': 'Từ chối',
@@ -82,26 +113,23 @@ export const VI_VN_CATALOG: TranslationCatalog = {
   'approvals.modal.abortAction': 'Hủy bỏ & Từ chối Yêu cầu',
   'approvals.modal.expiredNotice': 'Mã xác thực Phê duyệt đã hết hạn; vui lòng yêu cầu mã xác nhận mới.',
 
-  // First-Run Onboarding Wizard
-  'onboarding.welcomeHeader': 'Chào mừng đến với Agent Studios',
-  'onboarding.daemonOfflineTitle': 'Tiến trình nền Agent Studios Đang Ngoại tuyến',
-  'onboarding.daemonOfflineBody': 'Không thể kết nối tới tiến trình nền tại {endpoint}. Hãy khởi động agsd hoặc bật Chế độ Xem trước Nhà phát triển.',
-  'onboarding.daemonConnectedTitle': 'Đã Kết nối tới Tiến trình nền Agent Studios',
-  'onboarding.daemonConnectedBody': 'Phiên làm việc {sessionId} đã được đồng bộ với trạng thái tiến trình nền chính thức.',
-  'onboarding.previewModeTitle': 'Chế độ Xem trước Nhà phát triển Đang Bật',
-  'onboarding.previewModeBody': 'Trải nghiệm giao diện với dữ liệu mẫu cố định mà không làm thay đổi tệp trong Không gian làm việc.',
-  'onboarding.enablePreviewButton': 'Bật Chế độ Xem trước',
-  'onboarding.connectDaemonButton': 'Kết nối Tiến trình nền',
+  // Clean First-Run Onboarding
+  'onboarding.welcomeHeader': 'Thiết lập Agent Studios',
+  'onboarding.daemonOfflineTitle': 'Động cơ Trợ lý Đang Ngoại tuyến',
+  'onboarding.daemonOfflineBody': 'Khởi động hoặc kết nối động cơ trợ lý tại {endpoint} để bắt đầu.',
+  'onboarding.daemonConnectedTitle': 'Đã Kết nối Động cơ Trợ lý',
+  'onboarding.daemonConnectedBody': 'Hội thoại {sessionId} đã sẵn sàng.',
+  'onboarding.connectDaemonButton': 'Kết nối',
   'onboarding.retryConnectionButton': 'Thử Kết nối Lại',
-  'onboarding.getStartedButton': 'Bắt đầu Sử dụng',
-  'onboarding.securityNoticeTitle': 'Thông báo Bảo mật',
-  'onboarding.securityNoticeBody': 'Thông tin xác thực nhà cung cấp được quản lý độc quyền bởi chuỗi khóa hệ điều hành và CLI; tuyệt đối không nhập khóa API trực tiếp trên giao diện.',
+  'onboarding.getStartedButton': 'Cấu hình Nhà cung cấp',
+  'onboarding.securityNoticeTitle': 'Lưu trữ Bảo mật',
+  'onboarding.securityNoticeBody': 'Khóa API được lưu mã hóa trong VS Code SecretStorage và đồng bộ an toàn tới tiến trình nền.',
 
   // Diagnostics & System Status Messages
-  'diagnostics.statusHealthy': 'Tiến trình nền & Kết nối IPC Hoạt động Tốt',
-  'diagnostics.statusDegraded': 'Kết nối Tiến trình nền Suy giảm — Đang Kết nối lại',
-  'diagnostics.statusDisconnected': 'Đã Ngắt kết nối khỏi Tiến trình nền Chính thức',
-  'diagnostics.protocolMismatch': 'Phát hiện phiên bản giao thức IPC không tương thích với tiến trình nền tại {endpoint}.',
+  'diagnostics.statusHealthy': 'Động cơ & Kết nối IPC Sẵn sàng',
+  'diagnostics.statusDegraded': 'Kết nối Suy giảm — Đang Kết nối lại',
+  'diagnostics.statusDisconnected': 'Ngoại tuyến',
+  'diagnostics.protocolMismatch': 'Phát hiện phiên bản giao thức IPC không tương thích tại {endpoint}.',
   'diagnostics.sqliteStateHealth': 'Kho trạng thái SQLite chính thức đã được xác thực tại {path}.',
   'diagnostics.artifactStoreHealth': 'Kho tạo phẩm định danh theo nội dung đã được xác thực ({count} tạo phẩm).',
 };

@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { registerApprovalCommands } from '../../commands/ApprovalCommands';
 import { SessionStateProjection } from '../../state/SessionStateProjection';
 import {

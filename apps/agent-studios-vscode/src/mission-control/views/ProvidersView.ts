@@ -36,11 +36,14 @@ export function renderProvidersView(state: MissionControlState): string {
           <h2>Model Providers & Telemetry</h2>
           <div class="view-subtitle text-secondary">Configured AI runtime backends and measured latency (${providers.length} providers)</div>
         </div>
+        <button class="btn btn-primary btn-sm" onclick="openSettings()">
+          <span class="codicon codicon-settings-gear"></span> Configure Providers
+        </button>
       </div>
 
       <div class="providers-security-banner">
         <span class="codicon codicon-lock text-info"></span>
-        <span><strong>Secret Scrubbing:</strong> API credentials and signing keys are scrubbed by the Extension Host boundary and are never transmitted to this webview.</span>
+        <span><strong>Secret Scrubbing &amp; Protection:</strong> API keys are stored encrypted in VS Code SecretStorage and synced securely to the daemon vault. Raw secrets are never transmitted to this webview.</span>
       </div>
 
       <div class="providers-table-container">

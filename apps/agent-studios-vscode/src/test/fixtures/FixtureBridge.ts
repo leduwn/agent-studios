@@ -5,7 +5,7 @@
 
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { AgentStudiosBridge } from './AgentStudiosBridge';
+import { AgentStudiosBridge } from '../../bridge/AgentStudiosBridge';
 import {
   ApprovalDecisionResult,
   ApprovalRequest,
@@ -23,15 +23,15 @@ import {
   TaskNode,
   TimelineEvent,
   ToolCallInfo,
-} from './types';
-import { SubmitTaskRequest, SubmitTaskResult } from './ipc/SubmitTaskAdapter';
-import { CancelTaskResult } from './ipc/ExecutionClient';
+} from '../../bridge/types';
+import { SubmitTaskRequest, SubmitTaskResult } from '../../bridge/ipc/SubmitTaskAdapter';
+import { CancelTaskResult } from '../../bridge/ipc/ExecutionClient';
 import {
   RustArtifactRecord,
   RustExecutionReadinessReport,
   RustRecoveryStatusReport,
-} from './ipc/RustIpcProtocolTypes';
-import { ReassembledArtifactContent, ReassembledTaskDiff } from './ipc/ArtifactClient';
+} from '../../bridge/ipc/RustIpcProtocolTypes';
+import { ReassembledArtifactContent, ReassembledTaskDiff } from '../../bridge/ipc/ArtifactClient';
 
 /**
  * Developer fixture / preview bridge providing deterministic mock session data

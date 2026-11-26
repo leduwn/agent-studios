@@ -1084,22 +1084,25 @@ async fn test_ipc_task_auto_execution_lifecycle_succeeds_with_runtime() {
     assert_eq!(task_ids.len(), 1);
     let task_id = task_ids[0];
 
-    // Wait for auto-execution lifecycle to transition the task to Succeeded
+    // Wait for auto-execution lifecycle to transition the task to Succeeded (allow up to 10s for git worktree on Windows)
     let cp_lock = server.control_plane();
     let mut succeeded = false;
-    for _ in 0..50 {
+    let mut last_state = None;
+    for _ in 0..500 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let cp = cp_lock.read().await;
-        if let Some(t) = cp.get_task(task_id)
-            && t.state == TaskState::Succeeded
-        {
-            succeeded = true;
-            break;
+        if let Some(t) = cp.get_task(task_id) {
+            last_state = Some(t.state);
+            if t.state == TaskState::Succeeded {
+                succeeded = true;
+                break;
+            }
         }
     }
     assert!(
         succeeded,
-        "Expected task to transition to Succeeded via auto-execution runtime bridge"
+        "Expected task to transition to Succeeded via auto-execution runtime bridge (last_state={:?})",
+        last_state
     );
 
     // Verify task via client query

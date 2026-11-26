@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as http from 'http';
 import * as vscode from 'vscode';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { HunkReviewManager } from '../../cards/HunkReviewManager';
 import { ConversationManager } from '../../chat/ConversationManager';
 import {

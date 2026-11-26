@@ -1,12 +1,12 @@
 /**
- * Agent Studios — TreeView Providers Unit Tests
+ * Agent Studios â€” TreeView Providers Unit Tests
  * Milestone M14-UI-00: Code-OSS Native Agents Workbench
  */
 
 import * as assert from 'assert';
 import { BridgeManager } from '../../bridge/BridgeManager';
 import { DisconnectedBridge } from '../../bridge/DisconnectedBridge';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { TaskNode } from '../../bridge/types';
 import { SessionStateProjection } from '../../state/SessionStateProjection';
 import {
@@ -63,16 +63,15 @@ describe('TreeView Providers Tests', () => {
   }
 
   describe('SessionTreeProvider', () => {
-    it('renders all required session items with fixture preview tags', async () => {
+    it('renders clean session items without fixture preview tags', async () => {
       const provider = new SessionTreeProvider(bridgeManager);
       const items = (await provider.getChildren()) as SessionTreeItem[];
 
-      assert.ok(items.length >= 7, `Expected at least 7 items, got ${items.length}`);
+      assert.ok(items.length >= 6, `Expected at least 6 items, got ${items.length}`);
 
-      // 1. Preview mode indicator
+      // Verify NO fixture preview tag is emitted
       const previewItem = items.find((i) => itemLabel(i).includes('[MOCK / PREVIEW FIXTURE]'));
-      assert.ok(previewItem, 'Should have preview mode item tagged [MOCK / PREVIEW FIXTURE]');
-      assert.strictEqual(previewItem?.contextValue, 'sessionPreviewMode');
+      assert.strictEqual(previewItem, undefined, 'Must not emit [MOCK / PREVIEW FIXTURE] item');
 
       // 2. Connection status
       const connItem = items.find((i) => itemLabel(i).startsWith('Status:'));

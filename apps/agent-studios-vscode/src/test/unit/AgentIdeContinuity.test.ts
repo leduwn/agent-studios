@@ -1,12 +1,12 @@
 /**
- * Agent Studios — Agent-First Experience, Shared Session Continuity & Mode Transitions Unit Tests
- * Milestone M15 UI-06: Agent Mode ↔ IDE Mode Integration Readiness
+ * Agent Studios â€” Agent-First Experience, Shared Session Continuity & Mode Transitions Unit Tests
+ * Milestone M15 UI-06: Agent Mode â†” IDE Mode Integration Readiness
  */
 
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { BridgeManager } from '../../bridge/BridgeManager';
-import { FixtureBridge } from '../../bridge/FixtureBridge';
+import { FixtureBridge } from '../fixtures/FixtureBridge';
 import { ChatHtmlBuilder } from '../../chat/ChatHtmlBuilder';
 import { ChatSecurityGuards } from '../../chat/ChatSecurityGuards';
 import { ChatWebviewViewProvider } from '../../chat/ChatWebviewViewProvider';
@@ -26,27 +26,31 @@ describe('Agent-First Experience & Mode Continuity Tests (M15 UI-06)', () => {
   });
 
   describe('Agent-First Welcome Surface Rendering', () => {
-    it('renders rich welcome surface with goal starters when conversation has no messages', () => {
+    it('renders clean empty state with starter prompts when connected and provider configured', () => {
       const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         messages: [],
         workspacePath: 'D:\\Projects\\agent-studios',
         connectionState: 'connected',
-        selectedRuntime: 'Native Daemon (agsd)',
+        providers: [
+          {
+            instanceId: 'openai-1',
+            providerType: 'openai',
+            displayName: 'OpenAI',
+            status: 'available',
+            models: [{ id: 'gpt-4.1', name: 'gpt-4.1', contextWindow: 128000 }],
+          },
+        ],
       });
 
-      // Verify welcome surface container and brand
-      assert.ok(html.includes('agent-welcome-surface'), 'Must contain agent-welcome-surface');
-      assert.ok(html.includes('Agent-First AI Engineering Workbench'), 'Must describe agent-first workbench');
-
-      // Verify Goal Formulation Starters
-      assert.ok(html.includes('Goal Formulation Starters'), 'Must contain Goal Formulation Starters heading');
-      assert.ok(html.includes('data-action="prompt-suggestion"'), 'Must contain prompt-suggestion action chips');
-      assert.ok(html.includes('Audit repository architecture'), 'Must contain audit starter prompt');
-      assert.ok(html.includes('Diagnose failing integration tests'), 'Must contain diagnose starter prompt');
+      assert.ok(html.includes('empty-state'), 'Must contain empty-state container');
+      assert.ok(html.includes('What would you like to work on?'), 'Must display clean welcome headline');
+      assert.ok(html.includes('data-starter='), 'Must include clickable starter prompts');
+      assert.ok(html.includes('Explain how this workspace is structured'));
+      assert.ok(!html.includes('Dynamic Provider Discovery pending M15.1'), 'Must not contain stale dev notices');
     });
 
-    it('renders active workspace status with Open in IDE and Mission Control actions', () => {
+    it('renders clean context strip with workspace basename and Mission Control link in header', () => {
       const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         messages: [],
@@ -54,111 +58,60 @@ describe('Agent-First Experience & Mode Continuity Tests (M15 UI-06)', () => {
         connectionState: 'connected',
       });
 
-      assert.ok(html.includes('Active Workspace'), 'Must contain Active Workspace card');
       assert.ok(html.includes('agent-studios'), 'Must display workspace name');
-      assert.ok(html.includes('data-action="open-in-ide"'), 'Must provide open-in-ide action button');
-      assert.ok(html.includes('data-action="open-mission-control"'), 'Must provide open-mission-control action button');
+      assert.ok(html.includes('id="openMissionControlBtn"'), 'Must provide Mission Control toggle button');
+      assert.ok(html.includes('id="openSettingsBtn"'), 'Must provide Settings button');
     });
 
-    it('renders honest model discovery notice and static adapter catalog', () => {
+    it('renders recent conversation history items cleanly without fixture jargon', () => {
       const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         messages: [],
-        connectionState: 'connected',
+        sessions: [
+          {
+            id: 'sess-persisted-42',
+            title: 'Previous work session',
+            status: 'idle',
+            updatedAt: Date.now() - 5000,
+          },
+        ],
       });
 
-      // Verification of honest model catalog notice
-      assert.ok(
-        html.includes('Dynamic Provider Discovery pending M15.1'),
-        'Must explicitly disclose pending dynamic discovery'
-      );
-      assert.ok(
-        html.includes('Static adapters: Claude Code, Internal Codex, Codex'),
-        'Must list real static adapters honestly without fabrication'
-      );
-    });
-
-    it('renders session continuity restore action when previous sessions exist', () => {
-      const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
-      const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
-        messages: [],
-        session: {
-          id: 'sess-persisted-42',
-          workspacePath: 'D:\\Projects\\agent-studios',
-          goalSummary: 'M15 UI-06 session continuity test',
-          status: 'idle',
-          activeAgentCount: 0,
-          totalAgentCount: 1,
-          completedTasksCount: 0,
-          totalTasksCount: 0,
-          startedAt: Date.now() - 5000,
-          elapsedMs: 5000,
-        },
-      });
-
-      assert.ok(html.includes('Session Continuity'), 'Must render Session Continuity card');
-      assert.ok(html.includes('data-action="continue-session"'), 'Must render continue-session action button');
-      assert.ok(html.includes('data-session-id="sess-persisted-42"'), 'Must carry session id in action button');
+      assert.ok(html.includes('Recent Conversations'));
+      assert.ok(html.includes('data-session-id="sess-persisted-42"'));
     });
   });
 
-  describe('Progressive Disclosure & 14 Conversation UX States', () => {
-    it('includes Mission Control progressive disclosure button in streaming console', () => {
-      const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
-      const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
-        messages: [],
-      });
+  describe('Progressive Disclosure & 9 Connection UX States', () => {
+    it('renders Mission Control link inside multi-agent card only when subtasks exist', () => {
+      const singleHtml = ChatHtmlBuilder.renderMessagesHtml(
+        [{ id: 'm1', role: 'assistant', content: 'Hello', timestamp: 1 }],
+        [],
+        []
+      );
+      assert.ok(!singleHtml.includes('multi-agent-card'), 'Single-agent chat must not show multi-agent card');
 
-      assert.ok(
-        html.includes('data-action="open-mission-control"'),
-        'Streaming console must link to Mission Control for detailed DAG'
+      const multiHtml = ChatHtmlBuilder.renderMessagesHtml(
+        [{ id: 'm1', role: 'assistant', content: 'Coordinating', timestamp: 1 }],
+        [
+          { id: 't1', runId: 'r1', title: 'Subtask 1', description: '', status: 'succeeded', dependencies: [], createdAt: 1, updatedAt: 2 },
+          { id: 't2', runId: 'r1', title: 'Subtask 2', description: '', status: 'running', dependencies: [], createdAt: 1, updatedAt: 2 },
+        ],
+        []
       );
-      assert.ok(
-        html.includes('Mission Control →'),
-        'Streaming console must include Mission Control button text'
-      );
+      assert.ok(multiHtml.includes('multi-agent-card'));
+      assert.ok(multiHtml.includes('data-ui-action="open_mission_control"'));
     });
 
-    it('defines styling classes for all 14 conversation UX states', () => {
+    it('defines styling classes for calm connection status tones', () => {
       const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
       const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
         messages: [],
       });
 
-      // Verify the 14 UX states styling coverage
-      const states = [
-        'connecting',
-        'connected',
-        'degraded',
-        'offline',
-        'session_restored',
-        'task_pending',
-        'awaiting_approval',
-        'interrupted',
-        'completed',
-        'verified_artifact',
-        'unverified_artifact',
-      ];
-
-      for (const st of states) {
-        assert.ok(html.includes(`.status-badge.status-${st}`), `CSS must define style for state: ${st}`);
+      for (const tone of ['ok', 'active', 'warn', 'error', 'neutral']) {
+        assert.ok(html.includes(`.tone-${tone}`), `CSS must define style for tone-${tone}`);
       }
-    });
-
-    it('embeds client-side progressive disclosure toggle in script', () => {
-      const mockWebview = new MockWebviewView(ChatWebviewViewProvider.viewType).webview;
-      const html = ChatHtmlBuilder.buildHtml(mockWebview as unknown as vscode.Webview, extensionUri, {
-        messages: [],
-      });
-
-      assert.ok(
-        html.includes("if (execState.status && execState.status !== 'idle')"),
-        'Must toggle streaming console display based on idle status'
-      );
-      assert.ok(
-        html.includes("executionStreamingPane.style.display = 'none'"),
-        'Must hide streaming console when idle'
-      );
     });
   });
 

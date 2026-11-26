@@ -1,6 +1,6 @@
 /**
  * Agent Studios — Canonical English (en-US) UI Localization Catalog
- * Milestone M15.1: First-Class Bilingual English & Vietnamese Localization
+ * Milestone M15.1 + MM07: Bilingual English & Vietnamese Localization
  */
 /* eslint-disable @typescript-eslint/naming-convention */
 
@@ -17,31 +17,62 @@ export const enCatalog = {
   'mode.openMissionControl': 'Open Mission Control Workbench',
 
   // Agent Mode Startup Screen & Welcome Surface
-  'startup.welcomeTitle': 'Agent-First AI Engineering Workbench',
-  'startup.welcomeSubtitle': 'Formulate engineering goals, orchestrate multi-agent runs, and review verified diffs.',
-  'startup.goalStartersHeading': 'Goal Formulation Starters',
-  'startup.starterAuditArchitecture': 'Audit repository architecture and identify coupling hotspots',
-  'startup.starterDiagnoseTests': 'Diagnose failing integration tests and propose minimal fixes',
+  'startup.welcomeTitle': 'What would you like to work on?',
+  'startup.welcomeSubtitle': 'Ask questions, plan changes, or let Agent mode edit and test your workspace.',
+  'startup.goalStartersHeading': 'Suggested Starters',
+  'startup.starterAuditArchitecture': 'Explain how this workspace is structured and where core logic lives',
+  'startup.starterDiagnoseTests': 'Review recent changes and identify edge cases or missing tests',
   'startup.starterImplementFeature': 'Implement feature with isolated worktree verification',
-  'startup.activeWorkspaceCard': 'Active Workspace',
-  'startup.noWorkspaceSelected': 'No workspace folder selected',
-  'startup.sessionContinuityCard': 'Session Continuity',
-  'startup.continuePreviousSession': 'Continue Previous Session ({sessionId})',
+  'startup.activeWorkspaceCard': 'Workspace',
+  'startup.noWorkspaceSelected': 'No folder open',
+  'startup.sessionContinuityCard': 'Conversation History',
+  'startup.continuePreviousSession': 'Continue Previous Conversation ({sessionId})',
 
-  // Composer & Context Controls
-  'composer.placeholder': 'Describe an engineering goal or task for the Coordinator...',
-  'composer.submitTask': 'Submit Goal',
-  'composer.cancelRun': 'Cancel Active Run',
+  // Header, Composer & Context Controls
+  'header.newChat': 'New Chat',
+  'header.history': 'History',
+  'header.settings': 'Providers & Models Settings',
+  'header.missionControl': 'Mission Control',
+  'composer.placeholder': 'Ask a question, plan changes, or describe a task…',
+  'composer.submitTask': 'Send',
+  'composer.cancelRun': 'Stop',
   'composer.attachContext': 'Attach Context',
   'composer.workspaceSelectorLabel': 'Workspace',
-  'composer.workspaceSelectorTooltip': 'Select active workspace root ({workspace})',
+  'composer.workspaceSelectorTooltip': 'Active workspace root ({workspace})',
   'composer.modelSelectorLabel': 'Model',
-  'composer.modelSelectorTooltip': 'Select coordinator or worker model adapter',
+  'composer.modelSelectorTooltip': 'Select active AI model',
   'composer.runtimeSelectorLabel': 'Runtime',
-  'composer.runtimeSelectorTooltip': 'Select execution runtime backend',
-  'composer.sessionHistoryLabel': 'Session History',
-  'composer.sessionHistoryEmpty': 'No previous sessions recorded in this workspace',
-  'composer.sessionHistoryCount': '{count} saved sessions available',
+  'composer.runtimeSelectorTooltip': 'Select execution runtime',
+  'composer.reasoningSelectorLabel': 'Reasoning',
+  'composer.sessionHistoryLabel': 'Recent Conversations',
+  'composer.sessionHistoryEmpty': 'No previous conversations yet',
+  'composer.sessionHistoryCount': '{count} saved conversations available',
+  'composer.modeAsk': 'Ask',
+  'composer.modePlan': 'Plan',
+  'composer.modeAgent': 'Agent',
+
+  // 9 Connection States & Action CTAs
+  'status.notConfigured': 'Add a provider',
+  'status.starting': 'Starting…',
+  'status.connecting': 'Connecting…',
+  'status.ready': 'Ready',
+  'status.running': 'Working…',
+  'status.waitingForApproval': 'Approval needed',
+  'status.reconnecting': 'Reconnecting…',
+  'status.error': 'Error',
+  'status.disconnected': 'Offline',
+  'action.configureProvider': 'Configure Provider',
+  'action.openFolder': 'Open Folder',
+  'action.connect': 'Connect',
+  'action.retry': 'Retry Connection',
+
+  // Providers & Models Settings
+  'settings.title': 'Providers & Models',
+  'settings.subtitle': 'Configure cloud or local model endpoints. API keys are saved in VS Code SecretStorage.',
+  'settings.addProvider': 'Add Provider',
+  'settings.discoverModels': 'Discover Models',
+  'settings.testConnection': 'Test Connection',
+  'settings.saveProvider': 'Save Provider',
 
   // Mission Control 9 Canonical Tabs
   'missionControl.title': 'Mission Control',
@@ -63,7 +94,7 @@ export const enCatalog = {
   'missionControl.taskStatusSummary': 'Task {taskId}: {status}',
 
   // Approval Risk Tiers & 2PC Operator Confirmation Modal
-  'approvals.inboxTitle': 'Pending Approvals Inbox',
+  'approvals.inboxTitle': 'Pending Approvals',
   'approvals.emptyInbox': 'No pending approval requests',
   'approvals.approveAction': 'Approve',
   'approvals.denyAction': 'Deny',
@@ -78,26 +109,23 @@ export const enCatalog = {
   'approvals.modal.abortAction': 'Abort & Deny Request',
   'approvals.modal.expiredNotice': 'Approval challenge expired; request a new confirmation token.',
 
-  // First-Run Onboarding Wizard
-  'onboarding.welcomeHeader': 'Welcome to Agent Studios',
-  'onboarding.daemonOfflineTitle': 'Agent Studios Daemon Offline',
-  'onboarding.daemonOfflineBody': 'Unable to reach authoritative daemon at {endpoint}. Start agsd or enable Developer Preview.',
-  'onboarding.daemonConnectedTitle': 'Connected to Agent Studios Daemon',
-  'onboarding.daemonConnectedBody': 'Active session {sessionId} is synchronized with authoritative daemon state.',
-  'onboarding.previewModeTitle': 'Developer Preview Mode Active',
-  'onboarding.previewModeBody': 'Exploring workbench UI with deterministic fixtures without modifying your workspace files.',
-  'onboarding.enablePreviewButton': 'Enable Developer Preview',
-  'onboarding.connectDaemonButton': 'Connect to Daemon',
+  // Clean First-Run Onboarding
+  'onboarding.welcomeHeader': 'Set up Agent Studios',
+  'onboarding.daemonOfflineTitle': 'Engine is offline',
+  'onboarding.daemonOfflineBody': 'Start or connect the local assistant engine at {endpoint} to begin.',
+  'onboarding.daemonConnectedTitle': 'Engine connected',
+  'onboarding.daemonConnectedBody': 'Active conversation {sessionId} is ready.',
+  'onboarding.connectDaemonButton': 'Connect',
   'onboarding.retryConnectionButton': 'Retry Connection',
-  'onboarding.getStartedButton': 'Get Started',
-  'onboarding.securityNoticeTitle': 'Security Notice',
-  'onboarding.securityNoticeBody': 'Provider credentials are managed exclusively by the OS keyring and daemon CLI; never enter raw API keys in webviews.',
+  'onboarding.getStartedButton': 'Configure Provider',
+  'onboarding.securityNoticeTitle': 'Secret Storage',
+  'onboarding.securityNoticeBody': 'API keys are stored encrypted in VS Code SecretStorage and synced securely to the daemon vault.',
 
   // Diagnostics & System Status Messages
-  'diagnostics.statusHealthy': 'Daemon & IPC Transport Healthy',
-  'diagnostics.statusDegraded': 'Daemon Connection Degraded — Reconnecting',
-  'diagnostics.statusDisconnected': 'Disconnected from Authoritative Daemon',
-  'diagnostics.protocolMismatch': 'Incompatible IPC protocol version detected with daemon at {endpoint}.',
+  'diagnostics.statusHealthy': 'Engine & IPC Transport Ready',
+  'diagnostics.statusDegraded': 'Connection Degraded — Reconnecting',
+  'diagnostics.statusDisconnected': 'Offline',
+  'diagnostics.protocolMismatch': 'Incompatible IPC protocol version detected at {endpoint}.',
   'diagnostics.sqliteStateHealth': 'Authoritative SQLite state store verified at {path}.',
   'diagnostics.artifactStoreHealth': 'Content-addressed artifact store verified ({count} artifacts).',
 } as const;

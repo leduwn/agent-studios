@@ -9,6 +9,7 @@
 import * as vscode from 'vscode';
 import type { AgentStudiosBridge } from '../bridge/AgentStudiosBridge';
 import type { ChatMessage, SessionStatus, SessionSummary } from '../bridge/types';
+import { isKnownTestOrFixtureRecord } from '../state/UserStateMigration';
 
 export interface CompactionState {
   compactedCount: number;
@@ -82,7 +83,7 @@ export class ConversationManager implements vscode.Disposable {
       []
     );
     for (const rec of saved) {
-      if (rec && rec.id) {
+      if (rec && rec.id && !isKnownTestOrFixtureRecord(rec)) {
         this.records.set(rec.id, {
           ...rec,
           compactionState: rec.compactionState ?? { compactedCount: 0 },
@@ -91,8 +92,8 @@ export class ConversationManager implements vscode.Disposable {
         });
       }
     }
-    if (saved.length > 0 && !this.activeConversationId) {
-      this.activeConversationId = saved[0].id;
+    if (this.records.size > 0 && !this.activeConversationId) {
+      this.activeConversationId = Array.from(this.records.keys())[0];
     }
   }
 

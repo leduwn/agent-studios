@@ -130,33 +130,8 @@ export class SessionTreeProvider
     }
 
     const items: SessionTreeItem[] = [];
-    const isPreview = this.checkIsPreview();
 
-    // 1. Preview mode indicator if active
-    if (isPreview) {
-      items.push(
-        new SessionTreeItem(
-          'Mode: [MOCK / PREVIEW FIXTURE]',
-          vscode.TreeItemCollapsibleState.None,
-          {
-            description: 'Preview Active',
-            tooltip:
-              'Developer fixture preview mode active. Displaying mock session data [MOCK / PREVIEW FIXTURE]. Click to toggle.',
-            icon: new vscode.ThemeIcon(
-              'beaker',
-              new vscode.ThemeColor('problemsWarningIcon.foreground')
-            ),
-            contextValue: 'sessionPreviewMode',
-            command: {
-              command: 'agent-studios.toggleFixturePreview',
-              title: 'Toggle Developer Fixture Preview',
-            },
-          }
-        )
-      );
-    }
-
-    // 2. Connection status
+    // 1. Connection status
     const connState: ConnectionState = this._bridge?.connectionState ?? 'disconnected';
     items.push(this.createConnectionItem(connState));
 
@@ -277,17 +252,6 @@ export class SessionTreeProvider
     );
 
     return items;
-  }
-
-  private checkIsPreview(): boolean {
-    if (this._bridgeManager?.isPreviewMode) {
-      return true;
-    }
-    if (this._projection?.session?.isPreview) {
-      return true;
-    }
-    const config = vscode.workspace.getConfiguration('agentStudios');
-    return config.get<boolean>('previewMode', false);
   }
 
   private createConnectionItem(state: ConnectionState): SessionTreeItem {

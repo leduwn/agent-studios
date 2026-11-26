@@ -7,11 +7,7 @@ import { MissionControlState } from '../models/types';
 import { renderAttentionQueue } from '../components/AttentionQueue';
 
 export function renderOverviewView(state: MissionControlState): string {
-  const { overview, activeStudio, connectionState, isPreview } = state;
-
-  const previewBadge = isPreview
-    ? `<span class="badge badge-preview" title="Developer Preview Fixture Data"><span class="codicon codicon-beaker"></span> PREVIEW FIXTURE</span>`
-    : '';
+  const { overview, activeStudio, connectionState } = state;
 
   const connBadgeClass =
     connectionState === 'connected'
@@ -27,7 +23,6 @@ export function renderOverviewView(state: MissionControlState): string {
         <div class="studio-info">
           <div class="studio-title-row">
             <h2>${escapeHtml(activeStudio?.name ?? 'No Active Session')}</h2>
-            ${previewBadge}
             <span class="status-pill ${connBadgeClass}">
               <span class="codicon codicon-${connectionState === 'connected' ? 'pass' : 'circle-filled'}"></span>
               ${connectionState.toUpperCase()}
