@@ -391,7 +391,7 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run build",
+    "vscode:prepublish": "npm run build:prod",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "build": "tsc -p ./",

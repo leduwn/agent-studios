@@ -1,7 +1,7 @@
 /**
  * Agent Studios — Clean First-Run Onboarding Helper
  * Guides new users calmly: Connect -> Add Provider -> Start Chatting.
- * Zero developer preview fixtures or low-level IPC jargon.
+ * Clean user-facing onboarding without mock state or IPC internals.
  */
 
 import { ConnectionState, ProviderSummary } from '../bridge/types';
